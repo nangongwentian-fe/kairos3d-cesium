@@ -1,5 +1,6 @@
 import type {
   Cartesian3,
+  Primitive,
   Polyline,
   PolylineCollection
 } from "cesium";
@@ -12,6 +13,8 @@ import type {
 } from "../style";
 
 export type PrimitiveOverlayType = "polyline";
+export type ResultRenderMode = "entity" | "primitive";
+export type ResultPrimitiveType = "polyline" | "polygon";
 
 export interface PrimitivePolylineOptions {
   id?: string;
@@ -51,3 +54,22 @@ export interface PrimitivePolylineSnapshot {
 
 export type PrimitiveOverlay = PrimitivePolylineOverlay;
 export type PrimitiveOverlaySnapshot = PrimitivePolylineSnapshot;
+
+export interface ResultPrimitivePolylineRuntime {
+  id: string;
+  type: "polyline";
+  positions: Cartesian3[];
+  polyline: Polyline;
+  collection: PolylineCollection;
+}
+
+export interface ResultPrimitivePolygonRuntime {
+  id: string;
+  type: "polygon";
+  positions: Cartesian3[];
+  primitive: Primitive;
+}
+
+export type ResultPrimitiveRuntime =
+  | ResultPrimitivePolylineRuntime
+  | ResultPrimitivePolygonRuntime;

@@ -2,7 +2,7 @@ import {
   Cartesian3,
   ConstantPositionProperty,
   ConstantProperty,
-  type Entity
+  Entity
 } from "cesium";
 import type { KairosMap } from "../core/map";
 import { Evented } from "../core/events";
@@ -25,6 +25,12 @@ import {
   createPolygonGraphics,
   serializeSymbolStyle
 } from "../style";
+import {
+  createResultPolygonPrimitives,
+  createResultPolylinePrimitive,
+  removeResultPrimitiveRuntimes,
+  resolveResultRenderMode
+} from "../primitives";
 import { clonePositions, minPositionCount, updateDrawResultGeometry } from "./geometry";
 import type {
   DrawEditEvent,
@@ -114,7 +120,8 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       createdAt: result.createdAt.toISOString(),
       updatedAt: result.updatedAt?.toISOString(),
       style: serializeSymbolStyle(result.style),
-      height: serializeHeightOptions(result.height)
+      height: serializeHeightOptions(result.height),
+      renderMode: result.renderMode === "primitive" ? "primitive" : undefined
     }));
   }
 
@@ -137,8 +144,19 @@ export class DrawManager extends Evented<DrawManagerEvents> {
 
     result.style = this.map.styles.resolveDrawStyle(result.type, style);
     result.updatedAt = new Date();
-    applySymbolStyleToEntities([result.entity], result.style);
-    applyHeightOptionsToEntity(result.entity, result.height);
+    if (result.renderMode === "primitive") {
+      removeResultPrimitiveRuntimes(this.map, result.primitives);
+      result.primitives = renderDrawPrimitives(
+        this.map,
+        result.type,
+        result.id,
+        result.positions,
+        result.style
+      );
+    } else {
+      applySymbolStyleToEntities([result.entity], result.style);
+      applyHeightOptionsToEntity(result.entity, result.height);
+    }
     return result;
   }
 
@@ -154,6 +172,16 @@ export class DrawManager extends Evented<DrawManagerEvents> {
 
     const previousPositions = clonePositions(result.positions);
     updateDrawResultGeometry(result, positions);
+    if (result.renderMode === "primitive") {
+      removeResultPrimitiveRuntimes(this.map, result.primitives);
+      result.primitives = renderDrawPrimitives(
+        this.map,
+        result.type,
+        result.id,
+        result.positions,
+        result.style ?? this.map.styles.resolveDrawStyle(result.type)
+      );
+    }
     const event = {
       result,
       previousPositions,
@@ -175,6 +203,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     }
 
     this.map.viewer.entities.remove(result.entity);
+    removeResultPrimitiveRuntimes(this.map, result.primitives);
     this.results.delete(id);
     this.emit("remove", result);
     this.map.tools.emitClear({ source: "draw", ids: [id] });
@@ -189,6 +218,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     const removed = [...this.results.values()];
     for (const result of removed) {
       this.map.viewer.entities.remove(result.entity);
+      removeResultPrimitiveRuntimes(this.map, result.primitives);
       this.emit("remove", result);
     }
 
@@ -216,7 +246,15 @@ export class DrawManager extends Evented<DrawManagerEvents> {
 
     const style = this.map.styles.resolveDrawStyle(snapshot.type, snapshot.style);
     const height = serializeHeightOptions(snapshot.height);
-    const entity = renderDrawEntity(this.map, snapshot.type, snapshot.id, positions, style, height);
+    const renderMode = resolveDrawRenderMode(snapshot.type, snapshot.renderMode);
+    const entity =
+      renderMode === "primitive"
+        ? new Entity({ id: snapshot.id })
+        : renderDrawEntity(this.map, snapshot.type, snapshot.id, positions, style, height);
+    const primitives =
+      renderMode === "primitive"
+        ? renderDrawPrimitives(this.map, snapshot.type, snapshot.id, positions, style)
+        : undefined;
     const result: DrawResult = {
       id: snapshot.id,
       type: snapshot.type,
@@ -227,7 +265,9 @@ export class DrawManager extends Evented<DrawManagerEvents> {
         ? parseSnapshotDate(snapshot.updatedAt, "Draw result updatedAt")
         : undefined,
       style,
-      height
+      height,
+      renderMode,
+      primitives
     };
 
     return this.addResult(result);
@@ -270,4 +310,42 @@ function renderDrawEntity(
   });
   applyHeightOptionsToEntity(entity, height);
   return entity;
+}
+
+export function renderDrawPrimitives(
+  map: KairosMap,
+  type: DrawResult["type"],
+  id: string,
+  positions: Cartesian3[],
+  style: ResultSymbolStyle
+) {
+  if (type === "polyline") {
+    return [
+      createResultPolylinePrimitive(map, {
+        id,
+        positions,
+        style: style.line
+      })
+    ];
+  }
+
+  if (type === "polygon") {
+    return createResultPolygonPrimitives(map, {
+      id,
+      positions,
+      style: style.polygon
+    });
+  }
+
+  return undefined;
+}
+
+function resolveDrawRenderMode(
+  type: DrawResult["type"],
+  renderMode: DrawResultSnapshot["renderMode"]
+) {
+  if (type === "point") {
+    return "entity";
+  }
+  return resolveResultRenderMode(renderMode);
 }

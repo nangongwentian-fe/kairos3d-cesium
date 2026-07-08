@@ -56,6 +56,8 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `PerformanceStats` | Runtime stats for entities, SDK results, and layer runtime objects. |
 | `PerformanceBudget` | Optional limits used by `map.performance.checkBudget()`. |
 | `PrimitiveOptimizationCandidate` | Entity-heavy result hint for later Primitive renderer work. |
+| `ResultRenderMode` | Result renderer mode: default `entity` or opt-in `primitive`. |
+| `ResultPrimitiveRuntime` | Runtime Primitive object metadata owned by SDK-managed results. |
 | `PrimitivePolylineOverlay` | SDK-managed polyline overlay backed by Cesium `PolylineCollection`. |
 | `PrimitiveOverlaySnapshot` | Data-only primitive overlay snapshot for manual save/load. |
 | `PickResult` | Normalized result shape for Entity, 3D Tiles, imagery, and primitive picking. |
@@ -324,12 +326,12 @@ map.tools.on("complete", (event) => {
   console.log(event.data);
 });
 
-await map.draw.polyline();
+await map.draw.polyline({ renderMode: "primitive" });
 const result = map.draw.list()[0];
 await map.draw.edit(result.id);
 map.draw.stopEdit();
 
-await map.analysis.measure.distance();
+await map.analysis.measure.distance({ renderMode: "primitive" });
 await map.analysis.visibility.pick();
 await map.analysis.profile.draw({ sampleCount: 128 });
 await map.analysis.clipping.drawPolygon({
@@ -387,7 +389,7 @@ const candidates = map.performance.recommendPrimitiveCandidates({
 });
 ```
 
-`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, layer runtime object counts, and budget warnings. Primitive candidates are hints for later renderer-specific work; current SDK-managed results still render through Cesium Entities unless their module explicitly adds a Primitive backend.
+`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, result Primitive runtime counts, layer runtime object counts, and budget warnings. Primitive candidates are hints for renderer-specific work; results already using `renderMode: "primitive"` are skipped by candidate recommendations.
 
 ## Primitive Overlays
 
@@ -408,6 +410,8 @@ map.primitives.load(primitiveState, { clear: true });
 
 Primitive overlays are SDK-managed runtime graphics. The first implementation uses Cesium `PolylineCollection` for polyline overlays. They are not draw results, do not participate in `map.results`, and are not automatically included in scene snapshots yet.
 
+Draw polyline/polygon and distance/area measurement results can opt into Primitive-backed rendering with `renderMode: "primitive"`. The result keeps the same public result shape and data-only snapshot fields, while the Cesium Primitive runtime objects are owned and cleaned up by `map.draw` or `map.analysis.measure`.
+
 ## First-Stage Modules
 
 | Module | Included now |
@@ -415,8 +419,8 @@ Primitive overlays are SDK-managed runtime graphics. The first implementation us
 | `core` | `KairosMap`, `Evented`, viewer creation and destroy lifecycle. |
 | `layers` | `xyz`, `wms`, `wmts`, `terrain`, `3dtiles`, `geojson`, `gltf`, state list, group show, ordering, opacity, config export/load. |
 | `tools` | One active interactive tool at a time, plus `start`, `stop`, `cancel`, `complete`, `point-add`, and `clear` events. |
-| `draw` | Point, polyline, polygon, result list/update/edit/remove/clear. |
-| `analysis` | Distance, area, height measurement, visibility/profile/terrain analysis, volume/flood/excavation estimates, clipping, result list/remove/clear, and result snapshot load/export. |
+| `draw` | Point, polyline, polygon, result list/update/edit/remove/clear, and opt-in Primitive rendering for polyline/polygon. |
+| `analysis` | Distance, area, height measurement, visibility/profile/terrain analysis, volume/flood/excavation estimates, clipping, result list/remove/clear, result snapshot load/export, and opt-in Primitive rendering for distance/area. |
 | `scene` | Camera capture/fly-to, camera bookmarks, scene snapshot export/load, and optional runtime result recovery. |
 | `picking` | Entity, GeoJSON, glTF, 3D Tiles, optional imagery feature picking, selection, and first-stage highlight. |
 | `style` | Shared color parsing, style defaults, presets, and SDK result symbol styles. |

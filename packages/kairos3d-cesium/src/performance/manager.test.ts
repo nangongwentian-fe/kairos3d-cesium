@@ -8,16 +8,27 @@ function createRecord(
   id: string,
   source: ResultSource,
   type: ResultRecord["type"],
-  entityCount: number
+  entityCount: number,
+  primitiveCount = 0
 ): ResultRecord {
   const entities = Array.from({ length: entityCount }, (_, index) =>
     new Entity({ id: `${id}-entity-${index}` })
   );
+  const primitives = Array.from({ length: primitiveCount }, (_, index) => ({
+    id: `${id}-primitive-${index}`
+  }));
   return {
     id,
     source,
     type,
-    result: { id, type, entities, createdAt: new Date("2026-07-08T00:00:00.000Z") } as never,
+    result: {
+      id,
+      type,
+      entities,
+      primitives,
+      renderMode: primitiveCount > 0 ? "primitive" : "entity",
+      createdAt: new Date("2026-07-08T00:00:00.000Z")
+    } as never,
     createdAt: new Date("2026-07-08T00:00:00.000Z")
   };
 }
@@ -69,12 +80,21 @@ describe("PerformanceManager", () => {
     expect(stats.entityCount).toBe(5);
     expect(stats.resultCount).toBe(2);
     expect(stats.resultEntityCount).toBe(4);
+    expect(stats.resultPrimitiveCount).toBe(0);
     expect(stats.unmanagedEntityCount).toBe(1);
     expect(stats.primitiveOverlayCount).toBe(1);
     expect(stats.layerCount).toBe(2);
     expect(stats.layerRuntimeObjectCount).toBe(3);
-    expect(stats.resultBySource.draw).toMatchObject({ count: 1, entityCount: 1 });
-    expect(stats.resultByType.contour).toMatchObject({ count: 1, entityCount: 3 });
+    expect(stats.resultBySource.draw).toMatchObject({
+      count: 1,
+      entityCount: 1,
+      primitiveCount: 0
+    });
+    expect(stats.resultByType.contour).toMatchObject({
+      count: 1,
+      entityCount: 3,
+      primitiveCount: 0
+    });
     expect(stats.layerByType.geojson).toMatchObject({ count: 1, runtimeObjectCount: 2 });
   });
 
@@ -116,7 +136,8 @@ describe("PerformanceManager", () => {
     const manager = new PerformanceManager(
       createMapMock([
         createRecord("contour-1", "terrain", "contour", 10),
-        createRecord("draw-1", "draw", "polyline", 2)
+        createRecord("draw-1", "draw", "polyline", 2),
+        createRecord("draw-primitive", "draw", "polyline", 12, 1)
       ])
     );
 

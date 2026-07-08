@@ -8,7 +8,7 @@ import type {
 } from "@kairos3d/cesium/performance";
 import type { CameraBookmark, CameraView, SceneSnapshot } from "@kairos3d/cesium/scene";
 import type { PickResult } from "@kairos3d/cesium/picking";
-import type { PrimitiveOverlay } from "@kairos3d/cesium/primitives";
+import type { PrimitiveOverlay, ResultRenderMode } from "@kairos3d/cesium/primitives";
 import type { ResultRecord } from "@kairos3d/cesium/results";
 import type { ResultSymbolStyle, SDKStyleDefaults } from "@kairos3d/cesium/style";
 import type { Tool } from "@kairos3d/cesium/tools";
@@ -234,6 +234,7 @@ export function App() {
   const [terrainResults, setTerrainResults] = useState<TerrainResult[]>([]);
   const [managedResults, setManagedResults] = useState<ResultRecord[]>([]);
   const [performanceStats, setPerformanceStats] = useState<PerformanceStats | null>(null);
+  const [resultRenderMode, setResultRenderMode] = useState<ResultRenderMode>("entity");
   const [primitiveCandidates, setPrimitiveCandidates] = useState<
     PrimitiveOptimizationCandidate[]
   >([]);
@@ -652,7 +653,7 @@ export function App() {
       return;
     }
 
-    activeToolRef.current = await map.draw.polyline();
+    activeToolRef.current = await map.draw.polyline({ renderMode: resultRenderMode });
     setStatus("绘制线：左键加点，右键或双击完成");
   }
 
@@ -662,7 +663,7 @@ export function App() {
       return;
     }
 
-    activeToolRef.current = await map.draw.polygon();
+    activeToolRef.current = await map.draw.polygon({ renderMode: resultRenderMode });
     setStatus("绘制面：左键加点，右键或双击完成");
   }
 
@@ -701,7 +702,9 @@ export function App() {
       return;
     }
 
-    activeToolRef.current = await map.analysis.measure.distance();
+    activeToolRef.current = await map.analysis.measure.distance({
+      renderMode: resultRenderMode
+    });
     setStatus("距离量测：左键加点，右键或双击完成");
   }
 
@@ -711,7 +714,9 @@ export function App() {
       return;
     }
 
-    activeToolRef.current = await map.analysis.measure.area();
+    activeToolRef.current = await map.analysis.measure.area({
+      renderMode: resultRenderMode
+    });
     setStatus("面积量测：左键加点，右键或双击完成");
   }
 
@@ -1259,6 +1264,18 @@ export function App() {
           )}
           {mode === "draw" && (
             <>
+              <button
+                className={resultRenderMode === "entity" ? "active" : "ghost"}
+                onClick={() => setResultRenderMode("entity")}
+              >
+                Entity
+              </button>
+              <button
+                className={resultRenderMode === "primitive" ? "active" : "ghost"}
+                onClick={() => setResultRenderMode("primitive")}
+              >
+                Primitive
+              </button>
               <button onClick={startPolylineDraw}>绘制线</button>
               <button onClick={startPolygonDraw}>绘制面</button>
               <button onClick={editLatestDraw}>编辑最新绘制</button>
@@ -1275,6 +1292,18 @@ export function App() {
           )}
           {mode === "measure" && (
             <>
+              <button
+                className={resultRenderMode === "entity" ? "active" : "ghost"}
+                onClick={() => setResultRenderMode("entity")}
+              >
+                Entity
+              </button>
+              <button
+                className={resultRenderMode === "primitive" ? "active" : "ghost"}
+                onClick={() => setResultRenderMode("primitive")}
+              >
+                Primitive
+              </button>
               <button onClick={startDistanceMeasure}>距离量测</button>
               <button onClick={startAreaMeasure}>面积量测</button>
               <button onClick={startHeightMeasure}>高度量测</button>
@@ -1313,6 +1342,7 @@ export function App() {
                         {performanceStats.resultEntityCount} / unmanaged{" "}
                         {performanceStats.unmanagedEntityCount}
                       </span>
+                      <span>result primitives {performanceStats.resultPrimitiveCount}</span>
                       <span>
                         results {performanceStats.resultCount} / layers{" "}
                         {performanceStats.layerCount} / runtime objects{" "}

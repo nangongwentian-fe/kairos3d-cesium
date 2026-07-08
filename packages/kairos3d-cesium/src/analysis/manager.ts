@@ -27,6 +27,14 @@ import {
   mergeSymbolStyles,
   serializeSymbolStyle
 } from "../style";
+import {
+  createResultPolygonPrimitives,
+  createResultPolylinePrimitive,
+  removeResultPrimitiveRuntimes,
+  resolveResultRenderMode,
+  type ResultPrimitiveRuntime,
+  type ResultRenderMode
+} from "../primitives";
 import { ClippingManager } from "./clipping";
 import { TerrainAnalysisManager } from "./terrain";
 import {
@@ -159,7 +167,8 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
       createdAt: result.createdAt.toISOString(),
       style: serializeSymbolStyle(result.style),
       height: serializeHeightOptions(result.height),
-      mode: result.mode
+      mode: result.mode,
+      renderMode: result.renderMode === "primitive" ? "primitive" : undefined
     }));
   }
 
@@ -180,15 +189,18 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
       throw new Error(`Measure result "${id}" does not exist.`);
     }
 
-    removeEntities(this.map, result.entities);
+    removeMeasureRuntime(this.map, result);
     result.style = this.map.styles.resolveMeasureStyle(result.type, style);
-    result.entities = renderMeasureEntities(
+    const rendered = renderMeasureResult(
       this.map,
       result,
       result.positions,
       result.style,
-      result.height
+      result.height,
+      result.renderMode
     );
+    result.entities = rendered.entities;
+    result.primitives = rendered.primitives;
     result.entityIds = result.entities.map((entity) => entity.id);
     return result;
   }
@@ -199,9 +211,7 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
       return false;
     }
 
-    for (const entity of result.entities) {
-      this.map.viewer.entities.remove(entity);
-    }
+    removeMeasureRuntime(this.map, result);
     this.results.delete(id);
     this.emit("remove", result);
     this.map.tools.emitClear({ source: "measure", ids: [id] });
@@ -211,9 +221,7 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   clear(): void {
     const removed = [...this.results.values()];
     for (const result of removed) {
-      for (const entity of result.entities) {
-        this.map.viewer.entities.remove(entity);
-      }
+      removeMeasureRuntime(this.map, result);
       this.emit("remove", result);
     }
 
@@ -240,7 +248,15 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
 
     const style = this.map.styles.resolveMeasureStyle(snapshot.type, snapshot.style);
     const height = serializeHeightOptions(snapshot.height);
-    const entities = renderMeasureEntities(this.map, snapshot, positions, style, height);
+    const renderMode = resolveMeasureRenderMode(snapshot.type, snapshot.renderMode);
+    const rendered = renderMeasureResult(
+      this.map,
+      snapshot,
+      positions,
+      style,
+      height,
+      renderMode
+    );
     return this.addResult({
       id: snapshot.id,
       type: snapshot.type,
@@ -248,12 +264,14 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
       value: snapshot.value,
       unit: snapshot.unit,
       label: snapshot.label,
-      entities,
-      entityIds: entities.map((entity) => entity.id),
+      entities: rendered.entities,
+      entityIds: rendered.entities.map((entity) => entity.id),
       createdAt: parseSnapshotDate(snapshot.createdAt, "Measure result createdAt"),
       style,
       height,
-      mode: snapshot.mode
+      mode: snapshot.mode,
+      renderMode,
+      primitives: rendered.primitives
     });
   }
 }
@@ -643,7 +661,7 @@ function renderVisibilityEntities(
   return entities;
 }
 
-type MeasureSnapshotLike = Pick<MeasureResultSnapshot, "type" | "value" | "unit" | "label">;
+type MeasureSnapshotLike = Pick<MeasureResultSnapshot, "id" | "type" | "value" | "unit" | "label">;
 
 function renderMeasureEntities(
   map: KairosMap,
@@ -667,6 +685,69 @@ function renderMeasureEntities(
   }
 
   return entities;
+}
+
+function renderMeasureResult(
+  map: KairosMap,
+  snapshot: MeasureSnapshotLike,
+  positions: Cartesian3[],
+  style: ResultSymbolStyle,
+  height: MeasureResult["height"] | undefined,
+  renderMode: ResultRenderMode | undefined
+): { entities: Entity[]; primitives?: ResultPrimitiveRuntime[] } {
+  const resolvedRenderMode = resolveMeasureRenderMode(snapshot.type, renderMode);
+  if (resolvedRenderMode !== "primitive") {
+    return {
+      entities: renderMeasureEntities(map, snapshot, positions, style, height)
+    };
+  }
+
+  const primitives = renderMeasurePrimitives(map, snapshot.type, snapshot.id, positions, style);
+  const entities: Entity[] = [];
+  const label = snapshot.label ?? `${snapshot.value} ${snapshot.unit}`;
+  const labelPosition = positions[positions.length - 1];
+  if (labelPosition) {
+    entities.push(addLabel(map, labelPosition, label, style.label));
+  }
+  return { entities, primitives };
+}
+
+export function renderMeasurePrimitives(
+  map: KairosMap,
+  type: MeasureResult["type"],
+  id: string,
+  positions: Cartesian3[],
+  style: ResultSymbolStyle
+): ResultPrimitiveRuntime[] | undefined {
+  if (type === "distance") {
+    return [
+      createResultPolylinePrimitive(map, {
+        id,
+        positions,
+        style: style.line
+      })
+    ];
+  }
+
+  if (type === "area") {
+    return createResultPolygonPrimitives(map, {
+      id,
+      positions,
+      style: style.polygon
+    });
+  }
+
+  return undefined;
+}
+
+export function resolveMeasureRenderMode(
+  type: MeasureResult["type"],
+  renderMode?: ResultRenderMode
+): ResultRenderMode {
+  if (type === "height") {
+    return "entity";
+  }
+  return resolveResultRenderMode(renderMode);
 }
 
 function validateMeasurePositions(type: MeasureResult["type"], positions: Cartesian3[]): void {
@@ -757,6 +838,11 @@ function removeEntities(map: KairosMap, entities: Entity[]): void {
   for (const entity of entities) {
     map.viewer.entities.remove(entity);
   }
+}
+
+function removeMeasureRuntime(map: KairosMap, result: MeasureResult): void {
+  removeEntities(map, result.entities);
+  removeResultPrimitiveRuntimes(map, result.primitives);
 }
 
 function clonePositions(positions: Cartesian3[]): Cartesian3[] {

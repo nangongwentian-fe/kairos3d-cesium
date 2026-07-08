@@ -19,8 +19,8 @@ This page records what the current SDK can claim as the first complete version a
 | `core` | `createMap`, `createViewer`, destroy lifecycle, shared events, and manager composition. |
 | `layers` | Config-driven XYZ/WMS/WMTS/terrain/3D Tiles/GeoJSON/glTF adapters, state, groups, order, opacity, runtime objects, ownership checks, fly-to, export, and load. |
 | `tools` | Exclusive interactive tool lifecycle with shared start, stop, cancel, complete, point-add, and clear events. |
-| `draw` | Point/polyline/polygon drawing, result list/get/remove/clear, style updates, data-only snapshots, and first-stage vertex editing. |
-| `analysis.measure` | Distance, area, and height measurement with stable result records and cleanup. |
+| `draw` | Point/polyline/polygon drawing, result list/get/remove/clear, style updates, data-only snapshots, first-stage vertex editing, and opt-in Primitive rendering for polyline/polygon. |
+| `analysis.measure` | Distance, area, and height measurement with stable result records and cleanup, plus opt-in Primitive rendering for distance/area. |
 | `analysis.visibility` | Programmatic and picked two-point visibility results with managed entities. |
 | `analysis.profile` | Polyline profile sampling, distance chain, min/max height, managed entities, and snapshots. |
 | `analysis.clipping` | Plane and polygon clipping for globe, managed layers, and compatible picked targets. |
@@ -47,7 +47,7 @@ This page records what the current SDK can claim as the first complete version a
 | --- | --- |
 | Terrain analysis | Volume, flooding, and excavation are sampled-cell estimates, not survey-grade solid modeling or real terrain deformation. |
 | Surface area | The type exists as a boundary; true triangulated terrain-surface area is not implemented yet. |
-| Primitive rendering | Primitive overlays exist, but draw and analysis results still render through their Entity-owned managers unless a module later adds a Primitive backend. |
+| Primitive rendering | Entity rendering is still the default. Draw polyline/polygon and distance/area measurement can opt into Primitive-backed rendering with `renderMode: "primitive"`. |
 | Scene snapshots | Primitive overlays have their own snapshot API and are not included in `sceneState.toJSON({ includeResults: true })` yet. |
 | UI widgets | Popup panels, property tables, chart components, and Mars3D-style widgets belong in apps, not the SDK core. |
 | Persistence | The SDK returns serializable data; apps decide whether to use files, localStorage, or a backend. |

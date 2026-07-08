@@ -7,7 +7,7 @@ This page records the current development order after the first complete SDK ver
 | Priority | Work | Why |
 | --- | --- | --- |
 | P0 | CI and verification guardrails | Keep the pushed first version reproducible before deeper changes. |
-| P0 | Primitive renderer integration | Move high-volume draw and analysis render paths beyond Entity-only rendering. |
+| P0 | Primitive renderer integration | First stage complete for draw polyline/polygon and distance/area measurement; continue expanding only where it pays off. |
 | P0 | Runtime snapshot expansion | Make Primitive overlays participate in scene snapshots when requested. |
 | P1 | Analysis precision upgrades | Improve terrain area/volume and visibility correctness before adding more feature types. |
 | P1 | Interactive clipping and editing polish | Make clipping and existing result workflows more useful in real projects. |
@@ -30,7 +30,7 @@ The next phase should prioritize SDK capability foundations over package release
 | Order | Milestone | Scope |
 | --- | --- | --- |
 | 1 | CI verification | Add GitHub Actions for `pnpm install`, `pnpm typecheck`, `pnpm test`, `pnpm lint`, and `pnpm build`. |
-| 2 | Primitive renderer backend | Add opt-in Primitive-backed rendering for high-volume polyline/polygon result paths, starting with draw and measurement results. |
+| 2 | Primitive renderer backend | First stage complete: draw polyline/polygon and distance/area measurement support opt-in `renderMode: "primitive"`. |
 | 3 | Primitive scene snapshots | Include `map.primitives` in scene snapshots behind an explicit option, while keeping snapshots data-only. |
 | 4 | Terrain precision pass | Implement real terrain-surface area triangulation and improve volume/flood/excavation precision modes. |
 | 5 | Visibility occlusion pass | Add 3D Tiles/model-aware visibility checks where Cesium runtime APIs can support them. |

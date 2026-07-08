@@ -1,4 +1,5 @@
 import type { ResultSource, SDKManagedResult } from "../results";
+import type { ResultRenderMode } from "../primitives";
 
 export interface PerformanceBudget {
   maxEntities?: number;
@@ -25,12 +26,15 @@ export interface ResultPerformanceRecord {
   source: ResultSource;
   type: SDKManagedResult["type"];
   entityCount: number;
+  primitiveCount: number;
+  renderMode?: ResultRenderMode;
   createdAt: Date;
 }
 
 export interface ResultPerformanceSummary {
   count: number;
   entityCount: number;
+  primitiveCount: number;
 }
 
 export interface LayerPerformanceRecord {
@@ -54,6 +58,7 @@ export interface PerformanceStats {
   entityCount: number;
   resultCount: number;
   resultEntityCount: number;
+  resultPrimitiveCount: number;
   unmanagedEntityCount: number;
   primitiveOverlayCount: number;
   layerCount: number;

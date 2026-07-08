@@ -17,6 +17,10 @@ import type {
 } from "../height";
 import type { PickResult } from "../picking";
 import type {
+  ResultPrimitiveRuntime,
+  ResultRenderMode
+} from "../primitives";
+import type {
   ResultSymbolStyle,
   SerializableResultSymbolStyle
 } from "../style";
@@ -40,6 +44,7 @@ export interface MeasureToolOptions {
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   mode?: DistanceMeasureMode | AreaMeasureMode;
+  renderMode?: ResultRenderMode;
 }
 
 export interface VisibilityComputeOptions {
@@ -135,6 +140,8 @@ export interface MeasureResult {
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   mode?: DistanceMeasureMode | AreaMeasureMode;
+  renderMode?: ResultRenderMode;
+  primitives?: ResultPrimitiveRuntime[];
 }
 
 export interface MeasureResultSnapshot {
@@ -148,6 +155,7 @@ export interface MeasureResultSnapshot {
   style?: SerializableResultSymbolStyle;
   height?: HeightOptions;
   mode?: DistanceMeasureMode | AreaMeasureMode;
+  renderMode?: ResultRenderMode;
 }
 
 export interface VisibilityResult {

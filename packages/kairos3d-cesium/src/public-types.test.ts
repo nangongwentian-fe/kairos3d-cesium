@@ -124,6 +124,9 @@ import type {
   PrimitiveOverlay,
   PrimitiveOverlaySnapshot,
   PrimitiveOverlayType,
+  ResultPrimitiveRuntime,
+  ResultPrimitiveType,
+  ResultRenderMode,
   PrimitivePolylineOptions,
   PrimitivePolylineOverlay,
   PrimitivePolylineSnapshot
@@ -148,6 +151,8 @@ describe("public SDK types", () => {
       updatedAt?: Date;
       style?: ResultSymbolStyle;
       height?: HeightOptions;
+      renderMode?: ResultRenderMode;
+      primitives?: ResultPrimitiveRuntime[];
     }>();
 
     expectTypeOf<MeasureResult>().toMatchTypeOf<{
@@ -159,6 +164,8 @@ describe("public SDK types", () => {
       style?: ResultSymbolStyle;
       height?: HeightOptions;
       mode?: DistanceMeasureMode | AreaMeasureMode;
+      renderMode?: ResultRenderMode;
+      primitives?: ResultPrimitiveRuntime[];
     }>();
 
     expectTypeOf<VisibilityResult>().toMatchTypeOf<{
@@ -355,6 +362,7 @@ describe("public SDK types", () => {
       updatedAt?: string;
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
+      renderMode?: ResultRenderMode;
     }>();
     expectTypeOf<MeasureResultSnapshot>().toMatchTypeOf<{
       id: string;
@@ -366,6 +374,7 @@ describe("public SDK types", () => {
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
       mode?: DistanceMeasureMode | AreaMeasureMode;
+      renderMode?: ResultRenderMode;
     }>();
     expectTypeOf<VisibilityResultSnapshot>().toMatchTypeOf<{
       id: string;
@@ -610,6 +619,8 @@ describe("public SDK types", () => {
       source: ResultSource;
       type: SDKManagedResult["type"];
       entityCount: number;
+      primitiveCount: number;
+      renderMode?: ResultRenderMode;
       createdAt: Date;
     }>();
     expectTypeOf<LayerPerformanceRecord>().toMatchTypeOf<{
@@ -622,6 +633,7 @@ describe("public SDK types", () => {
       entityCount: number;
       resultCount: number;
       resultEntityCount: number;
+      resultPrimitiveCount: number;
       unmanagedEntityCount: number;
       primitiveOverlayCount: number;
       layerCount: number;
@@ -654,6 +666,8 @@ describe("public SDK types", () => {
 
   it("exposes primitive overlay types", () => {
     expectTypeOf<PrimitiveOverlayType>().toEqualTypeOf<"polyline">();
+    expectTypeOf<ResultRenderMode>().toEqualTypeOf<"entity" | "primitive">();
+    expectTypeOf<ResultPrimitiveType>().toEqualTypeOf<"polyline" | "polygon">();
     expectTypeOf<PrimitivePolylineOptions>().toMatchTypeOf<{
       id?: string;
       positions: Cartesian3[];
@@ -684,6 +698,18 @@ describe("public SDK types", () => {
     }>();
     expectTypeOf<PrimitiveOverlay>().toEqualTypeOf<PrimitivePolylineOverlay>();
     expectTypeOf<PrimitiveOverlaySnapshot>().toEqualTypeOf<PrimitivePolylineSnapshot>();
+    expectTypeOf<ResultPrimitiveRuntime>().toMatchTypeOf<
+      | {
+          id: string;
+          type: "polyline";
+          positions: Cartesian3[];
+        }
+      | {
+          id: string;
+          type: "polygon";
+          positions: Cartesian3[];
+        }
+    >();
   });
 
   it("exposes map-level primitive overlay manager", () => {

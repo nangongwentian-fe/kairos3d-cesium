@@ -146,7 +146,7 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | --- | --- |
 | Runtime stats | Counts viewer entities, SDK-managed result entities, layer runtime objects, and result records. |
 | Budgets | Budgets produce warnings only; they do not mutate layers, results, or viewer settings. |
-| Primitive candidates | Candidate hints identify entity-heavy results, but no module is automatically converted to Primitive rendering. |
+| Primitive candidates | Candidate hints identify entity-heavy Entity results. Results already using `renderMode: "primitive"` are skipped. |
 | Renderer ownership | Entity cleanup remains owned by draw and analysis managers; performance stats do not own runtime objects. |
 
 ## Primitive Overlay Boundaries
@@ -156,7 +156,8 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Polyline overlay | Uses Cesium `PolylineCollection` for SDK-managed runtime polylines. |
 | Snapshot | `map.primitives.toJSON/load()` stores positions, color, width, show, loop, metadata, and timestamps only. |
 | Scene integration | Primitive overlays are separate runtime graphics and are not included in scene snapshots yet. |
-| Draw integration | Draw and analysis modules still own their Entity renderers; primitive overlays do not replace draw results automatically. |
+| Draw integration | Draw polyline/polygon and distance/area measurement can opt into Primitive-backed result rendering with `renderMode: "primitive"`. |
+| Ownership | Primitive-backed result runtimes are owned by `map.draw` or `map.analysis.measure`, not by `map.primitives`. |
 
 ## Reference Policy
 

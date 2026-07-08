@@ -18,8 +18,14 @@ import {
   createPointGraphics,
   createPolygonGraphics
 } from "../style";
+import {
+  resolveResultRenderMode,
+  type ResultPrimitiveRuntime,
+  type ResultRenderMode
+} from "../primitives";
 import { InteractiveTool } from "../tools/interactive-tool";
 import { registerTool } from "../tools/registry";
+import { renderDrawPrimitives } from "./manager";
 import type { DrawResult, DrawStyle, DrawToolOptions, DrawType } from "./types";
 
 export class DrawPointTool extends InteractiveTool<DrawToolOptions> {
@@ -150,9 +156,22 @@ export class DrawPolylineTool extends InteractiveTool<DrawToolOptions> {
     this.completed = true;
     const height = serializeHeightOptions(this.options.height);
     const positions = await resolveDrawPositions(this.map, this.positions, height);
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, "polyline", this.options.style);
+    const renderMode = resolveResultRenderMode(this.options.renderMode);
     this.freezePolyline(this.entity, positions);
+    const entity = this.resolveResultEntity(renderMode);
     const result = this.map.draw.addResult(
-      createDrawResult("polyline", this.entity, positions, this.resolvedStyle, height)
+      createDrawResult(
+        "polyline",
+        entity,
+        positions,
+        style,
+        height,
+        renderMode,
+        renderMode === "primitive"
+          ? renderDrawPrimitives(this.map, "polyline", entity.id, positions, style)
+          : undefined
+      )
     );
     this.emit("draw-created", result);
     this.notifyComplete(result);
@@ -175,6 +194,20 @@ export class DrawPolylineTool extends InteractiveTool<DrawToolOptions> {
     if (entity.polyline) {
       entity.polyline.positions = new ConstantProperty(positions);
     }
+  }
+
+  private resolveResultEntity(renderMode: ResultRenderMode): Entity {
+    if (!this.entity) {
+      throw new Error("Draw polyline result entity is not available.");
+    }
+
+    if (renderMode === "entity") {
+      return this.entity;
+    }
+
+    const id = this.entity.id;
+    this.viewer.entities.remove(this.entity);
+    return new Entity({ id });
   }
 
   private discardDraft(): void {
@@ -272,9 +305,22 @@ export class DrawPolygonTool extends InteractiveTool<DrawToolOptions> {
     this.completed = true;
     const height = serializeHeightOptions(this.options.height);
     const positions = await resolveDrawPositions(this.map, this.positions, height);
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, "polygon", this.options.style);
+    const renderMode = resolveResultRenderMode(this.options.renderMode);
     this.freezePolygon(this.entity, positions);
+    const entity = this.resolveResultEntity(renderMode);
     const result = this.map.draw.addResult(
-      createDrawResult("polygon", this.entity, positions, this.resolvedStyle, height)
+      createDrawResult(
+        "polygon",
+        entity,
+        positions,
+        style,
+        height,
+        renderMode,
+        renderMode === "primitive"
+          ? renderDrawPrimitives(this.map, "polygon", entity.id, positions, style)
+          : undefined
+      )
     );
     this.emit("draw-created", result);
     this.notifyComplete(result);
@@ -297,6 +343,20 @@ export class DrawPolygonTool extends InteractiveTool<DrawToolOptions> {
     if (entity.polygon) {
       entity.polygon.hierarchy = new ConstantProperty(positions);
     }
+  }
+
+  private resolveResultEntity(renderMode: ResultRenderMode): Entity {
+    if (!this.entity) {
+      throw new Error("Draw polygon result entity is not available.");
+    }
+
+    if (renderMode === "entity") {
+      return this.entity;
+    }
+
+    const id = this.entity.id;
+    this.viewer.entities.remove(this.entity);
+    return new Entity({ id });
   }
 
   private discardDraft(): void {
@@ -326,7 +386,9 @@ function createDrawResult(
   entity: Entity,
   positions: Cartesian3[],
   style?: ResultSymbolStyle,
-  height?: DrawResult["height"]
+  height?: DrawResult["height"],
+  renderMode?: ResultRenderMode,
+  primitives?: ResultPrimitiveRuntime[]
 ): DrawResult {
   return {
     id: entity.id,
@@ -335,7 +397,9 @@ function createDrawResult(
     positions,
     createdAt: new Date(),
     style,
-    height
+    height,
+    renderMode,
+    primitives
   };
 }
 

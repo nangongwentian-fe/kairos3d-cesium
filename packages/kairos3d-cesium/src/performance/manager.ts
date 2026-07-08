@@ -1,5 +1,6 @@
 import type { Entity } from "cesium";
 import type { KairosMap } from "../core";
+import { countResultPrimitiveRuntimes } from "../primitives";
 import type {
   ResultPerformanceRecord,
   ResultPerformanceSummary
@@ -36,6 +37,8 @@ export class PerformanceManager {
       source: record.source,
       type: record.type,
       entityCount: countResultEntities(record.result),
+      primitiveCount: countResultPrimitiveRuntimes(record.result),
+      renderMode: getResultRenderMode(record.result),
       createdAt: record.createdAt
     }));
     const layers = this.map.layers.listState().map((layer) => ({
@@ -45,6 +48,10 @@ export class PerformanceManager {
       runtimeObjectCount: this.map.layers.getRuntimeObjects(layer.id).length
     }));
     const resultEntityCount = results.reduce((sum, result) => sum + result.entityCount, 0);
+    const resultPrimitiveCount = results.reduce(
+      (sum, result) => sum + result.primitiveCount,
+      0
+    );
     const layerRuntimeObjectCount = layers.reduce(
       (sum, layer) => sum + layer.runtimeObjectCount,
       0
@@ -54,6 +61,7 @@ export class PerformanceManager {
       entityCount: countViewerEntities(this.map),
       resultCount: results.length,
       resultEntityCount,
+      resultPrimitiveCount,
       unmanagedEntityCount: Math.max(0, countViewerEntities(this.map) - resultEntityCount),
       primitiveOverlayCount: this.map.primitives.list().length,
       layerCount: layers.length,
@@ -82,7 +90,7 @@ export class PerformanceManager {
   ): PrimitiveOptimizationCandidate[] {
     const minEntityCount = normalizeThreshold(options.minEntityCount ?? 20);
     return this.getStats().results
-      .filter((record) => record.entityCount >= minEntityCount)
+      .filter((record) => record.entityCount >= minEntityCount && record.primitiveCount === 0)
       .map((record) => ({
         id: record.id,
         source: record.source,
@@ -115,6 +123,13 @@ function countResultEntities(result: unknown): number {
   return 0;
 }
 
+function getResultRenderMode(result: unknown): ResultPerformanceRecord["renderMode"] {
+  if (isRecord(result) && result.renderMode === "primitive") {
+    return "primitive";
+  }
+  return "entity";
+}
+
 function summarizeResultsBySource(
   results: ResultPerformanceRecord[]
 ): PerformanceStats["resultBySource"] {
@@ -122,6 +137,7 @@ function summarizeResultsBySource(
     const current = summary[result.source] ?? createResultSummary();
     current.count += 1;
     current.entityCount += result.entityCount;
+    current.primitiveCount += result.primitiveCount;
     summary[result.source] = current;
     return summary;
   }, {});
@@ -134,6 +150,7 @@ function summarizeResultsByType(
     const current = summary[result.type] ?? createResultSummary();
     current.count += 1;
     current.entityCount += result.entityCount;
+    current.primitiveCount += result.primitiveCount;
     summary[result.type] = current;
     return summary;
   }, {});
@@ -152,7 +169,7 @@ function summarizeLayersByType(
 }
 
 function createResultSummary(): ResultPerformanceSummary {
-  return { count: 0, entityCount: 0 };
+  return { count: 0, entityCount: 0, primitiveCount: 0 };
 }
 
 function createWarnings(

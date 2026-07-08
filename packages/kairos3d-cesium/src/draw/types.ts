@@ -2,6 +2,10 @@ import type { Cartesian3, Color, Entity } from "cesium";
 import type { RuntimeResultLoadOptions, SerializablePosition } from "../core";
 import type { HeightOptions } from "../height";
 import type {
+  ResultPrimitiveRuntime,
+  ResultRenderMode
+} from "../primitives";
+import type {
   ResultSymbolStyle,
   SerializableResultSymbolStyle
 } from "../style";
@@ -26,6 +30,8 @@ export interface DrawResult {
   updatedAt?: Date;
   style?: ResultSymbolStyle;
   height?: HeightOptions;
+  renderMode?: ResultRenderMode;
+  primitives?: ResultPrimitiveRuntime[];
 }
 
 export interface DrawResultSnapshot {
@@ -36,6 +42,7 @@ export interface DrawResultSnapshot {
   updatedAt?: string;
   style?: SerializableResultSymbolStyle;
   height?: HeightOptions;
+  renderMode?: ResultRenderMode;
 }
 
 export type DrawResultLoadOptions = RuntimeResultLoadOptions;
@@ -44,6 +51,7 @@ export interface DrawToolOptions {
   style?: ResultSymbolStyle | DrawStyle;
   once?: boolean;
   height?: HeightOptions;
+  renderMode?: ResultRenderMode;
 }
 
 export interface DrawEditHandleStyle {

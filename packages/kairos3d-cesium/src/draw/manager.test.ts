@@ -1,14 +1,28 @@
 import { Cartesian3, Entity } from "cesium";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
 import { StyleManager } from "../style";
 import { DrawManager } from "./manager";
 import type { DrawResult } from "./types";
 
+beforeAll(() => {
+  vi.stubGlobal("HTMLCanvasElement", class HTMLCanvasElementMock {});
+  vi.stubGlobal("HTMLImageElement", class HTMLImageElementMock {});
+  vi.stubGlobal("HTMLVideoElement", class HTMLVideoElementMock {});
+  vi.stubGlobal("ImageBitmap", class ImageBitmapMock {});
+  vi.stubGlobal("OffscreenCanvas", class OffscreenCanvasMock {});
+});
+
 function createMapMock() {
   const active = { id: "draw.edit" };
   return {
     viewer: {
+      scene: {
+        primitives: {
+          add: vi.fn((primitive) => primitive),
+          remove: vi.fn(() => true)
+        }
+      },
       entities: {
         add: vi.fn((options) => new Entity(options)),
         remove: vi.fn()
@@ -124,6 +138,43 @@ describe("DrawManager", () => {
     expect(restored[0].updatedAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
     expect(map.viewer.entities.add).toHaveBeenCalled();
     expect(manager.get("draw-1")).toBe(restored[0]);
+  });
+
+  it("restores primitive draw results and cleans up primitive runtime", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+
+    const restored = await manager.load([
+      {
+        id: "draw-primitive",
+        type: "polyline",
+        positions: [
+          { longitude: 114, latitude: 22, height: 10 },
+          { longitude: 114.01, latitude: 22.01, height: 20 }
+        ],
+        createdAt: "2026-07-08T00:00:00.000Z",
+        renderMode: "primitive",
+        style: {
+          line: { color: { red: 0, green: 1, blue: 1, alpha: 1 }, width: 4 }
+        }
+      }
+    ]);
+
+    expect(restored[0]).toMatchObject({
+      id: "draw-primitive",
+      renderMode: "primitive"
+    });
+    expect(restored[0].primitives).toHaveLength(1);
+    expect(manager.toJSON()[0].renderMode).toBe("primitive");
+    expect(map.viewer.scene.primitives.add).toHaveBeenCalled();
+
+    manager.setStyle("draw-primitive", {
+      line: { color: "#35d07f", width: 6 }
+    });
+    expect(manager.get("draw-primitive")?.primitives).toHaveLength(1);
+
+    expect(manager.remove("draw-primitive")).toBe(true);
+    expect(map.viewer.scene.primitives.remove).toHaveBeenCalled();
   });
 
   it("updates and serializes draw result style", () => {

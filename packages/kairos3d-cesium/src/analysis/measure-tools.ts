@@ -21,8 +21,16 @@ import {
   createPolygonGraphics,
   mergeSymbolStyles
 } from "../style";
+import type {
+  ResultPrimitiveRuntime,
+  ResultRenderMode
+} from "../primitives";
 import { InteractiveTool } from "../tools/interactive-tool";
 import { registerTool } from "../tools/registry";
+import {
+  renderMeasurePrimitives,
+  resolveMeasureRenderMode
+} from "./manager";
 import {
   formatArea,
   formatDistance,
@@ -87,7 +95,9 @@ abstract class BaseMeasureTool extends InteractiveTool<MeasureToolOptions> {
     positions: Cartesian3[],
     value: number,
     unit: MeasureUnit,
-    label?: string
+    label?: string,
+    renderMode?: ResultRenderMode,
+    primitives?: ResultPrimitiveRuntime[]
   ): MeasureResult {
     return this.map.analysis.measure.addResult({
         id: createMeasureId(type),
@@ -101,7 +111,9 @@ abstract class BaseMeasureTool extends InteractiveTool<MeasureToolOptions> {
         createdAt: new Date(),
         style: this.resolveStyle(type),
         height: serializeHeightOptions(resolveMeasureHeightOptions(type, this.options)),
-        mode: resolveMeasureMode(type, this.options)
+        mode: resolveMeasureMode(type, this.options),
+        renderMode,
+        primitives
       });
   }
 
@@ -216,6 +228,8 @@ export class DistanceMeasureTool extends BaseMeasureTool {
     const total = measureDistance(positions);
     const display = distanceDisplay(total);
     this.freezePolyline(this.line, positions);
+    const renderMode = resolveMeasureRenderMode("distance", this.options.renderMode);
+    const primitives = this.replaceLineWithPrimitive(renderMode, positions);
     if (resolveDistanceMeasureMode(this.options) === "surface") {
       this.addLabel(
         positions[positions.length - 1],
@@ -223,10 +237,37 @@ export class DistanceMeasureTool extends BaseMeasureTool {
         this.resolveStyle("distance").label
       );
     }
-    const result = this.createResult("distance", positions, display.value, display.unit, display.label);
+    const result = this.createResult(
+      "distance",
+      positions,
+      display.value,
+      display.unit,
+      display.label,
+      renderMode,
+      primitives
+    );
     this.emit("measure-complete", result);
     this.notifyComplete(result);
     this.map.tools.stop();
+  }
+
+  private replaceLineWithPrimitive(
+    renderMode: ResultRenderMode,
+    positions: Cartesian3[]
+  ): ResultPrimitiveRuntime[] | undefined {
+    if (renderMode !== "primitive" || !this.line) {
+      return undefined;
+    }
+
+    this.viewer.entities.remove(this.line);
+    this.entities = this.entities.filter((entity) => entity !== this.line);
+    return renderMeasurePrimitives(
+      this.map,
+      "distance",
+      this.line.id,
+      positions,
+      this.resolveStyle("distance")
+    );
   }
 }
 
@@ -298,11 +339,40 @@ export class AreaMeasureTool extends BaseMeasureTool {
     const display = areaDisplay(area);
     this.completed = true;
     this.freezePolygon(this.polygon, positions);
+    const renderMode = resolveMeasureRenderMode("area", this.options.renderMode);
+    const primitives = this.replacePolygonWithPrimitive(renderMode, positions);
     this.addLabel(positions[positions.length - 1], display.label, this.resolveStyle("area").label);
-    const result = this.createResult("area", positions, display.value, display.unit, display.label);
+    const result = this.createResult(
+      "area",
+      positions,
+      display.value,
+      display.unit,
+      display.label,
+      renderMode,
+      primitives
+    );
     this.emit("measure-complete", result);
     this.notifyComplete(result);
     this.map.tools.stop();
+  }
+
+  private replacePolygonWithPrimitive(
+    renderMode: ResultRenderMode,
+    positions: Cartesian3[]
+  ): ResultPrimitiveRuntime[] | undefined {
+    if (renderMode !== "primitive" || !this.polygon) {
+      return undefined;
+    }
+
+    this.viewer.entities.remove(this.polygon);
+    this.entities = this.entities.filter((entity) => entity !== this.polygon);
+    return renderMeasurePrimitives(
+      this.map,
+      "area",
+      this.polygon.id,
+      positions,
+      this.resolveStyle("area")
+    );
   }
 }
 

@@ -1,15 +1,29 @@
 import { Cartesian3, Entity } from "cesium";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
 import { StyleManager } from "../style";
 import { MeasureManager, ProfileManager, VisibilityManager } from "./manager";
 import type { MeasureResult } from "./types";
+
+beforeAll(() => {
+  vi.stubGlobal("HTMLCanvasElement", class HTMLCanvasElementMock {});
+  vi.stubGlobal("HTMLImageElement", class HTMLImageElementMock {});
+  vi.stubGlobal("HTMLVideoElement", class HTMLVideoElementMock {});
+  vi.stubGlobal("ImageBitmap", class ImageBitmapMock {});
+  vi.stubGlobal("OffscreenCanvas", class OffscreenCanvasMock {});
+});
 
 function createMapMock() {
   return {
     viewer: {
       terrainProvider: {
         availability: undefined
+      },
+      scene: {
+        primitives: {
+          add: vi.fn((primitive) => primitive),
+          remove: vi.fn(() => true)
+        }
       },
       entities: {
         add: vi.fn((options) => new Entity(options)),
@@ -135,6 +149,47 @@ describe("MeasureManager", () => {
     expect(snapshot[0].style?.line?.width).toBe(5);
     expect(restored[0].style?.line?.width).toBe(5);
     expect(restored[0].entities.length).toBeGreaterThan(0);
+  });
+
+  it("restores primitive-backed measurement results and cleans them up", async () => {
+    const map = createMapMock();
+    const manager = new MeasureManager(map);
+
+    const restored = await manager.load([
+      {
+        id: "measure-primitive",
+        type: "distance",
+        positions: [
+          { longitude: 114, latitude: 22, height: 10 },
+          { longitude: 114.01, latitude: 22.01, height: 20 }
+        ],
+        value: 10,
+        unit: "m",
+        label: "10.00 m",
+        createdAt: "2026-07-08T00:00:00.000Z",
+        renderMode: "primitive",
+        style: {
+          line: { color: { red: 0, green: 1, blue: 1, alpha: 1 }, width: 4 }
+        }
+      }
+    ]);
+
+    expect(restored[0]).toMatchObject({
+      id: "measure-primitive",
+      renderMode: "primitive"
+    });
+    expect(restored[0].entities).toHaveLength(1);
+    expect(restored[0].primitives).toHaveLength(1);
+    expect(manager.toJSON()[0].renderMode).toBe("primitive");
+
+    manager.setStyle("measure-primitive", {
+      line: { color: "#35d07f", width: 6 },
+      label: { color: "#ffffff" }
+    });
+    expect(manager.get("measure-primitive")?.primitives).toHaveLength(1);
+
+    expect(manager.remove("measure-primitive")).toBe(true);
+    expect(map.viewer.scene.primitives.remove).toHaveBeenCalled();
   });
 });
 

@@ -150,12 +150,14 @@ const ground = await map.height.clampPositions(positions);
 const sampled = await map.height.sampleTerrain(positions);
 
 await map.draw.polyline({
-  height: { mode: "clampToGround" }
+  height: { mode: "clampToGround" },
+  renderMode: "primitive"
 });
 
 await map.analysis.measure.distance({
   mode: "surface",
-  height: { mode: "clampToGround", sampleTerrain: true }
+  height: { mode: "clampToGround", sampleTerrain: true },
+  renderMode: "primitive"
 });
 
 await map.analysis.profile.draw({
@@ -274,7 +276,7 @@ map.results.clear({ source: ["measure", "visibility"] });
 
 ## Performance And Primitive Planning
 
-`map.performance` provides runtime stats for SDK-managed results, viewer entities, layer runtime objects, and simple budget warnings. It does not replace renderers by itself; it identifies where a later Primitive renderer is likely to matter.
+`map.performance` provides runtime stats for SDK-managed results, viewer entities, result Primitive runtimes, layer runtime objects, and simple budget warnings. It does not replace renderers by itself; it identifies where a Primitive renderer is likely to matter.
 
 ```ts
 map.performance.setBudget({
@@ -290,7 +292,7 @@ const candidates = map.performance.recommendPrimitiveCandidates({
 });
 ```
 
-Primitive candidates are hints, not automatic rewrites. Current draw and analysis modules still render with Cesium Entities unless a specific module later gets a Primitive backend.
+Primitive candidates are hints, not automatic rewrites. Results that already use `renderMode: "primitive"` are skipped by candidate recommendations.
 
 ## Primitive Overlays
 
@@ -310,7 +312,7 @@ map.primitives.clear();
 map.primitives.load(primitiveState, { clear: true });
 ```
 
-Primitive overlays are runtime graphics, not draw results. They have their own data-only snapshot API and are not automatically included in scene snapshots yet.
+Primitive overlays are runtime graphics, not draw results. Draw polyline/polygon and distance/area measurement can also opt into Primitive-backed result rendering with `renderMode: "primitive"`; those result primitives are owned by their result manager rather than `map.primitives`. Primitive overlays have their own data-only snapshot API and are not automatically included in scene snapshots yet.
 
 `references/SRC` and `references/mars3d-sdk-2.2` are migration references. Port algorithms feature by feature, but keep the new SDK free of global mutation, hardcoded tokens, legacy Cesium APIs, and DOM widget assumptions.
 

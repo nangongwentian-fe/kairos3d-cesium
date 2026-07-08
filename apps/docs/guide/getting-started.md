@@ -110,6 +110,7 @@ map.picking.on("pick", (event) => {
 map.selection.clear();
 
 await map.draw.polyline();
+await map.draw.polyline({ renderMode: "primitive" });
 const result = map.draw.list()[0];
 map.draw.setStyle(result.id, {
   line: { color: "#35d07f", width: 4 }
@@ -122,7 +123,8 @@ await map.draw.polyline({
 });
 await map.analysis.measure.distance({
   mode: "surface",
-  height: { mode: "clampToGround", sampleTerrain: true }
+  height: { mode: "clampToGround", sampleTerrain: true },
+  renderMode: "primitive"
 });
 const terrainSamples = await map.height.sampleTerrain(result.positions);
 
@@ -226,7 +228,8 @@ When the active terrain provider has no availability, terrain sampling returns t
 | --- | --- |
 | Stats | `map.performance.getStats()` reads current viewer entities, SDK results, and layer runtime objects. |
 | Budgets | `checkBudget()` reports warnings only; it does not remove results or change rendering. |
-| Primitive candidates | Candidate records identify entity-heavy SDK results that may deserve a later Primitive renderer. |
+| Primitive candidates | Candidate records identify entity-heavy SDK results that may deserve a Primitive renderer. Results already using `renderMode: "primitive"` are skipped. |
+| Result primitives | `getStats()` counts Primitive runtimes owned by SDK-managed results separately from `map.primitives` overlays. |
 
 ## Primitive Overlay Notes
 
@@ -235,6 +238,7 @@ When the active terrain provider has no availability, terrain sampling returns t
 | Current overlay | `map.primitives.addPolyline()` uses an SDK-owned Cesium `PolylineCollection`. |
 | Snapshot | `map.primitives.toJSON/load()` is data-only and does not serialize Cesium primitive instances. |
 | Scene snapshot | Primitive overlays are not included in `sceneState.toJSON({ includeResults: true })` yet. |
+| Result rendering | Draw polyline/polygon and distance/area measurement can opt into Primitive-backed rendering with `renderMode: "primitive"`. |
 
 ## Terrain Analysis Notes
 
