@@ -7,7 +7,8 @@ export default defineConfig({
     nav: [
       { text: "Guide", link: "/guide/getting-started" },
       { text: "Architecture", link: "/guide/architecture" },
-      { text: "Status", link: "/guide/first-version-status" }
+      { text: "Status", link: "/guide/first-version-status" },
+      { text: "Roadmap", link: "/guide/roadmap" }
     ],
     sidebar: [
       {
@@ -15,7 +16,8 @@ export default defineConfig({
         items: [
           { text: "Getting Started", link: "/guide/getting-started" },
           { text: "Architecture", link: "/guide/architecture" },
-          { text: "First Version Status", link: "/guide/first-version-status" }
+          { text: "First Version Status", link: "/guide/first-version-status" },
+          { text: "Roadmap", link: "/guide/roadmap" }
         ]
       }
     ]

@@ -9,3 +9,4 @@ Kairos3DCesium provides a small Cesium SDK package, a documentation site, and ru
 | [Getting Started](./guide/getting-started.md) | You need install and development commands. |
 | [Architecture](./guide/architecture.md) | You need package boundaries and Cesium asset rules. |
 | [First Version Status](./guide/first-version-status.md) | You need current completed capability, snapshot rules, and boundaries. |
+| [Roadmap](./guide/roadmap.md) | You need the current post-first-version priority order. |
