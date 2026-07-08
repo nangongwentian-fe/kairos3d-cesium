@@ -1,0 +1,19 @@
+{
+  "name": "kairos3d-cesium-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=11.0.0"
+  },
+  "scripts": {
+    "dev:docs": "pnpm --filter @kairos3d/docs dev",
+    "dev:examples": "pnpm --filter @kairos3d/examples dev",
+    "build": "pnpm --filter @kairos3d/cesium build && pnpm --filter @kairos3d/examples build && pnpm --filter @kairos3d/docs build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @kairos3d/cesium test",
+    "lint": "pnpm -r lint"
+  }
+}

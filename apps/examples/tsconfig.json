@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": ["vite/client", "node"],
+    "paths": {
+      "@kairos3d/cesium": ["../../packages/kairos3d-cesium/src/index.ts"],
+      "@kairos3d/cesium/core": ["../../packages/kairos3d-cesium/src/core/index.ts"],
+      "@kairos3d/cesium/layers": ["../../packages/kairos3d-cesium/src/layers/index.ts"],
+      "@kairos3d/cesium/tools": ["../../packages/kairos3d-cesium/src/tools/index.ts"],
+      "@kairos3d/cesium/draw": ["../../packages/kairos3d-cesium/src/draw/index.ts"],
+      "@kairos3d/cesium/analysis": ["../../packages/kairos3d-cesium/src/analysis/index.ts"],
+      "@kairos3d/cesium/scene": ["../../packages/kairos3d-cesium/src/scene/index.ts"],
+      "@kairos3d/cesium/picking": ["../../packages/kairos3d-cesium/src/picking/index.ts"],
+      "@kairos3d/cesium/style": ["../../packages/kairos3d-cesium/src/style/index.ts"],
+      "@kairos3d/cesium/height": ["../../packages/kairos3d-cesium/src/height/index.ts"],
+      "@kairos3d/cesium/results": ["../../packages/kairos3d-cesium/src/results/index.ts"],
+      "@kairos3d/cesium/performance": [
+        "../../packages/kairos3d-cesium/src/performance/index.ts"
+      ],
+      "@kairos3d/cesium/primitives": [
+        "../../packages/kairos3d-cesium/src/primitives/index.ts"
+      ]
+    }
+  },
+  "include": ["src", "vite.config.ts"]
+}

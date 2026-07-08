@@ -1,0 +1,95 @@
+{
+  "name": "@kairos3d/cesium",
+  "version": "0.0.0",
+  "description": "A reusable Cesium common feature SDK for Kairos3D projects.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js",
+      "require": "./dist/core/index.cjs"
+    },
+    "./layers": {
+      "types": "./dist/layers/index.d.ts",
+      "import": "./dist/layers/index.js",
+      "require": "./dist/layers/index.cjs"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js",
+      "require": "./dist/tools/index.cjs"
+    },
+    "./draw": {
+      "types": "./dist/draw/index.d.ts",
+      "import": "./dist/draw/index.js",
+      "require": "./dist/draw/index.cjs"
+    },
+    "./analysis": {
+      "types": "./dist/analysis/index.d.ts",
+      "import": "./dist/analysis/index.js",
+      "require": "./dist/analysis/index.cjs"
+    },
+    "./scene": {
+      "types": "./dist/scene/index.d.ts",
+      "import": "./dist/scene/index.js",
+      "require": "./dist/scene/index.cjs"
+    },
+    "./picking": {
+      "types": "./dist/picking/index.d.ts",
+      "import": "./dist/picking/index.js",
+      "require": "./dist/picking/index.cjs"
+    },
+    "./style": {
+      "types": "./dist/style/index.d.ts",
+      "import": "./dist/style/index.js",
+      "require": "./dist/style/index.cjs"
+    },
+    "./height": {
+      "types": "./dist/height/index.d.ts",
+      "import": "./dist/height/index.js",
+      "require": "./dist/height/index.cjs"
+    },
+    "./results": {
+      "types": "./dist/results/index.d.ts",
+      "import": "./dist/results/index.js",
+      "require": "./dist/results/index.cjs"
+    },
+    "./performance": {
+      "types": "./dist/performance/index.d.ts",
+      "import": "./dist/performance/index.js",
+      "require": "./dist/performance/index.cjs"
+    },
+    "./primitives": {
+      "types": "./dist/primitives/index.d.ts",
+      "import": "./dist/primitives/index.js",
+      "require": "./dist/primitives/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "cesium": "^1.143.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "cesium": "^1.143.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.3",
+    "vitest": "^4.1.10"
+  }
+}
