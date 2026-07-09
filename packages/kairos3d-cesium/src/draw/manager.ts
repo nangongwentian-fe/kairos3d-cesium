@@ -323,8 +323,15 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   async edit(id: string, options: DrawEditOptions = {}): Promise<Tool<DrawEditStartOptions>> {
-    if (!this.results.has(id)) {
+    const result = this.results.get(id);
+    if (!result) {
       throw new Error(`Draw result "${id}" does not exist.`);
+    }
+    if (result.locked) {
+      throw new Error(`Draw result "${id}" is locked and cannot be edited.`);
+    }
+    if (!result.editable) {
+      throw new Error(`Draw result "${id}" is not editable.`);
     }
 
     const tool = await this.map.tools.start("draw.edit", { ...options, resultId: id });

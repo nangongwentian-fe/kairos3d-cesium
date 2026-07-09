@@ -100,6 +100,25 @@ export interface DrawToolOptions {
   editable?: boolean;
 }
 
+export interface DrawWallToolOptions extends DrawToolOptions {
+  minimumHeights?: number[];
+  maximumHeights?: number[];
+}
+
+export interface DrawCorridorToolOptions extends DrawToolOptions {
+  width?: number;
+}
+
+export interface DrawBoxToolOptions extends DrawToolOptions {
+  dimensions?: [number, number, number];
+}
+
+export interface DrawCylinderToolOptions extends DrawToolOptions {
+  length?: number;
+  topRadius?: number;
+  bottomRadius?: number;
+}
+
 export interface DrawCreateOptions {
   id?: string;
   style?: ResultSymbolStyle;

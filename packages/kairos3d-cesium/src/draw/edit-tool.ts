@@ -24,7 +24,7 @@ import type {
   DrawResult
 } from "./types";
 
-type HandleKind = "vertex" | "midpoint" | "circle-edge";
+type HandleKind = "vertex" | "midpoint" | "circle-edge" | "ellipse-major" | "ellipse-minor";
 
 interface EditHandle {
   entity: Entity;
@@ -158,6 +158,18 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
         radius: Cartesian3.distance(this.positions[0], position)
       };
       this.map.draw.update(this.result.id, { data: this.data }, "drag");
+    } else if (this.selectedKind === "ellipse-major") {
+      this.data = {
+        ...this.data,
+        semiMajorAxis: Cartesian3.distance(this.positions[0], position)
+      };
+      this.map.draw.update(this.result.id, { data: this.data }, "drag");
+    } else if (this.selectedKind === "ellipse-minor") {
+      this.data = {
+        ...this.data,
+        semiMinorAxis: Cartesian3.distance(this.positions[0], position)
+      };
+      this.map.draw.update(this.result.id, { data: this.data }, "drag");
     } else {
       this.positions[this.selectedIndex] = Cartesian3.clone(position);
       this.map.draw.update(this.result.id, {
@@ -231,6 +243,29 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
       return;
     }
 
+    if (this.result.type === "ellipse") {
+      this.handles.push(
+        this.createHandle("vertex", 0, this.positions[0], selectedIndex === 0)
+      );
+      this.handles.push(
+        this.createHandle(
+          "ellipse-major",
+          0,
+          ellipseEdgePosition(this.positions[0], this.data?.semiMajorAxis ?? 1, "major"),
+          false
+        )
+      );
+      this.handles.push(
+        this.createHandle(
+          "ellipse-minor",
+          0,
+          ellipseEdgePosition(this.positions[0], this.data?.semiMinorAxis ?? 1, "minor"),
+          false
+        )
+      );
+      return;
+    }
+
     for (let index = 0; index < this.positions.length; index += 1) {
       this.handles.push(
         this.createHandle("vertex", index, this.positions[index], selectedIndex === index)
@@ -275,7 +310,10 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
       : kind === "vertex"
         ? style.vertexColor
         : style.midpointColor;
-    const pixelSize = kind === "midpoint" ? Math.max(6, style.pixelSize - 3) : style.pixelSize;
+    const pixelSize =
+      kind === "midpoint" || kind === "ellipse-major" || kind === "ellipse-minor"
+        ? Math.max(6, style.pixelSize - 3)
+        : style.pixelSize;
     const entity = this.viewer.entities.add({
       id: `draw-edit-${kind}-${Math.random().toString(36).slice(2, 10)}`,
       position,
@@ -390,17 +428,27 @@ function cloneData(data: DrawResult["data"]): DrawResult["data"] {
 }
 
 function circleEdgePosition(center: Cartesian3, radius: number): Cartesian3 {
+  return ellipseEdgePosition(center, radius, "major");
+}
+
+function ellipseEdgePosition(
+  center: Cartesian3,
+  radius: number,
+  axis: "major" | "minor"
+): Cartesian3 {
   const cartographic = Cartographic.fromCartesian(center);
   if (!cartographic || !Number.isFinite(radius) || radius <= 0) {
     return Cartesian3.clone(center);
   }
 
   const earthRadius = 6378137;
-  const longitudeDelta =
-    radius / (earthRadius * Math.max(Math.abs(Math.cos(cartographic.latitude)), 0.01));
+  const longitudeDelta = axis === "major"
+    ? radius / (earthRadius * Math.max(Math.abs(Math.cos(cartographic.latitude)), 0.01))
+    : 0;
+  const latitudeDelta = axis === "minor" ? radius / earthRadius : 0;
   return Cartesian3.fromRadians(
     cartographic.longitude + longitudeDelta,
-    cartographic.latitude,
+    cartographic.latitude + latitudeDelta,
     cartographic.height
   );
 }

@@ -294,6 +294,54 @@ describe("DrawManager", () => {
     expect(updatedRectangle.entity.rectangle).toBeDefined();
   });
 
+  it("updates extended draw geometry data for edit workflows", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const ellipse = manager.ellipse({
+      id: "draw-ellipse",
+      center: Cartesian3.fromDegrees(114, 22),
+      semiMajorAxis: 100,
+      semiMinorAxis: 50
+    });
+    const corridor = manager.corridor({
+      id: "draw-corridor",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.01)
+      ],
+      width: 20
+    });
+    const box = manager.box({
+      id: "draw-box",
+      position: Cartesian3.fromDegrees(114, 22),
+      dimensions: [10, 20, 30]
+    });
+    const cylinder = manager.cylinder({
+      id: "draw-cylinder",
+      position: Cartesian3.fromDegrees(114, 22),
+      length: 40,
+      topRadius: 8,
+      bottomRadius: 12
+    });
+
+    manager.update("draw-ellipse", { semiMajorAxis: 180, semiMinorAxis: 90 });
+    manager.update("draw-corridor", { width: 35 });
+    manager.update("draw-box", {
+      position: Cartesian3.fromDegrees(114.02, 22.02),
+      dimensions: [20, 30, 40]
+    });
+    manager.update("draw-cylinder", { length: 80, topRadius: 16, bottomRadius: 20 });
+
+    expect(ellipse.data).toMatchObject({ semiMajorAxis: 180, semiMinorAxis: 90 });
+    expect(ellipse.entity.ellipse?.semiMajorAxis?.getValue()).toBe(180);
+    expect(corridor.data?.width).toBe(35);
+    expect(corridor.entity.corridor?.width?.getValue()).toBe(35);
+    expect(box.positions[0]).toEqual(Cartesian3.fromDegrees(114.02, 22.02));
+    expect(box.entity.box?.dimensions?.getValue()).toEqual(new Cartesian3(20, 30, 40));
+    expect(cylinder.data).toMatchObject({ length: 80, topRadius: 16, bottomRadius: 20 });
+    expect(cylinder.entity.cylinder?.length?.getValue()).toBe(80);
+  });
+
   it("starts and stops edit through the shared tool manager", async () => {
     const map = createMapMock();
     const manager = new DrawManager(map);
@@ -309,6 +357,25 @@ describe("DrawManager", () => {
     });
     expect(map.tools.stop).toHaveBeenCalledOnce();
     expect(map.tools.cancel).toHaveBeenCalledOnce();
+  });
+
+  it("rejects editing locked or non-editable draw results", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const locked = createResult("draw-locked");
+    const readonly = createResult("draw-readonly");
+    locked.locked = true;
+    readonly.editable = false;
+    manager.addResult(locked);
+    manager.addResult(readonly);
+
+    await expect(manager.edit("draw-locked")).rejects.toThrow(
+      'Draw result "draw-locked" is locked and cannot be edited.'
+    );
+    await expect(manager.edit("draw-readonly")).rejects.toThrow(
+      'Draw result "draw-readonly" is not editable.'
+    );
+    expect(map.tools.start).not.toHaveBeenCalled();
   });
 
   it("serializes and restores draw results", async () => {

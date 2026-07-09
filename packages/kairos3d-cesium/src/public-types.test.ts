@@ -25,10 +25,16 @@ import type {
 import type {
   DrawEditEvent,
   DrawEditOptions,
+  DrawBoxToolOptions,
+  DrawCorridorToolOptions,
+  DrawCylinderToolOptions,
   DrawResultData,
   DrawResult,
   DrawResultSnapshot,
-  DrawType
+  DrawStyle,
+  DrawToolOptions,
+  DrawType,
+  DrawWallToolOptions
 } from "./draw";
 import type {
   CameraBookmark,
@@ -221,6 +227,32 @@ describe("public SDK types", () => {
       show: boolean;
       locked: boolean;
       editable: boolean;
+    }>();
+
+    expectTypeOf<DrawToolOptions>().toMatchTypeOf<{
+      style?: ResultSymbolStyle | DrawStyle;
+      once?: boolean;
+      height?: HeightOptions;
+      renderMode?: ResultRenderMode;
+      properties?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      group?: string;
+      show?: boolean;
+      locked?: boolean;
+      editable?: boolean;
+    }>();
+    expectTypeOf<DrawWallToolOptions>().toMatchTypeOf<{
+      minimumHeights?: number[];
+      maximumHeights?: number[];
+    }>();
+    expectTypeOf<DrawCorridorToolOptions>().toMatchTypeOf<{ width?: number }>();
+    expectTypeOf<DrawBoxToolOptions>().toMatchTypeOf<{
+      dimensions?: [number, number, number];
+    }>();
+    expectTypeOf<DrawCylinderToolOptions>().toMatchTypeOf<{
+      length?: number;
+      topRadius?: number;
+      bottomRadius?: number;
     }>();
 
     expectTypeOf<MeasureResult>().toMatchTypeOf<{

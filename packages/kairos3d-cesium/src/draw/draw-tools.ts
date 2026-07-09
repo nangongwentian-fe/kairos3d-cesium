@@ -29,7 +29,21 @@ import {
 import { InteractiveTool } from "../tools/interactive-tool";
 import { registerTool } from "../tools/registry";
 import { renderDrawPrimitives } from "./manager";
-import type { DrawResult, DrawStyle, DrawToolOptions, DrawType } from "./types";
+import type {
+  DrawBoxToolOptions,
+  DrawCorridorToolOptions,
+  DrawCylinderToolOptions,
+  DrawResult,
+  DrawStyle,
+  DrawToolOptions,
+  DrawType,
+  DrawWallToolOptions
+} from "./types";
+
+const defaultCorridorWidth = 20;
+const defaultBoxDimensions: [number, number, number] = [50, 50, 50];
+const defaultCylinderLength = 50;
+const defaultCylinderRadius = 15;
 
 export class DrawPointTool extends InteractiveTool<DrawToolOptions> {
   private options: DrawToolOptions = {};
@@ -678,12 +692,530 @@ export class DrawRectangleTool extends InteractiveTool<DrawToolOptions> {
   }
 }
 
+export class DrawEllipseTool extends InteractiveTool<DrawToolOptions> {
+  private center?: Cartesian3;
+  private majorPosition?: Cartesian3;
+  private minorPosition?: Cartesian3;
+  private previewPosition?: Cartesian3;
+  private entity?: Entity;
+  private options: DrawToolOptions = {};
+  private resolvedStyle?: ResultSymbolStyle;
+  private completed = false;
+
+  constructor(map: KairosMap) {
+    super(map, "draw.ellipse");
+  }
+
+  override start(options: DrawToolOptions = {}): void {
+    super.start(options);
+    this.options = options;
+    this.resetDraft();
+
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (!position) {
+        return;
+      }
+
+      if (!this.center) {
+        this.center = Cartesian3.clone(position);
+        this.previewPosition = undefined;
+        this.ensureEntity();
+        this.notifyPointAdd([Cartesian3.clone(this.center)]);
+        return;
+      }
+
+      if (!this.majorPosition) {
+        this.majorPosition = Cartesian3.clone(position);
+        this.previewPosition = undefined;
+        this.notifyPointAdd([Cartesian3.clone(this.center), Cartesian3.clone(this.majorPosition)]);
+        return;
+      }
+
+      this.minorPosition = Cartesian3.clone(position);
+      void this.finish();
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    this.handler?.setInputAction((movement: { endPosition: Cartesian2 }) => {
+      if (!this.center) {
+        return;
+      }
+
+      const position = this.pickPosition(movement.endPosition);
+      if (!position) {
+        return;
+      }
+
+      this.previewPosition = Cartesian3.clone(position);
+      this.ensureEntity();
+    }, ScreenSpaceEventType.MOUSE_MOVE);
+
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+  }
+
+  override stop(): void {
+    this.discardDraft();
+    super.stop();
+  }
+
+  private ensureEntity(): void {
+    if (this.entity || !this.center) {
+      return;
+    }
+
+    const style = resolveDrawToolStyle(this.map, "ellipse", this.options.style);
+    this.resolvedStyle = style;
+    this.entity = this.viewer.entities.add({
+      id: createDrawId("ellipse-preview"),
+      position: this.center,
+      ellipse: {
+        semiMajorAxis: new CallbackProperty(() => Math.max(this.semiMajorAxis(), 0.01), false),
+        semiMinorAxis: new CallbackProperty(() => Math.max(this.semiMinorAxis(), 0.01), false),
+        material: parseColorLike(
+          style.polygon?.fillColor ?? Color.CYAN.withAlpha(0.22),
+          "polygon.fillColor"
+        ),
+        outline: true,
+        outlineColor: parseColorLike(
+          style.polygon?.outlineColor ?? style.line?.color ?? Color.CYAN,
+          "polygon.outlineColor"
+        ),
+        outlineWidth: style.polygon?.outlineWidth ?? style.line?.width
+      }
+    });
+    applyHeightOptionsToEntity(this.entity, this.options.height);
+  }
+
+  private async finish(): Promise<void> {
+    if (!this.center || !this.majorPosition || this.completed || this.semiMajorAxis() <= 0) {
+      return;
+    }
+
+    this.completed = true;
+    const height = serializeHeightOptions(this.options.height);
+    const [center] = await resolveDrawPositions(this.map, [this.center], height);
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, "ellipse", this.options.style);
+    const result = this.map.draw.ellipse({
+      id: createDrawId("ellipse"),
+      center,
+      semiMajorAxis: this.semiMajorAxis(),
+      semiMinorAxis: this.semiMinorAxis(),
+      style,
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show,
+      locked: this.options.locked,
+      editable: this.options.editable
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+
+    if (this.options.once ?? true) {
+      this.map.tools.stop();
+      return;
+    }
+
+    this.discardDraft();
+  }
+
+  private semiMajorAxis(): number {
+    const edge = this.majorPosition ?? this.previewPosition;
+    return this.center && edge ? Cartesian3.distance(this.center, edge) : 0;
+  }
+
+  private semiMinorAxis(): number {
+    const edge = this.minorPosition ?? (this.majorPosition ? this.previewPosition : undefined);
+    if (this.center && edge) {
+      return Cartesian3.distance(this.center, edge);
+    }
+    return this.semiMajorAxis();
+  }
+
+  private discardDraft(): void {
+    if (this.entity) {
+      this.viewer.entities.remove(this.entity);
+    }
+    this.resetDraft();
+  }
+
+  private resetDraft(): void {
+    this.center = undefined;
+    this.majorPosition = undefined;
+    this.minorPosition = undefined;
+    this.previewPosition = undefined;
+    this.entity = undefined;
+    this.resolvedStyle = undefined;
+    this.completed = false;
+  }
+}
+
+export class DrawWallTool extends InteractiveTool<DrawWallToolOptions> {
+  private positions: Cartesian3[] = [];
+  private previewPosition?: Cartesian3;
+  private entity?: Entity;
+  private options: DrawWallToolOptions = {};
+  private resolvedStyle?: ResultSymbolStyle;
+  private completed = false;
+
+  constructor(map: KairosMap) {
+    super(map, "draw.wall");
+  }
+
+  override start(options: DrawWallToolOptions = {}): void {
+    super.start(options);
+    this.options = options;
+    this.resetDraft();
+
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (!position) {
+        return;
+      }
+
+      this.positions.push(Cartesian3.clone(position));
+      this.previewPosition = undefined;
+      this.ensureEntity();
+      this.notifyPointAdd(clonePositions(this.positions));
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    this.handler?.setInputAction((movement: { endPosition: Cartesian2 }) => {
+      if (this.positions.length === 0) {
+        return;
+      }
+
+      const position = this.pickPosition(movement.endPosition);
+      if (!position) {
+        return;
+      }
+
+      this.previewPosition = Cartesian3.clone(position);
+      this.ensureEntity();
+    }, ScreenSpaceEventType.MOUSE_MOVE);
+
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+  }
+
+  override stop(): void {
+    this.discardDraft();
+    super.stop();
+  }
+
+  private ensureEntity(): void {
+    if (this.entity) {
+      return;
+    }
+
+    const style = resolveDrawToolStyle(this.map, "wall", this.options.style);
+    this.resolvedStyle = style;
+    this.entity = this.viewer.entities.add({
+      id: createDrawId("wall-preview"),
+      wall: {
+        positions: new CallbackProperty(() => this.renderPositions(), false),
+        material: parseColorLike(
+          style.polygon?.fillColor ?? Color.CYAN.withAlpha(0.2),
+          "polygon.fillColor"
+        ),
+        outline: true,
+        outlineColor: parseColorLike(
+          style.polygon?.outlineColor ?? style.line?.color ?? Color.CYAN,
+          "polygon.outlineColor"
+        )
+      }
+    });
+    applyHeightOptionsToEntity(this.entity, this.options.height);
+  }
+
+  private async finish(): Promise<void> {
+    if (!this.entity || this.positions.length < 2 || this.completed) {
+      return;
+    }
+
+    this.completed = true;
+    const height = serializeHeightOptions(this.options.height);
+    const positions = await resolveDrawPositions(this.map, this.positions, height);
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, "wall", this.options.style);
+    const result = this.map.draw.wall({
+      id: createDrawId("wall"),
+      positions,
+      minimumHeights: this.options.minimumHeights,
+      maximumHeights: this.options.maximumHeights,
+      style,
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show,
+      locked: this.options.locked,
+      editable: this.options.editable
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+
+    if (this.options.once ?? true) {
+      this.map.tools.stop();
+      return;
+    }
+
+    this.discardDraft();
+  }
+
+  private renderPositions(): Cartesian3[] {
+    return this.previewPosition
+      ? [...this.positions, this.previewPosition]
+      : this.positions;
+  }
+
+  private discardDraft(): void {
+    if (this.entity) {
+      this.viewer.entities.remove(this.entity);
+    }
+    this.resetDraft();
+  }
+
+  private resetDraft(): void {
+    this.positions = [];
+    this.previewPosition = undefined;
+    this.entity = undefined;
+    this.resolvedStyle = undefined;
+    this.completed = false;
+  }
+}
+
+export class DrawCorridorTool extends InteractiveTool<DrawCorridorToolOptions> {
+  private positions: Cartesian3[] = [];
+  private previewPosition?: Cartesian3;
+  private entity?: Entity;
+  private options: DrawCorridorToolOptions = {};
+  private resolvedStyle?: ResultSymbolStyle;
+  private completed = false;
+
+  constructor(map: KairosMap) {
+    super(map, "draw.corridor");
+  }
+
+  override start(options: DrawCorridorToolOptions = {}): void {
+    super.start(options);
+    this.options = options;
+    this.resetDraft();
+
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (!position) {
+        return;
+      }
+
+      this.positions.push(Cartesian3.clone(position));
+      this.previewPosition = undefined;
+      this.ensureEntity();
+      this.notifyPointAdd(clonePositions(this.positions));
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    this.handler?.setInputAction((movement: { endPosition: Cartesian2 }) => {
+      if (this.positions.length === 0) {
+        return;
+      }
+
+      const position = this.pickPosition(movement.endPosition);
+      if (!position) {
+        return;
+      }
+
+      this.previewPosition = Cartesian3.clone(position);
+      this.ensureEntity();
+    }, ScreenSpaceEventType.MOUSE_MOVE);
+
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+  }
+
+  override stop(): void {
+    this.discardDraft();
+    super.stop();
+  }
+
+  private ensureEntity(): void {
+    if (this.entity) {
+      return;
+    }
+
+    const style = resolveDrawToolStyle(this.map, "corridor", this.options.style);
+    this.resolvedStyle = style;
+    this.entity = this.viewer.entities.add({
+      id: createDrawId("corridor-preview"),
+      corridor: {
+        positions: new CallbackProperty(() => this.renderPositions(), false),
+        width: this.options.width ?? defaultCorridorWidth,
+        material: parseColorLike(
+          style.polygon?.fillColor ?? Color.CYAN.withAlpha(0.2),
+          "polygon.fillColor"
+        ),
+        outline: true,
+        outlineColor: parseColorLike(
+          style.polygon?.outlineColor ?? style.line?.color ?? Color.CYAN,
+          "polygon.outlineColor"
+        ),
+        outlineWidth: style.polygon?.outlineWidth ?? style.line?.width
+      }
+    });
+    applyHeightOptionsToEntity(this.entity, this.options.height);
+  }
+
+  private async finish(): Promise<void> {
+    if (!this.entity || this.positions.length < 2 || this.completed) {
+      return;
+    }
+
+    this.completed = true;
+    const height = serializeHeightOptions(this.options.height);
+    const positions = await resolveDrawPositions(this.map, this.positions, height);
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, "corridor", this.options.style);
+    const result = this.map.draw.corridor({
+      id: createDrawId("corridor"),
+      positions,
+      width: this.options.width ?? defaultCorridorWidth,
+      style,
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show,
+      locked: this.options.locked,
+      editable: this.options.editable
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+
+    if (this.options.once ?? true) {
+      this.map.tools.stop();
+      return;
+    }
+
+    this.discardDraft();
+  }
+
+  private renderPositions(): Cartesian3[] {
+    return this.previewPosition
+      ? [...this.positions, this.previewPosition]
+      : this.positions;
+  }
+
+  private discardDraft(): void {
+    if (this.entity) {
+      this.viewer.entities.remove(this.entity);
+    }
+    this.resetDraft();
+  }
+
+  private resetDraft(): void {
+    this.positions = [];
+    this.previewPosition = undefined;
+    this.entity = undefined;
+    this.resolvedStyle = undefined;
+    this.completed = false;
+  }
+}
+
+export class DrawBoxTool extends InteractiveTool<DrawBoxToolOptions> {
+  private options: DrawBoxToolOptions = {};
+
+  constructor(map: KairosMap) {
+    super(map, "draw.box");
+  }
+
+  override start(options: DrawBoxToolOptions = {}): void {
+    super.start(options);
+    this.options = options;
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (position) {
+        void this.createBox(position);
+      }
+    }, ScreenSpaceEventType.LEFT_CLICK);
+  }
+
+  private async createBox(position: Cartesian3): Promise<void> {
+    const height = serializeHeightOptions(this.options.height);
+    const [resolvedPosition] = await resolveDrawPositions(this.map, [position], height);
+    const result = this.map.draw.box({
+      id: createDrawId("box"),
+      position: resolvedPosition,
+      dimensions: this.options.dimensions ?? defaultBoxDimensions,
+      style: resolveDrawToolStyle(this.map, "box", this.options.style),
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show,
+      locked: this.options.locked,
+      editable: this.options.editable
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+    if (this.options.once ?? true) {
+      this.map.tools.stop();
+    }
+  }
+}
+
+export class DrawCylinderTool extends InteractiveTool<DrawCylinderToolOptions> {
+  private options: DrawCylinderToolOptions = {};
+
+  constructor(map: KairosMap) {
+    super(map, "draw.cylinder");
+  }
+
+  override start(options: DrawCylinderToolOptions = {}): void {
+    super.start(options);
+    this.options = options;
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (position) {
+        void this.createCylinder(position);
+      }
+    }, ScreenSpaceEventType.LEFT_CLICK);
+  }
+
+  private async createCylinder(position: Cartesian3): Promise<void> {
+    const height = serializeHeightOptions(this.options.height);
+    const [resolvedPosition] = await resolveDrawPositions(this.map, [position], height);
+    const result = this.map.draw.cylinder({
+      id: createDrawId("cylinder"),
+      position: resolvedPosition,
+      length: this.options.length ?? defaultCylinderLength,
+      topRadius: this.options.topRadius ?? defaultCylinderRadius,
+      bottomRadius: this.options.bottomRadius ?? defaultCylinderRadius,
+      style: resolveDrawToolStyle(this.map, "cylinder", this.options.style),
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show,
+      locked: this.options.locked,
+      editable: this.options.editable
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+    if (this.options.once ?? true) {
+      this.map.tools.stop();
+    }
+  }
+}
+
 export function registerDefaultDrawTools(): void {
   registerTool("draw.point", (map) => new DrawPointTool(map));
   registerTool("draw.polyline", (map) => new DrawPolylineTool(map));
   registerTool("draw.polygon", (map) => new DrawPolygonTool(map));
   registerTool("draw.circle", (map) => new DrawCircleTool(map));
   registerTool("draw.rectangle", (map) => new DrawRectangleTool(map));
+  registerTool("draw.ellipse", (map) => new DrawEllipseTool(map));
+  registerTool("draw.wall", (map) => new DrawWallTool(map));
+  registerTool("draw.corridor", (map) => new DrawCorridorTool(map));
+  registerTool("draw.box", (map) => new DrawBoxTool(map));
+  registerTool("draw.cylinder", (map) => new DrawCylinderTool(map));
 }
 
 function createDrawResult(
