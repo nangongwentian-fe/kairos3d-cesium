@@ -5,3 +5,6 @@ dist/
 coverage/
 *.local
 *.log
+apps/examples/.env
+runtime-verification-artifacts/
+.runtime-verification-server.*
