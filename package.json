@@ -14,6 +14,7 @@
     "build": "pnpm --filter @kairos3d/cesium build && pnpm --filter @kairos3d/examples build && pnpm --filter @kairos3d/docs build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm --filter @kairos3d/cesium test",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "release:check": "pnpm typecheck && pnpm test && pnpm lint && pnpm build && pnpm --filter @kairos3d/cesium pack --dry-run"
   }
 }

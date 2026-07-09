@@ -60,6 +60,8 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `ResultPrimitiveRuntime` | Runtime Primitive object metadata owned by SDK-managed results. |
 | `PrimitivePolylineOverlay` | SDK-managed polyline overlay backed by Cesium `PolylineCollection`. |
 | `PrimitiveOverlaySnapshot` | Data-only primitive overlay snapshot for manual save/load. |
+| `SnapshotStorageAdapter` | Optional app-layer interface for saving and loading scene snapshots. |
+| `SnapshotStorageRecord` | Metadata returned by snapshot storage adapters. |
 | `PickResult` | Normalized result shape for Entity, 3D Tiles, imagery, and primitive picking. |
 | `PickOptions` | Options for drill picking and optional imagery feature queries. |
 | `SelectionState` | Current selected result and highlight state. |
@@ -292,7 +294,7 @@ map.analysis.terrain.setStyle(contour.id, {
 map.analysis.terrain.clear();
 ```
 
-Terrain results are SDK-managed and participate in `analysis.toJSON/load()` and scene snapshots with `includeResults: true`. `sampleStep` is meters. `maxSamples` protects the browser from accidental high-density requests. Volume, flooding, and excavation are first-stage sampled-cell estimates (`sampleStep * sampleStep` per sample), not survey-grade terrain solids or real terrain deformation. When the active terrain provider has no availability, results are marked as unsampled and use deterministic zero-height grid data.
+Terrain results are SDK-managed and participate in `analysis.toJSON/load()` and scene snapshots with `includeResults: true`. `sampleStep` is meters. `maxSamples` protects the browser from accidental high-density requests. Volume, flooding, and excavation default to sampled-cell estimates and can opt into `precision: { volumeMode: "triangulated" }`. Surface area can use `precision: { areaMode: "triangulated" }`. These are still engineering estimates, not survey-grade terrain solids or real terrain deformation. When the active terrain provider has no availability, results are marked as unsampled and use deterministic zero-height grid data.
 
 ## Scene State
 
@@ -306,16 +308,33 @@ map.sceneState.bookmarks.add({
   view
 });
 
-const snapshot = map.sceneState.toJSON({ includeResults: true });
+const snapshot = map.sceneState.toJSON({
+  includeResults: true,
+  includePrimitives: true
+});
 await map.sceneState.load(snapshot, {
   clearLayers: true,
   flyToCamera: true,
   restoreResults: true,
-  clearResults: true
+  clearResults: true,
+  restorePrimitives: true,
+  clearPrimitives: true
 });
 ```
 
-Scene snapshots include camera, recoverable layer configs, and camera bookmarks by default. Pass `includeResults: true` to also include SDK-managed draw, measure, visibility, profile, terrain, recoverable clipping results, and their serializable styles. Picked-object clipping, custom entities, Cesium runtime objects, and UI state are not serialized.
+Scene snapshots include camera, recoverable layer configs, and camera bookmarks by default. Pass `includeResults: true` to also include SDK-managed draw, measure, visibility, profile, terrain, recoverable clipping results, and their serializable styles. Pass `includePrimitives: true` to include SDK-managed primitive overlays. Picked-object clipping, custom entities, Cesium runtime objects, and UI state are not serialized.
+
+## Persistence Adapters
+
+```ts
+import { createMemorySnapshotStorage } from "@kairos3d/cesium/persistence";
+
+const storage = createMemorySnapshotStorage();
+await storage.save("latest", snapshot, { name: "Latest scene" });
+const restored = await storage.load("latest");
+```
+
+Adapters are optional. The SDK does not auto-write `localStorage` or call a backend.
 
 ## Interaction Results
 
@@ -351,7 +370,11 @@ await map.analysis.load(analysisState, { clear: true });
 
 const start = Cartesian3.fromDegrees(114.16, 22.31, 500);
 const end = Cartesian3.fromDegrees(114.22, 22.32, 500);
-const visibility = await map.analysis.visibility.compute({ start, end });
+const visibility = await map.analysis.visibility.compute({
+  start,
+  end,
+  occlusionMode: "terrain-and-scene"
+});
 const profile = await map.analysis.profile.compute({
   positions: [start, end],
   sampleCount: 128
@@ -408,7 +431,7 @@ map.primitives.clear();
 map.primitives.load(primitiveState, { clear: true });
 ```
 
-Primitive overlays are SDK-managed runtime graphics. The first implementation uses Cesium `PolylineCollection` for polyline overlays. They are not draw results, do not participate in `map.results`, and are not automatically included in scene snapshots yet.
+Primitive overlays are SDK-managed runtime graphics. The first implementation uses Cesium `PolylineCollection` for polyline overlays. They are not draw results and do not participate in `map.results`. Use `includePrimitives: true` when a scene snapshot should include them.
 
 Draw polyline/polygon and distance/area measurement results can opt into Primitive-backed rendering with `renderMode: "primitive"`. The result keeps the same public result shape and data-only snapshot fields, while the Cesium Primitive runtime objects are owned and cleaned up by `map.draw` or `map.analysis.measure`.
 
@@ -428,3 +451,4 @@ Draw polyline/polygon and distance/area measurement results can opt into Primiti
 | `results` | Aggregated SDK-managed result listing, lookup, cleanup, and events for business panels. |
 | `performance` | Runtime stats, budget warnings, and Primitive optimization candidate hints. |
 | `primitives` | SDK-managed Primitive polyline overlays with manual data-only snapshot/load. |
+| `persistence` | Optional memory and localStorage-compatible snapshot storage adapters. |

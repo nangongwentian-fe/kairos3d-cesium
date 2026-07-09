@@ -8,11 +8,11 @@ This page records the current development order after the first complete SDK ver
 | --- | --- | --- |
 | P0 | CI and verification guardrails | Keep the pushed first version reproducible before deeper changes. |
 | P0 | Primitive renderer integration | First stage complete for draw polyline/polygon and distance/area measurement; continue expanding only where it pays off. |
-| P0 | Runtime snapshot expansion | Make Primitive overlays participate in scene snapshots when requested. |
-| P1 | Analysis precision upgrades | Improve terrain area/volume and visibility correctness before adding more feature types. |
-| P1 | Interactive clipping and editing polish | Make clipping and existing result workflows more useful in real projects. |
-| P2 | UI and persistence adapters | Keep SDK core framework-free; build optional app-layer helpers later. |
-| P3 | Release, npm, and hosted deployments | Versioning, npm publishing, docs deployment, and examples deployment are intentionally lower priority for now. |
+| P0 | Runtime snapshot expansion | Complete: Primitive overlays participate in scene snapshots when requested. |
+| P1 | Analysis precision upgrades | Complete first pass: terrain triangulation and scene-aware visibility are available. |
+| P1 | Interactive clipping and editing polish | Complete first pass: clipping results have programmatic edit/update/cancel lifecycle. |
+| P2 | UI and persistence adapters | Complete first pass: examples helper adapters and optional snapshot storage adapters exist. |
+| P3 | Release, npm, and hosted deployments | Prepared, but still intentionally lower priority than SDK foundations. |
 
 ## Current Decision
 
@@ -31,12 +31,13 @@ The next phase should prioritize SDK capability foundations over package release
 | --- | --- | --- |
 | 1 | CI verification | Add GitHub Actions for `pnpm install`, `pnpm typecheck`, `pnpm test`, `pnpm lint`, and `pnpm build`. |
 | 2 | Primitive renderer backend | First stage complete: draw polyline/polygon and distance/area measurement support opt-in `renderMode: "primitive"`. |
-| 3 | Primitive scene snapshots | Include `map.primitives` in scene snapshots behind an explicit option, while keeping snapshots data-only. |
-| 4 | Terrain precision pass | Implement real terrain-surface area triangulation and improve volume/flood/excavation precision modes. |
-| 5 | Visibility occlusion pass | Add 3D Tiles/model-aware visibility checks where Cesium runtime APIs can support them. |
-| 6 | Clipping interaction pass | Add plane drag handles, clipping result editing, and clearer target lifecycle controls. |
-| 7 | Optional UI adapters | Add popup/property/profile chart helpers outside the SDK core, likely as examples first or a separate UI package later. |
-| 8 | Persistence adapters | Add optional snapshot storage adapters without making `localStorage` or server persistence part of SDK core. |
+| 3 | Primitive scene snapshots | Complete: `includePrimitives` / `restorePrimitives` keep primitive overlays data-only. |
+| 4 | Terrain precision pass | Complete first pass: sampled-cell remains default and triangulated area/volume modes are available. |
+| 5 | Visibility occlusion pass | Complete first pass: `occlusionMode` can use terrain, scene, or both. |
+| 6 | Clipping interaction pass | Complete first pass: edit/update/cancel APIs keep result ids stable. |
+| 7 | Optional UI adapters | Complete first pass: examples consume pick/profile/snapshot helper adapters outside SDK core. |
+| 8 | Persistence adapters | Complete first pass: memory and localStorage-compatible snapshot storage adapters are available. |
+| 9 | Release/npm/deploy hardening | Remaining: only do full publish/deploy work when release priority is raised. |
 
 ## Guardrails
 

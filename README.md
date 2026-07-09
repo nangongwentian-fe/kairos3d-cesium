@@ -31,6 +31,7 @@ pnpm dev:docs
 | `pnpm typecheck` | Runs TypeScript checks across all workspaces. |
 | `pnpm test` | Runs SDK unit tests. |
 | `pnpm lint` | Runs the current lightweight lint check, backed by TypeScript. |
+| `pnpm release:check` | Runs the full non-publishing release verification and SDK pack dry run. |
 
 ## Project Layout
 
@@ -70,6 +71,7 @@ The SDK is organized as small TypeScript modules instead of a global platform ob
 | `@kairos3d/cesium/results` | Aggregated SDK-managed result listing, lookup, removal, clearing, and result events. |
 | `@kairos3d/cesium/performance` | Runtime stats, budget warnings, and Primitive optimization candidate hints. |
 | `@kairos3d/cesium/primitives` | SDK-managed Primitive overlay helpers for performance-sensitive runtime graphics. |
+| `@kairos3d/cesium/persistence` | Optional app-layer snapshot storage adapters. |
 
 ## Advanced Layers
 
@@ -170,7 +172,7 @@ await map.analysis.profile.draw({
 
 ## Terrain Analysis
 
-Terrain analysis builds on the active viewer terrain provider. It includes terrain sample grids, slope/aspect summaries, contour line generation, and first-stage data estimates for volume, flooding, and excavation.
+Terrain analysis builds on the active viewer terrain provider. It includes terrain sample grids, slope/aspect summaries, contour line generation, and sampled-cell or triangulated estimates for volume, flooding, and excavation.
 
 ```ts
 const slope = await map.analysis.terrain.slopeAspect({
@@ -188,7 +190,8 @@ const contour = await map.analysis.terrain.contour({
 const volume = await map.analysis.terrain.volume({
   area,
   baseHeight: 12,
-  sampleStep: 30
+  sampleStep: 30,
+  precision: { volumeMode: "triangulated" }
 });
 
 const flood = await map.analysis.terrain.flood({
@@ -211,7 +214,7 @@ await map.analysis.terrain.drawContour({
 map.analysis.terrain.clear();
 ```
 
-Large terrain areas must use a coarser `sampleStep` or a higher explicit `maxSamples`. Volume, flooding, and excavation use approximate sampled-cell accumulation (`sampleStep * sampleStep` per sample), not survey-grade terrain solids. If the active terrain provider has no availability, the SDK returns deterministic unsampled grid data instead of inventing terrain heights.
+Large terrain areas must use a coarser `sampleStep` or a higher explicit `maxSamples`. Volume, flooding, and excavation default to compatible sampled-cell accumulation and can opt into triangulated estimates. They are still engineering estimates, not survey-grade terrain solids. If the active terrain provider has no availability, the SDK returns deterministic unsampled grid data instead of inventing terrain heights.
 
 ## Clipping
 
@@ -230,10 +233,13 @@ await map.analysis.clipping.drawPolygon({
 });
 
 map.analysis.clipping.setEnabled(plane.id, false);
+map.analysis.clipping.edit(plane.id);
+map.analysis.clipping.updatePlane(plane.id, { distance: 20 });
+map.analysis.clipping.stopEdit();
 map.analysis.clipping.clear();
 ```
 
-Polygon clipping depends on Cesium scene support for `ClippingPolygonCollection`. The SDK does not provide excavation widgets, plane drag handles, or popup UI in this stage.
+Polygon clipping depends on Cesium scene support for `ClippingPolygonCollection`. Clipping results can be programmatically edited with `edit/stopEdit/cancelEdit/updatePlane/updatePolygon`; popup UI and excavation widgets stay outside the SDK core.
 
 ## Scene State
 
@@ -249,16 +255,35 @@ map.sceneState.bookmarks.add({
   view
 });
 
-const snapshot = map.sceneState.toJSON({ includeResults: true });
+const snapshot = map.sceneState.toJSON({
+  includeResults: true,
+  includePrimitives: true
+});
 await map.sceneState.load(snapshot, {
   clearLayers: true,
   flyToCamera: true,
   restoreResults: true,
-  clearResults: true
+  clearResults: true,
+  restorePrimitives: true,
+  clearPrimitives: true
 });
 ```
 
-Runtime result snapshots are data-only. They restore SDK-managed draw, measure, visibility, profile, terrain, recoverable clipping results, and serializable SDK styles, but do not serialize custom Cesium entities, picked runtime objects, Cesium materials, callbacks, functions, or app UI state.
+Runtime result snapshots are data-only. They restore SDK-managed draw, measure, visibility, profile, terrain, recoverable clipping results, primitive overlays when requested, and serializable SDK styles, but do not serialize custom Cesium entities, picked runtime objects, Cesium materials, callbacks, functions, or app UI state.
+
+## Persistence Adapters
+
+Snapshot persistence is optional and app-controlled.
+
+```ts
+import { createMemorySnapshotStorage } from "@kairos3d/cesium/persistence";
+
+const storage = createMemorySnapshotStorage();
+await storage.save("latest", snapshot, { name: "Latest scene" });
+const restored = await storage.load("latest");
+```
+
+The SDK does not auto-write `localStorage` or call a backend. Use the adapter interface to connect snapshots to the storage layer chosen by the application.
 
 ## Result Management
 
@@ -312,7 +337,7 @@ map.primitives.clear();
 map.primitives.load(primitiveState, { clear: true });
 ```
 
-Primitive overlays are runtime graphics, not draw results. Draw polyline/polygon and distance/area measurement can also opt into Primitive-backed result rendering with `renderMode: "primitive"`; those result primitives are owned by their result manager rather than `map.primitives`. Primitive overlays have their own data-only snapshot API and are not automatically included in scene snapshots yet.
+Primitive overlays are runtime graphics, not draw results. Draw polyline/polygon and distance/area measurement can also opt into Primitive-backed result rendering with `renderMode: "primitive"`; those result primitives are owned by their result manager rather than `map.primitives`. Primitive overlays have their own data-only snapshot API and can participate in scene snapshots with `includePrimitives: true`.
 
 `references/SRC` and `references/mars3d-sdk-2.2` are migration references. Port algorithms feature by feature, but keep the new SDK free of global mutation, hardcoded tokens, legacy Cesium APIs, and DOM widget assumptions.
 

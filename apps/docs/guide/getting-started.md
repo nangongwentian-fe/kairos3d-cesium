@@ -95,12 +95,17 @@ map.sceneState.bookmarks.add({
   name: "Default view",
   view: cameraView
 });
-const snapshot = map.sceneState.toJSON({ includeResults: true });
+const snapshot = map.sceneState.toJSON({
+  includeResults: true,
+  includePrimitives: true
+});
 await map.sceneState.load(snapshot, {
   clearLayers: true,
   flyToCamera: true,
   restoreResults: true,
-  clearResults: true
+  clearResults: true,
+  restorePrimitives: true,
+  clearPrimitives: true
 });
 
 map.picking.enableClick({ select: true, includeImagery: false });
@@ -237,7 +242,7 @@ When the active terrain provider has no availability, terrain sampling returns t
 | --- | --- |
 | Current overlay | `map.primitives.addPolyline()` uses an SDK-owned Cesium `PolylineCollection`. |
 | Snapshot | `map.primitives.toJSON/load()` is data-only and does not serialize Cesium primitive instances. |
-| Scene snapshot | Primitive overlays are not included in `sceneState.toJSON({ includeResults: true })` yet. |
+| Scene snapshot | Primitive overlays are included only when `includePrimitives: true` is requested. |
 | Result rendering | Draw polyline/polygon and distance/area measurement can opt into Primitive-backed rendering with `renderMode: "primitive"`. |
 
 ## Terrain Analysis Notes
@@ -247,8 +252,8 @@ When the active terrain provider has no availability, terrain sampling returns t
 | `sampleStep` | Meters between grid samples; larger values are safer for large areas. |
 | `maxSamples` | Hard limit that prevents accidental high-density terrain requests. |
 | Provider availability | Missing availability returns deterministic unsampled grid data instead of fake terrain heights. |
-| Current terrain tools | Includes sampled grids, slope/aspect summaries, contour lines, and first-stage volume/flood/excavation estimates. |
-| Volume estimate | Uses sampled-cell accumulation, with each sample representing roughly `sampleStep * sampleStep` square meters. |
+| Current terrain tools | Includes sampled grids, slope/aspect summaries, contour lines, sampled-cell estimates, and triangulated estimates. |
+| Volume estimate | Defaults to sampled-cell accumulation and can opt into `precision: { volumeMode: "triangulated" }`. |
 | Excavation | Computes against a horizontal bottom plane; it does not modify terrain or create excavation walls. |
 
 ## Layer Notes

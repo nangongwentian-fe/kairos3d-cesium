@@ -8,7 +8,8 @@ export default defineConfig({
       { text: "Guide", link: "/guide/getting-started" },
       { text: "Architecture", link: "/guide/architecture" },
       { text: "Status", link: "/guide/first-version-status" },
-      { text: "Roadmap", link: "/guide/roadmap" }
+      { text: "Roadmap", link: "/guide/roadmap" },
+      { text: "Release", link: "/guide/release-prep" }
     ],
     sidebar: [
       {
@@ -17,7 +18,8 @@ export default defineConfig({
           { text: "Getting Started", link: "/guide/getting-started" },
           { text: "Architecture", link: "/guide/architecture" },
           { text: "First Version Status", link: "/guide/first-version-status" },
-          { text: "Roadmap", link: "/guide/roadmap" }
+          { text: "Roadmap", link: "/guide/roadmap" },
+          { text: "Release Preparation", link: "/guide/release-prep" }
         ]
       }
     ]

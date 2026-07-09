@@ -21,23 +21,24 @@ This page records what the current SDK can claim as the first complete version a
 | `tools` | Exclusive interactive tool lifecycle with shared start, stop, cancel, complete, point-add, and clear events. |
 | `draw` | Point/polyline/polygon drawing, result list/get/remove/clear, style updates, data-only snapshots, first-stage vertex editing, and opt-in Primitive rendering for polyline/polygon. |
 | `analysis.measure` | Distance, area, and height measurement with stable result records and cleanup, plus opt-in Primitive rendering for distance/area. |
-| `analysis.visibility` | Programmatic and picked two-point visibility results with managed entities. |
+| `analysis.visibility` | Programmatic and picked two-point visibility results with terrain and optional scene occlusion. |
 | `analysis.profile` | Polyline profile sampling, distance chain, min/max height, managed entities, and snapshots. |
-| `analysis.clipping` | Plane and polygon clipping for globe, managed layers, and compatible picked targets. |
-| `analysis.terrain` | Terrain sample grids, slope/aspect, contours, sampled-cell volume, flood, and excavation estimates. |
-| `scene` | Camera capture/fly-to, bookmarks, scene snapshots, and optional runtime result recovery. |
+| `analysis.clipping` | Plane and polygon clipping for globe, managed layers, compatible picked targets, and programmatic result editing. |
+| `analysis.terrain` | Terrain sample grids, slope/aspect, contours, sampled-cell and triangulated volume, flood, and excavation estimates. |
+| `scene` | Camera capture/fly-to, bookmarks, scene snapshots, optional runtime result recovery, and optional primitive overlay recovery. |
 | `picking` | Entity, GeoJSON, glTF, 3D Tiles, primitive, and optional imagery feature normalization. |
 | `style` | JSON-safe colors, default styles, presets, and result style serialization. |
 | `height` | Height modes, terrain sampling helpers, clamp helpers, and surface distance path. |
 | `results` | Aggregate listing, lookup, remove, clear, and events across SDK-managed draw and analysis results. |
 | `performance` | Runtime stats, result/layer counts, budget warnings, and Primitive optimization candidate hints. |
 | `primitives` | SDK-managed Primitive polyline overlays with manual data-only snapshot/load. |
+| `persistence` | Optional memory and localStorage-compatible snapshot storage adapters. |
 
 ## Snapshot Contract
 
 | Stored | Not stored |
 | --- | --- |
-| Camera view, bookmarks, recoverable layer configs. | Cesium runtime objects, providers, primitives, and custom entities. |
+| Camera view, bookmarks, recoverable layer configs, and optional primitive overlays. | Cesium runtime objects, providers, and custom entities. |
 | SDK-managed draw, measure, visibility, profile, terrain, and recoverable clipping results. | `PickResult.object`, 3D Tiles feature identity, picked-object clipping targets. |
 | JSON-safe positions, vectors, colors, timestamps, result ids, types, and height/style options. | Cesium `Material`, `CallbackProperty`, functions, popup state, and app UI state. |
 
@@ -45,10 +46,10 @@ This page records what the current SDK can claim as the first complete version a
 
 | Topic | Boundary |
 | --- | --- |
-| Terrain analysis | Volume, flooding, and excavation are sampled-cell estimates, not survey-grade solid modeling or real terrain deformation. |
-| Surface area | The type exists as a boundary; true triangulated terrain-surface area is not implemented yet. |
+| Terrain analysis | Volume, flooding, excavation, and surface area can use triangulated estimates, but they are not survey-grade solid modeling or real terrain deformation. |
+| Surface area | `surface` area is implemented through sampled grid triangulation. |
 | Primitive rendering | Entity rendering is still the default. Draw polyline/polygon and distance/area measurement can opt into Primitive-backed rendering with `renderMode: "primitive"`. |
-| Scene snapshots | Primitive overlays have their own snapshot API and are not included in `sceneState.toJSON({ includeResults: true })` yet. |
+| Scene snapshots | Primitive overlays are included only when `includePrimitives: true` is requested. |
 | UI widgets | Popup panels, property tables, chart components, and Mars3D-style widgets belong in apps, not the SDK core. |
 | Persistence | The SDK returns serializable data; apps decide whether to use files, localStorage, or a backend. |
 
