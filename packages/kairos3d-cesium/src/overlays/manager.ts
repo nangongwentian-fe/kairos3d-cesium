@@ -7,6 +7,10 @@ import {
 } from "../core/serialization";
 import { Evented } from "../core/events";
 import {
+  geoJSONToSnapshots,
+  snapshotsToGeoJSON
+} from "./geojson";
+import {
   cloneOverlayData,
   normalizeOverlayHeight,
   renderOverlayEntity,
@@ -15,20 +19,27 @@ import {
 } from "./render";
 import type {
   BillboardOverlayOptions,
+  BoxOverlayOptions,
   CircleOverlayOptions,
+  CorridorOverlayOptions,
+  CylinderOverlayOptions,
+  EllipseOverlayOptions,
+  KairosGeoJsonFeatureCollection,
   LabelOverlayOptions,
   ModelOverlayOptions,
   Overlay,
   OverlayConfig,
   OverlayData,
   OverlayLoadOptions,
+  OverlayQueryOptions,
   OverlaySnapshot,
   OverlayType,
   OverlayUpdateOptions,
   PointOverlayOptions,
   PolygonOverlayOptions,
   PolylineOverlayOptions,
-  RectangleOverlayOptions
+  RectangleOverlayOptions,
+  WallOverlayOptions
 } from "./types";
 import type { ResultSymbolStyle } from "../style";
 import {
@@ -53,7 +64,11 @@ interface PreparedOverlaySnapshot {
   style: ResultSymbolStyle;
   height?: Overlay["height"];
   show: boolean;
+  properties?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  group?: string;
+  locked: boolean;
+  editable: boolean;
 }
 
 let overlayIdSeed = 0;
@@ -142,6 +157,62 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     });
   }
 
+  addEllipse(options: EllipseOverlayOptions): Overlay {
+    return this.add({
+      ...options,
+      type: "ellipse",
+      positions: [options.center],
+      data: {
+        ...options.data,
+        semiMajorAxis: options.semiMajorAxis,
+        semiMinorAxis: options.semiMinorAxis
+      }
+    });
+  }
+
+  addWall(options: WallOverlayOptions): Overlay {
+    return this.add({
+      ...options,
+      type: "wall",
+      data: {
+        ...options.data,
+        minimumHeights: options.minimumHeights,
+        maximumHeights: options.maximumHeights
+      }
+    });
+  }
+
+  addCorridor(options: CorridorOverlayOptions): Overlay {
+    return this.add({
+      ...options,
+      type: "corridor",
+      data: { ...options.data, width: options.width }
+    });
+  }
+
+  addBox(options: BoxOverlayOptions): Overlay {
+    return this.add({
+      ...options,
+      type: "box",
+      positions: [options.position],
+      data: { ...options.data, dimensions: options.dimensions }
+    });
+  }
+
+  addCylinder(options: CylinderOverlayOptions): Overlay {
+    return this.add({
+      ...options,
+      type: "cylinder",
+      positions: [options.position],
+      data: {
+        ...options.data,
+        length: options.length,
+        topRadius: options.topRadius,
+        bottomRadius: options.bottomRadius
+      }
+    });
+  }
+
   update(id: string, options: OverlayUpdateOptions): Overlay {
     const overlay = this.overlays.get(id);
     if (!overlay) {
@@ -157,7 +228,11 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       ? normalizeOverlayHeight(options.height)
       : overlay.height;
     const show = options.show ?? overlay.show;
+    const properties = options.properties ?? overlay.properties;
     const metadata = options.metadata ?? overlay.metadata;
+    const group = options.group ?? overlay.group;
+    const locked = options.locked ?? overlay.locked;
+    const editable = options.editable ?? overlay.editable;
 
     validateOverlayShape(id, overlay.type, positions, data);
     this.map.viewer.entities.remove(overlay.entity);
@@ -175,7 +250,11 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     overlay.style = style;
     overlay.height = height;
     overlay.show = show;
+    overlay.properties = cloneRecord(properties);
     overlay.metadata = cloneMetadata(metadata);
+    overlay.group = group;
+    overlay.locked = locked;
+    overlay.editable = editable;
     overlay.updatedAt = new Date();
 
     this.emit("update", overlay);
@@ -221,12 +300,36 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     return overlay;
   }
 
+  setLocked(id: string, locked: boolean): Overlay {
+    const overlay = this.getRequired(id);
+    overlay.locked = locked;
+    overlay.updatedAt = new Date();
+    this.emit("update", overlay);
+    return overlay;
+  }
+
+  setEditable(id: string, editable: boolean): Overlay {
+    const overlay = this.getRequired(id);
+    overlay.editable = editable;
+    overlay.updatedAt = new Date();
+    this.emit("update", overlay);
+    return overlay;
+  }
+
+  setGroup(id: string, group: string | undefined): Overlay {
+    const overlay = this.getRequired(id);
+    overlay.group = group;
+    overlay.updatedAt = new Date();
+    this.emit("update", overlay);
+    return overlay;
+  }
+
   get(id: string): Overlay | undefined {
     return this.overlays.get(id);
   }
 
-  list(): Overlay[] {
-    return [...this.overlays.values()];
+  list(options: OverlayQueryOptions = {}): Overlay[] {
+    return [...this.overlays.values()].filter((overlay) => matchesOverlayQuery(overlay, options));
   }
 
   findByEntity(entity: unknown): Overlay | undefined {
@@ -242,10 +345,36 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       style: serializeSymbolStyle(overlay.style),
       height: normalizeOverlayHeight(overlay.height),
       show: overlay.show,
+      properties: cloneRecord(overlay.properties),
       metadata: cloneMetadata(overlay.metadata),
+      group: overlay.group,
+      locked: overlay.locked || undefined,
+      editable: overlay.editable === false ? false : undefined,
       createdAt: overlay.createdAt.toISOString(),
       updatedAt: overlay.updatedAt?.toISOString()
     }));
+  }
+
+  toKairosJSON(): OverlaySnapshot[] {
+    return this.toJSON();
+  }
+
+  async loadKairosJSON(
+    snapshots: OverlaySnapshot[],
+    options: OverlayLoadOptions = {}
+  ): Promise<Overlay[]> {
+    return this.load(snapshots, options);
+  }
+
+  toGeoJSON(): KairosGeoJsonFeatureCollection {
+    return snapshotsToGeoJSON(this.toJSON());
+  }
+
+  async loadGeoJSON(
+    geojson: KairosGeoJsonFeatureCollection,
+    options: OverlayLoadOptions = {}
+  ): Promise<Overlay[]> {
+    return this.load(geoJSONToSnapshots<OverlaySnapshot>(geojson), options);
   }
 
   async load(
@@ -278,6 +407,18 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     return true;
   }
 
+  removeGroup(group: string): number {
+    const overlays = this.list({ group });
+    for (const overlay of overlays) {
+      this.remove(overlay.id);
+    }
+    return overlays.length;
+  }
+
+  clearGroup(group: string): number {
+    return this.removeGroup(group);
+  }
+
   clear(): void {
     const removed = this.list();
     for (const overlay of removed) {
@@ -301,6 +442,8 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     const style = this.map.styles.resolveDrawStyle(config.type, config.style);
     const height = normalizeOverlayHeight(config.height);
     const show = config.show ?? true;
+    const locked = config.locked ?? false;
+    const editable = config.editable ?? true;
     validateOverlayShape(id, config.type, positions, data);
 
     return {
@@ -320,7 +463,11 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       style,
       height,
       show,
+      properties: cloneRecord(config.properties),
       metadata: cloneMetadata(config.metadata),
+      group: config.group,
+      locked,
+      editable,
       createdAt: new Date()
     };
   }
@@ -351,13 +498,29 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
         style: this.map.styles.resolveDrawStyle(snapshot.type, snapshot.style),
         height: normalizeOverlayHeight(snapshot.height),
         show: snapshot.show ?? true,
-        metadata: cloneMetadata(snapshot.metadata)
+        properties: cloneRecord(snapshot.properties),
+        metadata: cloneMetadata(snapshot.metadata),
+        group: snapshot.group,
+        locked: snapshot.locked ?? false,
+        editable: snapshot.editable ?? true
       };
     });
   }
 
   private restoreSnapshot(prepared: PreparedOverlaySnapshot): Overlay {
-    const { snapshot, positions, data, style, height, show, metadata } = prepared;
+    const {
+      snapshot,
+      positions,
+      data,
+      style,
+      height,
+      show,
+      properties,
+      metadata,
+      group,
+      locked,
+      editable
+    } = prepared;
     if (this.overlays.has(snapshot.id)) {
       this.remove(snapshot.id);
     }
@@ -379,13 +542,25 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       style,
       height,
       show,
+      properties,
       metadata,
+      group,
+      locked,
+      editable,
       createdAt: prepared.createdAt,
       updatedAt: prepared.updatedAt
     };
 
     this.overlays.set(overlay.id, overlay);
     this.emit("add", overlay);
+    return overlay;
+  }
+
+  private getRequired(id: string): Overlay {
+    const overlay = this.overlays.get(id);
+    if (!overlay) {
+      throw new Error(`Overlay "${id}" does not exist.`);
+    }
     return overlay;
   }
 }
@@ -406,7 +581,10 @@ function resolveUpdatedPositions(
       type === "circle" ||
       type === "billboard" ||
       type === "label" ||
-      type === "model")
+      type === "model" ||
+      type === "ellipse" ||
+      type === "box" ||
+      type === "cylinder")
   ) {
     return [Cartesian3.clone(singlePosition)];
   }
@@ -425,6 +603,33 @@ function mergeOverlayData(
 
   if (options.radius !== undefined) {
     data.radius = options.radius;
+  }
+  if (options.semiMajorAxis !== undefined) {
+    data.semiMajorAxis = options.semiMajorAxis;
+  }
+  if (options.semiMinorAxis !== undefined) {
+    data.semiMinorAxis = options.semiMinorAxis;
+  }
+  if (options.width !== undefined) {
+    data.width = options.width;
+  }
+  if (options.minimumHeights !== undefined) {
+    data.minimumHeights = [...options.minimumHeights];
+  }
+  if (options.maximumHeights !== undefined) {
+    data.maximumHeights = [...options.maximumHeights];
+  }
+  if (options.dimensions !== undefined) {
+    data.dimensions = cloneDimensions(options.dimensions);
+  }
+  if (options.length !== undefined) {
+    data.length = options.length;
+  }
+  if (options.topRadius !== undefined) {
+    data.topRadius = options.topRadius;
+  }
+  if (options.bottomRadius !== undefined) {
+    data.bottomRadius = options.bottomRadius;
   }
   if (options.text !== undefined) {
     data.text = options.text;
@@ -470,4 +675,38 @@ function cloneMetadata(
   metadata?: Record<string, unknown>
 ): Record<string, unknown> | undefined {
   return metadata ? { ...metadata } : undefined;
+}
+
+function cloneRecord(
+  record?: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  return record ? { ...record } : undefined;
+}
+
+function cloneDimensions(
+  dimensions: [number, number, number]
+): [number, number, number] {
+  return [dimensions[0], dimensions[1], dimensions[2]];
+}
+
+function matchesOverlayQuery(overlay: Overlay, options: OverlayQueryOptions): boolean {
+  if (options.type !== undefined) {
+    const types = Array.isArray(options.type) ? options.type : [options.type];
+    if (!types.includes(overlay.type)) {
+      return false;
+    }
+  }
+  if (options.group !== undefined && overlay.group !== options.group) {
+    return false;
+  }
+  if (options.visible !== undefined && overlay.show !== options.visible) {
+    return false;
+  }
+  if (options.locked !== undefined && overlay.locked !== options.locked) {
+    return false;
+  }
+  if (options.editable !== undefined && overlay.editable !== options.editable) {
+    return false;
+  }
+  return true;
 }

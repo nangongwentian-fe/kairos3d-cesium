@@ -19,7 +19,12 @@ const drawTypes: DrawType[] = [
   "rectangle",
   "billboard",
   "label",
-  "model"
+  "model",
+  "ellipse",
+  "wall",
+  "corridor",
+  "box",
+  "cylinder"
 ];
 
 export class StyleManager {
@@ -114,6 +119,26 @@ function createDefaultStyles(): SDKStyleDefaults {
       },
       model: {
         model: { scale: 1 }
+      },
+      ellipse: {
+        line: { color: Color.CYAN, width: 2, clampToGround: false },
+        polygon: { fillColor: Color.CYAN.withAlpha(0.22), outlineColor: Color.CYAN }
+      },
+      wall: {
+        line: { color: Color.CYAN, width: 2, clampToGround: false },
+        polygon: { fillColor: Color.CYAN.withAlpha(0.2), outlineColor: Color.CYAN }
+      },
+      corridor: {
+        line: { color: Color.CYAN, width: 2, clampToGround: false },
+        polygon: { fillColor: Color.CYAN.withAlpha(0.2), outlineColor: Color.CYAN }
+      },
+      box: {
+        line: { color: Color.CYAN, width: 2, clampToGround: false },
+        polygon: { fillColor: Color.CYAN.withAlpha(0.2), outlineColor: Color.CYAN }
+      },
+      cylinder: {
+        line: { color: Color.CYAN, width: 2, clampToGround: false },
+        polygon: { fillColor: Color.CYAN.withAlpha(0.2), outlineColor: Color.CYAN }
       }
     },
     measure: {

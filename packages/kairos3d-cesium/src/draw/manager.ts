@@ -22,6 +22,10 @@ import {
   renderOverlayEntity,
   validateOverlayShape
 } from "../overlays/render";
+import {
+  geoJSONToSnapshots,
+  snapshotsToGeoJSON
+} from "../overlays/geojson";
 import type { OverlayData } from "../overlays/types";
 import {
   createResultPolygonPrimitives,
@@ -36,15 +40,22 @@ import type {
   DrawEditReason,
   DrawEditStartOptions,
   DrawBillboardOptions,
+  DrawBoxOptions,
   DrawCircleOptions,
+  DrawCorridorOptions,
+  DrawCylinderOptions,
+  DrawEllipseOptions,
+  DrawGeoJsonFeatureCollection,
   DrawLabelOptions,
   DrawModelOptions,
+  DrawQueryOptions,
   DrawRectangleOptions,
   DrawResult,
   DrawResultLoadOptions,
   DrawResultSnapshot,
   DrawResultUpdateOptions,
-  DrawToolOptions
+  DrawToolOptions,
+  DrawWallOptions
 } from "./types";
 
 export interface DrawManagerEvents {
@@ -73,6 +84,12 @@ interface DrawProgrammaticConfig {
   style?: ResultSymbolStyle;
   height?: DrawResult["height"];
   renderMode?: DrawResult["renderMode"];
+  properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  group?: string;
+  show?: boolean;
+  locked?: boolean;
+  editable?: boolean;
 }
 
 let drawResultIdSeed = 0;
@@ -111,7 +128,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       data: { ...options.data, radius: options.radius },
       style: options.style,
       height: options.height,
-      renderMode: options.renderMode
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
     });
   }
 
@@ -123,7 +146,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       data: options.data,
       style: options.style,
       height: options.height,
-      renderMode: options.renderMode
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
     });
   }
 
@@ -135,7 +164,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       data: { ...options.data, image: options.image, scale: options.scale },
       style: options.style,
       height: options.height,
-      renderMode: options.renderMode
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
     });
   }
 
@@ -147,7 +182,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       data: { ...options.data, text: options.text },
       style: options.style,
       height: options.height,
-      renderMode: options.renderMode
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
     });
   }
 
@@ -168,7 +209,116 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       },
       style: options.style,
       height: options.height,
-      renderMode: options.renderMode
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
+    });
+  }
+
+  ellipse(options: DrawEllipseOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "ellipse",
+      positions: [options.center],
+      data: {
+        ...options.data,
+        semiMajorAxis: options.semiMajorAxis,
+        semiMinorAxis: options.semiMinorAxis
+      },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
+    });
+  }
+
+  wall(options: DrawWallOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "wall",
+      positions: options.positions,
+      data: {
+        ...options.data,
+        minimumHeights: options.minimumHeights,
+        maximumHeights: options.maximumHeights
+      },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
+    });
+  }
+
+  corridor(options: DrawCorridorOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "corridor",
+      positions: options.positions,
+      data: { ...options.data, width: options.width },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
+    });
+  }
+
+  box(options: DrawBoxOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "box",
+      positions: [options.position],
+      data: { ...options.data, dimensions: options.dimensions },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
+    });
+  }
+
+  cylinder(options: DrawCylinderOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "cylinder",
+      positions: [options.position],
+      data: {
+        ...options.data,
+        length: options.length,
+        topRadius: options.topRadius,
+        bottomRadius: options.bottomRadius
+      },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
     });
   }
 
@@ -202,6 +352,8 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     if (existing) {
       this.remove(result.id);
     }
+    ensureDrawResultState(result);
+    applyDrawResultShow(result, result.show);
     this.results.set(result.id, result);
     this.emit("add", result);
     return result;
@@ -211,8 +363,8 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     return this.results.get(id);
   }
 
-  list(): DrawResult[] {
-    return [...this.results.values()];
+  list(options: DrawQueryOptions = {}): DrawResult[] {
+    return [...this.results.values()].filter((result) => matchesDrawQuery(result, options));
   }
 
   toJSON(): DrawResultSnapshot[] {
@@ -221,6 +373,12 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       type: result.type,
       positions: serializePositions(result.positions),
       data: cloneOverlayData(result.data),
+      properties: cloneRecord(result.properties),
+      metadata: cloneRecord(result.metadata),
+      group: result.group,
+      show: result.show,
+      locked: result.locked || undefined,
+      editable: result.editable === false ? false : undefined,
       createdAt: result.createdAt.toISOString(),
       updatedAt: result.updatedAt?.toISOString(),
       style: serializeSymbolStyle(result.style),
@@ -239,6 +397,28 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     }
 
     return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+  }
+
+  toKairosJSON(): DrawResultSnapshot[] {
+    return this.toJSON();
+  }
+
+  async loadKairosJSON(
+    snapshots: DrawResultSnapshot[],
+    options: DrawResultLoadOptions = {}
+  ): Promise<DrawResult[]> {
+    return this.load(snapshots, options);
+  }
+
+  toGeoJSON(): DrawGeoJsonFeatureCollection {
+    return snapshotsToGeoJSON(this.toJSON());
+  }
+
+  async loadGeoJSON(
+    geojson: DrawGeoJsonFeatureCollection,
+    options: DrawResultLoadOptions = {}
+  ): Promise<DrawResult[]> {
+    return this.load(geoJSONToSnapshots<DrawResultSnapshot>(geojson), options);
   }
 
   setStyle(id: string, style: ResultSymbolStyle): DrawResult {
@@ -265,6 +445,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
         applySymbolStyleToEntities([result.entity], result.style);
       }
     }
+    applyDrawResultShow(result, result.show);
     return result;
   }
 
@@ -285,6 +466,12 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     result.height = update.height;
     result.style = update.style;
     result.renderMode = update.renderMode;
+    result.properties = update.properties;
+    result.metadata = update.metadata;
+    result.group = update.group;
+    result.show = update.show;
+    result.locked = update.locked;
+    result.editable = update.editable;
     result.updatedAt = new Date();
 
     if (result.renderMode === "primitive") {
@@ -299,6 +486,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     } else {
       rerenderDrawEntity(this.map, result);
     }
+    applyDrawResultShow(result, result.show);
     const event = {
       result,
       previousPositions,
@@ -307,6 +495,53 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     };
     this.emit("edit-change", event);
     return result;
+  }
+
+  setShow(id: string, show: boolean): DrawResult {
+    const result = this.getRequired(id);
+    result.show = show;
+    applyDrawResultShow(result, show);
+    result.updatedAt = new Date();
+    this.emit("edit-change", {
+      result,
+      previousPositions: clonePositions(result.positions),
+      positions: clonePositions(result.positions),
+      reason: "programmatic"
+    });
+    return result;
+  }
+
+  setLocked(id: string, locked: boolean): DrawResult {
+    const result = this.getRequired(id);
+    result.locked = locked;
+    result.updatedAt = new Date();
+    return result;
+  }
+
+  setEditable(id: string, editable: boolean): DrawResult {
+    const result = this.getRequired(id);
+    result.editable = editable;
+    result.updatedAt = new Date();
+    return result;
+  }
+
+  setGroup(id: string, group: string | undefined): DrawResult {
+    const result = this.getRequired(id);
+    result.group = group;
+    result.updatedAt = new Date();
+    return result;
+  }
+
+  removeGroup(group: string): number {
+    const results = this.list({ group });
+    for (const result of results) {
+      this.remove(result.id);
+    }
+    return results.length;
+  }
+
+  clearGroup(group: string): number {
+    return this.removeGroup(group);
   }
 
   remove(id: string): boolean {
@@ -378,6 +613,12 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       style,
       height,
       renderMode,
+      properties: cloneRecord(config.properties),
+      metadata: cloneRecord(config.metadata),
+      group: config.group,
+      show: config.show ?? true,
+      locked: config.locked ?? false,
+      editable: config.editable ?? true,
       primitives
     });
   }
@@ -385,8 +626,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   private resolveDrawUpdate(
     result: DrawResult,
     positionsOrOptions: Cartesian3[] | DrawResultUpdateOptions
-  ): Required<Pick<DrawResult, "positions" | "renderMode">> &
-    Pick<DrawResult, "data" | "height" | "style"> {
+  ): Required<
+    Pick<
+      DrawResult,
+      "positions" | "renderMode" | "show" | "locked" | "editable"
+    >
+  > &
+    Pick<DrawResult, "data" | "height" | "style" | "properties" | "metadata" | "group"> {
     const options = Array.isArray(positionsOrOptions)
       ? { positions: positionsOrOptions }
       : positionsOrOptions;
@@ -402,6 +648,9 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       result.type,
       options.renderMode ?? result.renderMode
     );
+    const show = options.show ?? result.show;
+    const locked = options.locked ?? result.locked;
+    const editable = options.editable ?? result.editable;
 
     validateOverlayShape(result.id, result.type, positions, data);
     return {
@@ -409,7 +658,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       data,
       height,
       style,
-      renderMode
+      renderMode,
+      properties: options.properties ? cloneRecord(options.properties) : result.properties,
+      metadata: options.metadata ? cloneRecord(options.metadata) : result.metadata,
+      group: options.group ?? result.group,
+      show,
+      locked,
+      editable
     };
   }
 
@@ -470,6 +725,12 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       entity,
       positions,
       data,
+      properties: cloneRecord(snapshot.properties),
+      metadata: cloneRecord(snapshot.metadata),
+      group: snapshot.group,
+      show: snapshot.show ?? true,
+      locked: snapshot.locked ?? false,
+      editable: snapshot.editable ?? true,
       createdAt: prepared.createdAt,
       updatedAt: prepared.updatedAt,
       style,
@@ -479,6 +740,14 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     };
 
     return this.addResult(result);
+  }
+
+  private getRequired(id: string): DrawResult {
+    const result = this.results.get(id);
+    if (!result) {
+      throw new Error(`Draw result "${id}" does not exist.`);
+    }
+    return result;
   }
 }
 
@@ -568,7 +837,10 @@ function resolveUpdatedPositions(
       type === "circle" ||
       type === "billboard" ||
       type === "label" ||
-      type === "model")
+      type === "model" ||
+      type === "ellipse" ||
+      type === "box" ||
+      type === "cylinder")
   ) {
     return [Cartesian3.clone(singlePosition)];
   }
@@ -587,6 +859,33 @@ function mergeDrawData(
 
   if (options.radius !== undefined) {
     data.radius = options.radius;
+  }
+  if (options.semiMajorAxis !== undefined) {
+    data.semiMajorAxis = options.semiMajorAxis;
+  }
+  if (options.semiMinorAxis !== undefined) {
+    data.semiMinorAxis = options.semiMinorAxis;
+  }
+  if (options.width !== undefined) {
+    data.width = options.width;
+  }
+  if (options.minimumHeights !== undefined) {
+    data.minimumHeights = [...options.minimumHeights];
+  }
+  if (options.maximumHeights !== undefined) {
+    data.maximumHeights = [...options.maximumHeights];
+  }
+  if (options.dimensions !== undefined) {
+    data.dimensions = cloneDimensions(options.dimensions);
+  }
+  if (options.length !== undefined) {
+    data.length = options.length;
+  }
+  if (options.topRadius !== undefined) {
+    data.topRadius = options.topRadius;
+  }
+  if (options.bottomRadius !== undefined) {
+    data.bottomRadius = options.bottomRadius;
   }
   if (options.text !== undefined) {
     data.text = options.text;
@@ -622,4 +921,55 @@ function mergeDrawData(
 function createDrawResultId(type: DrawResult["type"]): string {
   drawResultIdSeed += 1;
   return `draw-${type}-${drawResultIdSeed}`;
+}
+
+function ensureDrawResultState(result: DrawResult): void {
+  result.show = result.show ?? true;
+  result.locked = result.locked ?? false;
+  result.editable = result.editable ?? true;
+}
+
+function applyDrawResultShow(result: DrawResult, show: boolean): void {
+  result.entity.show = show;
+  for (const runtime of result.primitives ?? []) {
+    if (runtime.type === "polyline") {
+      runtime.polyline.show = show;
+    } else {
+      runtime.primitive.show = show;
+    }
+  }
+}
+
+function cloneRecord(
+  record?: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  return record ? { ...record } : undefined;
+}
+
+function cloneDimensions(
+  dimensions: [number, number, number]
+): [number, number, number] {
+  return [dimensions[0], dimensions[1], dimensions[2]];
+}
+
+function matchesDrawQuery(result: DrawResult, options: DrawQueryOptions): boolean {
+  if (options.type !== undefined) {
+    const types = Array.isArray(options.type) ? options.type : [options.type];
+    if (!types.includes(result.type)) {
+      return false;
+    }
+  }
+  if (options.group !== undefined && result.group !== options.group) {
+    return false;
+  }
+  if (options.visible !== undefined && result.show !== options.visible) {
+    return false;
+  }
+  if (options.locked !== undefined && result.locked !== options.locked) {
+    return false;
+  }
+  if (options.editable !== undefined && result.editable !== options.editable) {
+    return false;
+  }
+  return true;
 }

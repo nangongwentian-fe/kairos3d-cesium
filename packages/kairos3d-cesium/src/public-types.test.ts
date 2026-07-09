@@ -146,19 +146,26 @@ import type {
 } from "./primitives";
 import type {
   BillboardOverlayOptions,
+  BoxOverlayOptions,
   CircleOverlayOptions,
+  CorridorOverlayOptions,
+  CylinderOverlayOptions,
+  EllipseOverlayOptions,
+  KairosGeoJsonFeatureCollection,
   LabelOverlayOptions,
   ModelOverlayOptions,
   Overlay,
   OverlayConfig,
   OverlayData,
+  OverlayQueryOptions,
   OverlaySnapshot,
   OverlayType,
   OverlayUpdateOptions,
   PointOverlayOptions,
   PolygonOverlayOptions,
   PolylineOverlayOptions,
-  RectangleOverlayOptions
+  RectangleOverlayOptions,
+  WallOverlayOptions
 } from "./overlays";
 import type { SnapshotStorageAdapter, SnapshotStorageRecord } from "./persistence";
 
@@ -173,6 +180,11 @@ describe("public SDK types", () => {
       | "billboard"
       | "label"
       | "model"
+      | "ellipse"
+      | "wall"
+      | "corridor"
+      | "box"
+      | "cylinder"
     >();
     expectTypeOf<MeasureType>().toEqualTypeOf<"distance" | "area" | "height">();
     expectTypeOf<MeasureUnit>().toEqualTypeOf<"m" | "km" | "m2" | "km2">();
@@ -203,6 +215,12 @@ describe("public SDK types", () => {
       height?: HeightOptions;
       renderMode?: ResultRenderMode;
       primitives?: ResultPrimitiveRuntime[];
+      properties?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      group?: string;
+      show: boolean;
+      locked: boolean;
+      editable: boolean;
     }>();
 
     expectTypeOf<MeasureResult>().toMatchTypeOf<{
@@ -433,6 +451,12 @@ describe("public SDK types", () => {
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
       renderMode?: ResultRenderMode;
+      properties?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      group?: string;
+      show?: boolean;
+      locked?: boolean;
+      editable?: boolean;
     }>();
     expectTypeOf<MeasureResultSnapshot>().toMatchTypeOf<{
       id: string;
@@ -646,6 +670,11 @@ describe("public SDK types", () => {
         billboard?: ResultSymbolStyle;
         label?: ResultSymbolStyle;
         model?: ResultSymbolStyle;
+        ellipse?: ResultSymbolStyle;
+        wall?: ResultSymbolStyle;
+        corridor?: ResultSymbolStyle;
+        box?: ResultSymbolStyle;
+        cylinder?: ResultSymbolStyle;
       };
       selection?: SelectionSymbolStyle;
       terrain?: {
@@ -837,6 +866,15 @@ describe("public SDK types", () => {
     expectTypeOf<OverlayType>().toEqualTypeOf<DrawType>();
     expectTypeOf<OverlayData>().toEqualTypeOf<{
       radius?: number;
+      semiMajorAxis?: number;
+      semiMinorAxis?: number;
+      width?: number;
+      minimumHeights?: number[];
+      maximumHeights?: number[];
+      dimensions?: [number, number, number];
+      length?: number;
+      topRadius?: number;
+      bottomRadius?: number;
       text?: string;
       image?: string;
       uri?: string;
@@ -855,17 +893,35 @@ describe("public SDK types", () => {
       style?: ResultSymbolStyle;
       height?: HeightOptions;
       show?: boolean;
+      properties?: Record<string, unknown>;
       metadata?: Record<string, unknown>;
+      group?: string;
+      locked?: boolean;
+      editable?: boolean;
     }>();
     expectTypeOf<OverlayUpdateOptions>().toMatchTypeOf<{
       positions?: Cartesian3[];
       position?: Cartesian3;
       center?: Cartesian3;
       radius?: number;
+      semiMajorAxis?: number;
+      semiMinorAxis?: number;
+      width?: number;
+      minimumHeights?: number[];
+      maximumHeights?: number[];
+      dimensions?: [number, number, number];
+      length?: number;
+      topRadius?: number;
+      bottomRadius?: number;
       text?: string;
       image?: string;
       uri?: string;
       style?: ResultSymbolStyle;
+      properties?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      group?: string;
+      locked?: boolean;
+      editable?: boolean;
     }>();
     expectTypeOf<PointOverlayOptions>().toMatchTypeOf<{ position: Cartesian3 }>();
     expectTypeOf<PolylineOverlayOptions>().toMatchTypeOf<{ positions: Cartesian3[] }>();
@@ -896,6 +952,37 @@ describe("public SDK types", () => {
       pitch?: number;
       roll?: number;
     }>();
+    expectTypeOf<EllipseOverlayOptions>().toMatchTypeOf<{
+      center: Cartesian3;
+      semiMajorAxis: number;
+      semiMinorAxis: number;
+    }>();
+    expectTypeOf<WallOverlayOptions>().toMatchTypeOf<{
+      positions: Cartesian3[];
+      minimumHeights?: number[];
+      maximumHeights?: number[];
+    }>();
+    expectTypeOf<CorridorOverlayOptions>().toMatchTypeOf<{
+      positions: Cartesian3[];
+      width: number;
+    }>();
+    expectTypeOf<BoxOverlayOptions>().toMatchTypeOf<{
+      position: Cartesian3;
+      dimensions: [number, number, number];
+    }>();
+    expectTypeOf<CylinderOverlayOptions>().toMatchTypeOf<{
+      position: Cartesian3;
+      length: number;
+      topRadius: number;
+      bottomRadius: number;
+    }>();
+    expectTypeOf<OverlayQueryOptions>().toEqualTypeOf<{
+      type?: OverlayType | OverlayType[];
+      group?: string;
+      visible?: boolean;
+      locked?: boolean;
+      editable?: boolean;
+    }>();
     expectTypeOf<Overlay>().toMatchTypeOf<{
       id: string;
       type: OverlayType;
@@ -903,6 +990,11 @@ describe("public SDK types", () => {
       positions: Cartesian3[];
       data?: OverlayData;
       show: boolean;
+      properties?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      group?: string;
+      locked: boolean;
+      editable: boolean;
       createdAt: Date;
       updatedAt?: Date;
     }>();
@@ -914,8 +1006,20 @@ describe("public SDK types", () => {
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
       show: boolean;
+      properties?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      group?: string;
+      locked?: boolean;
+      editable?: boolean;
       createdAt: string;
       updatedAt?: string;
+    }>();
+    expectTypeOf<KairosGeoJsonFeatureCollection>().toMatchTypeOf<{
+      type: "FeatureCollection";
+      features: Array<{
+        type: "Feature";
+        properties: Record<string, unknown>;
+      }>;
     }>();
     expectTypeOf<KairosMap["overlays"]["add"]>().toMatchTypeOf<
       (config: OverlayConfig) => Overlay

@@ -16,7 +16,7 @@ export function minPositionCount(type: DrawType): number {
     return 3;
   }
 
-  if (type === "polyline" || type === "rectangle") {
+  if (type === "polyline" || type === "rectangle" || type === "wall" || type === "corridor") {
     return 2;
   }
 

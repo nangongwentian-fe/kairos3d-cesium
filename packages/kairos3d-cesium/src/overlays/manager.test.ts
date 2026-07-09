@@ -71,6 +71,34 @@ describe("OverlayManager", () => {
       pitch: 0.1,
       roll: 0.05
     });
+    const ellipse = manager.addEllipse({
+      id: "ellipse",
+      center: position(114, 22),
+      semiMajorAxis: 200,
+      semiMinorAxis: 120
+    });
+    const wall = manager.addWall({
+      id: "wall",
+      positions: [position(114, 22), position(114.01, 22.01)],
+      maximumHeights: [80, 90]
+    });
+    const corridor = manager.addCorridor({
+      id: "corridor",
+      positions: [position(114, 22), position(114.01, 22.01)],
+      width: 30
+    });
+    const box = manager.addBox({
+      id: "box",
+      position: position(114, 22),
+      dimensions: [10, 20, 30]
+    });
+    const cylinder = manager.addCylinder({
+      id: "cylinder",
+      position: position(114, 22),
+      length: 40,
+      topRadius: 8,
+      bottomRadius: 12
+    });
 
     expect(point.entity.point).toBeDefined();
     expect(polyline.entity.polyline).toBeDefined();
@@ -83,7 +111,53 @@ describe("OverlayManager", () => {
     expect(model.entity.model?.uri?.getValue()).toBe("/model.glb");
     expect(model.entity.orientation).toBeDefined();
     expect(model.data).toMatchObject({ heading: 0.2, pitch: 0.1, roll: 0.05 });
-    expect(manager.list()).toHaveLength(8);
+    expect(ellipse.entity.ellipse?.semiMajorAxis?.getValue()).toBe(200);
+    expect(ellipse.entity.ellipse?.semiMinorAxis?.getValue()).toBe(120);
+    expect(wall.entity.wall).toBeDefined();
+    expect(corridor.entity.corridor?.width?.getValue()).toBe(30);
+    expect(box.entity.box?.dimensions?.getValue()).toEqual(new Cartesian3(10, 20, 30));
+    expect(cylinder.entity.cylinder?.length?.getValue()).toBe(40);
+    expect(manager.list()).toHaveLength(13);
+  });
+
+  it("manages overlay state, filtered lists, and groups", () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    const first = manager.addPoint({
+      id: "first",
+      position: position(114, 22),
+      group: "draft",
+      properties: { name: "first" },
+      metadata: { source: "unit" }
+    });
+    const second = manager.addPoint({
+      id: "second",
+      position: position(114.01, 22.01),
+      group: "draft"
+    });
+
+    manager.setShow("first", false);
+    manager.setLocked("first", true);
+    manager.setEditable("first", false);
+    manager.setGroup("second", "published");
+
+    expect(first.entity.show).toBe(false);
+    expect(manager.list({ visible: false })).toEqual([first]);
+    expect(manager.list({ locked: true, editable: false })).toEqual([first]);
+    expect(manager.list({ group: "published" })).toEqual([second]);
+    expect(manager.toJSON()[0]).toMatchObject({
+      id: "first",
+      group: "draft",
+      properties: { name: "first" },
+      metadata: { source: "unit" },
+      show: false,
+      locked: true,
+      editable: false
+    });
+
+    expect(manager.removeGroup("draft")).toBe(1);
+    expect(manager.get("first")).toBeUndefined();
+    expect(manager.get("second")).toBe(second);
   });
 
   it("updates overlay data by recreating managed entity", () => {
@@ -164,6 +238,36 @@ describe("OverlayManager", () => {
     });
     expect(restored[0].data).toMatchObject({ heading: 0.3, pitch: 0.2, roll: 0.1 });
     expect(restored[0].entity.orientation).toBeDefined();
+  });
+
+  it("roundtrips overlays through Kairos JSON and GeoJSON", async () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    manager.addPolygon({
+      id: "polygon",
+      positions: [position(114, 22), position(114.01, 22), position(114.01, 22.01)],
+      group: "geo",
+      properties: { label: "polygon" }
+    });
+
+    const kairos = manager.toKairosJSON();
+    const geojson = manager.toGeoJSON();
+    manager.clear();
+    const restoredFromGeoJson = await manager.loadGeoJSON(geojson);
+
+    expect(geojson.type).toBe("FeatureCollection");
+    expect(geojson.features[0].geometry.type).toBe("Polygon");
+    expect(restoredFromGeoJson[0]).toMatchObject({
+      id: "polygon",
+      type: "polygon",
+      group: "geo",
+      properties: { label: "polygon" }
+    });
+
+    manager.clear();
+    const restoredFromKairos = await manager.loadKairosJSON(kairos);
+    expect(restoredFromKairos[0].id).toBe("polygon");
+    expect(restoredFromKairos[0].entity.polygon).toBeDefined();
   });
 
   it("rejects invalid snapshots before clearing existing overlays", async () => {

@@ -5,7 +5,16 @@ import type {
   ResultPrimitiveRuntime,
   ResultRenderMode
 } from "../primitives";
-import type { OverlayData } from "../overlays/types";
+import type {
+  BoxOverlayOptions,
+  CorridorOverlayOptions,
+  CylinderOverlayOptions,
+  EllipseOverlayOptions,
+  KairosGeoJsonFeatureCollection,
+  OverlayData,
+  OverlayQueryOptions,
+  WallOverlayOptions
+} from "../overlays/types";
 import type {
   ResultSymbolStyle,
   SerializableResultSymbolStyle
@@ -19,9 +28,16 @@ export type DrawType =
   | "rectangle"
   | "billboard"
   | "label"
-  | "model";
+  | "model"
+  | "ellipse"
+  | "wall"
+  | "corridor"
+  | "box"
+  | "cylinder";
 export type DrawEditReason = "drag" | "insert" | "delete" | "programmatic";
 export type DrawResultData = OverlayData;
+export type DrawQueryOptions = OverlayQueryOptions;
+export type DrawGeoJsonFeatureCollection = KairosGeoJsonFeatureCollection;
 
 export interface DrawStyle {
   pointColor?: Color;
@@ -37,6 +53,12 @@ export interface DrawResult {
   entity: Entity;
   positions: Cartesian3[];
   data?: DrawResultData;
+  properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  group?: string;
+  show: boolean;
+  locked: boolean;
+  editable: boolean;
   createdAt: Date;
   updatedAt?: Date;
   style?: ResultSymbolStyle;
@@ -50,6 +72,12 @@ export interface DrawResultSnapshot {
   type: DrawType;
   positions: SerializablePosition[];
   data?: DrawResultData;
+  properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  group?: string;
+  show?: boolean;
+  locked?: boolean;
+  editable?: boolean;
   createdAt: string;
   updatedAt?: string;
   style?: SerializableResultSymbolStyle;
@@ -64,6 +92,12 @@ export interface DrawToolOptions {
   once?: boolean;
   height?: HeightOptions;
   renderMode?: ResultRenderMode;
+  properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  group?: string;
+  show?: boolean;
+  locked?: boolean;
+  editable?: boolean;
 }
 
 export interface DrawCreateOptions {
@@ -71,6 +105,12 @@ export interface DrawCreateOptions {
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   renderMode?: ResultRenderMode;
+  properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  group?: string;
+  show?: boolean;
+  locked?: boolean;
+  editable?: boolean;
 }
 
 export interface DrawCircleOptions extends DrawCreateOptions {
@@ -118,12 +158,31 @@ export interface DrawModelOptions extends DrawCreateOptions {
   >;
 }
 
+export interface DrawEllipseOptions extends DrawCreateOptions, EllipseOverlayOptions {}
+
+export interface DrawWallOptions extends DrawCreateOptions, WallOverlayOptions {}
+
+export interface DrawCorridorOptions extends DrawCreateOptions, CorridorOverlayOptions {}
+
+export interface DrawBoxOptions extends DrawCreateOptions, BoxOverlayOptions {}
+
+export interface DrawCylinderOptions extends DrawCreateOptions, CylinderOverlayOptions {}
+
 export interface DrawResultUpdateOptions {
   positions?: Cartesian3[];
   position?: Cartesian3;
   center?: Cartesian3;
   data?: DrawResultData;
   radius?: number;
+  semiMajorAxis?: number;
+  semiMinorAxis?: number;
+  width?: number;
+  minimumHeights?: number[];
+  maximumHeights?: number[];
+  dimensions?: [number, number, number];
+  length?: number;
+  topRadius?: number;
+  bottomRadius?: number;
   text?: string;
   image?: string;
   uri?: string;
@@ -136,6 +195,12 @@ export interface DrawResultUpdateOptions {
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   renderMode?: ResultRenderMode;
+  properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  group?: string;
+  show?: boolean;
+  locked?: boolean;
+  editable?: boolean;
 }
 
 export interface DrawEditHandleStyle {

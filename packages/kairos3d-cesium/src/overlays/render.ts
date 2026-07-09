@@ -77,6 +77,28 @@ export function validateOverlayShape(
   if (type === "circle") {
     assertPositiveFinite(data?.radius, `Overlay "${id}" radius`);
   }
+  if (type === "ellipse") {
+    assertPositiveFinite(data?.semiMajorAxis, `Overlay "${id}" semiMajorAxis`);
+    assertPositiveFinite(data?.semiMinorAxis, `Overlay "${id}" semiMinorAxis`);
+  }
+  if (type === "corridor") {
+    assertPositiveFinite(data?.width, `Overlay "${id}" width`);
+  }
+  if (type === "wall") {
+    assertHeightArray(data?.minimumHeights, positions.length, `Overlay "${id}" minimumHeights`);
+    assertHeightArray(data?.maximumHeights, positions.length, `Overlay "${id}" maximumHeights`);
+  }
+  if (type === "box") {
+    assertPositiveDimensions(data?.dimensions, `Overlay "${id}" dimensions`);
+  }
+  if (type === "cylinder") {
+    assertPositiveFinite(data?.length, `Overlay "${id}" length`);
+    assertNonNegativeFinite(data?.topRadius, `Overlay "${id}" topRadius`);
+    assertNonNegativeFinite(data?.bottomRadius, `Overlay "${id}" bottomRadius`);
+    if ((data?.topRadius ?? 0) === 0 && (data?.bottomRadius ?? 0) === 0) {
+      throw new Error(`Overlay "${id}" cylinder requires at least one positive radius.`);
+    }
+  }
   if (type === "billboard" && !data?.image) {
     throw new Error(`Overlay "${id}" billboard image is required.`);
   }
@@ -93,7 +115,12 @@ export function minOverlayPositionCount(type: OverlayType): number {
     return 3;
   }
 
-  if (type === "polyline" || type === "rectangle") {
+  if (
+    type === "polyline" ||
+    type === "rectangle" ||
+    type === "wall" ||
+    type === "corridor"
+  ) {
     return 2;
   }
 
@@ -178,6 +205,73 @@ function createEntityOptions(options: OverlayRenderOptions) {
     };
   }
 
+  if (type === "ellipse") {
+    return {
+      id,
+      show,
+      position: new ConstantPositionProperty(positions[0]),
+      ellipse: createAreaGraphics(style, {
+        semiMajorAxis: data?.semiMajorAxis ?? 0,
+        semiMinorAxis: data?.semiMinorAxis ?? 0
+      })
+    };
+  }
+
+  if (type === "wall") {
+    return {
+      id,
+      show,
+      wall: {
+        positions: new ConstantProperty(positions),
+        minimumHeights: data?.minimumHeights,
+        maximumHeights: data?.maximumHeights,
+        ...createAreaGraphics(style)
+      }
+    };
+  }
+
+  if (type === "corridor") {
+    return {
+      id,
+      show,
+      corridor: {
+        positions: new ConstantProperty(positions),
+        width: data?.width ?? 0,
+        ...createAreaGraphics(style)
+      }
+    };
+  }
+
+  if (type === "box") {
+    return {
+      id,
+      show,
+      position: new ConstantPositionProperty(positions[0]),
+      box: {
+        dimensions: new Cartesian3(
+          data?.dimensions?.[0] ?? 0,
+          data?.dimensions?.[1] ?? 0,
+          data?.dimensions?.[2] ?? 0
+        ),
+        ...createAreaGraphics(style)
+      }
+    };
+  }
+
+  if (type === "cylinder") {
+    return {
+      id,
+      show,
+      position: new ConstantPositionProperty(positions[0]),
+      cylinder: {
+        length: data?.length ?? 0,
+        topRadius: data?.topRadius ?? 0,
+        bottomRadius: data?.bottomRadius ?? 0,
+        ...createAreaGraphics(style)
+      }
+    };
+  }
+
   if (type === "billboard") {
     return {
       id,
@@ -252,5 +346,39 @@ function createAreaGraphics(
 function assertPositiveFinite(value: unknown, label: string): asserts value is number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new Error(`${label} must be a positive finite number.`);
+  }
+}
+
+function assertNonNegativeFinite(value: unknown, label: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative finite number.`);
+  }
+}
+
+function assertPositiveDimensions(
+  value: unknown,
+  label: string
+): asserts value is [number, number, number] {
+  if (!Array.isArray(value) || value.length !== 3) {
+    throw new Error(`${label} must be a [x, y, z] number tuple.`);
+  }
+
+  for (const dimension of value) {
+    assertPositiveFinite(dimension, label);
+  }
+}
+
+function assertHeightArray(value: unknown, length: number, label: string): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!Array.isArray(value) || value.length !== length) {
+    throw new Error(`${label} must contain ${length} numbers.`);
+  }
+
+  for (const height of value) {
+    if (typeof height !== "number" || !Number.isFinite(height)) {
+      throw new Error(`${label} must contain finite numbers.`);
+    }
   }
 }

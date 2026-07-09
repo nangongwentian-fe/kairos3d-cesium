@@ -55,6 +55,9 @@ function createResult(id: string): DrawResult {
       }
     }),
     positions,
+    show: true,
+    locked: false,
+    editable: true,
     createdAt: new Date()
   };
 }
@@ -96,6 +99,40 @@ describe("DrawManager", () => {
       pitch: 0.2,
       roll: 0.1
     });
+    const ellipse = manager.ellipse({
+      id: "draw-ellipse",
+      center: Cartesian3.fromDegrees(114, 22),
+      semiMajorAxis: 200,
+      semiMinorAxis: 120
+    });
+    const wall = manager.wall({
+      id: "draw-wall",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.01)
+      ],
+      maximumHeights: [80, 90]
+    });
+    const corridor = manager.corridor({
+      id: "draw-corridor",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.01)
+      ],
+      width: 30
+    });
+    const box = manager.box({
+      id: "draw-box",
+      position: Cartesian3.fromDegrees(114, 22),
+      dimensions: [10, 20, 30]
+    });
+    const cylinder = manager.cylinder({
+      id: "draw-cylinder",
+      position: Cartesian3.fromDegrees(114, 22),
+      length: 40,
+      topRadius: 8,
+      bottomRadius: 12
+    });
 
     expect(circle.entity.ellipse?.semiMajorAxis?.getValue()).toBe(80);
     expect(rectangle.entity.rectangle).toBeDefined();
@@ -105,7 +142,65 @@ describe("DrawManager", () => {
     expect(model.entity.model?.uri?.getValue()).toBe("/model.glb");
     expect(model.entity.orientation).toBeDefined();
     expect(model.data).toMatchObject({ heading: 0.3, pitch: 0.2, roll: 0.1 });
-    expect(manager.list()).toEqual([circle, rectangle, billboard, label, model]);
+    expect(ellipse.entity.ellipse?.semiMajorAxis?.getValue()).toBe(200);
+    expect(wall.entity.wall).toBeDefined();
+    expect(corridor.entity.corridor?.width?.getValue()).toBe(30);
+    expect(box.entity.box?.dimensions?.getValue()).toEqual(new Cartesian3(10, 20, 30));
+    expect(cylinder.entity.cylinder?.length?.getValue()).toBe(40);
+    expect(manager.list()).toEqual([
+      circle,
+      rectangle,
+      billboard,
+      label,
+      model,
+      ellipse,
+      wall,
+      corridor,
+      box,
+      cylinder
+    ]);
+  });
+
+  it("manages draw result state, filtered lists, and groups", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const first = manager.circle({
+      id: "draw-first",
+      center: Cartesian3.fromDegrees(114, 22),
+      radius: 100,
+      group: "draft",
+      properties: { name: "first" },
+      metadata: { source: "unit" }
+    });
+    const second = manager.label({
+      id: "draw-second",
+      position: Cartesian3.fromDegrees(114.01, 22.01),
+      text: "Second",
+      group: "draft"
+    });
+
+    manager.setShow("draw-first", false);
+    manager.setLocked("draw-first", true);
+    manager.setEditable("draw-first", false);
+    manager.setGroup("draw-second", "published");
+
+    expect(first.entity.show).toBe(false);
+    expect(manager.list({ visible: false })).toEqual([first]);
+    expect(manager.list({ locked: true, editable: false })).toEqual([first]);
+    expect(manager.list({ group: "published" })).toEqual([second]);
+    expect(manager.toJSON()[0]).toMatchObject({
+      id: "draw-first",
+      group: "draft",
+      properties: { name: "first" },
+      metadata: { source: "unit" },
+      show: false,
+      locked: true,
+      editable: false
+    });
+
+    expect(manager.clearGroup("draft")).toBe(1);
+    expect(manager.get("draw-first")).toBeUndefined();
+    expect(manager.get("draw-second")).toBe(second);
   });
 
   it("keeps completed results when tools stop elsewhere", () => {
@@ -280,6 +375,46 @@ describe("DrawManager", () => {
     expect(restored[0].entity.orientation).toBeDefined();
   });
 
+  it("roundtrips draw results through Kairos JSON and GeoJSON", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const polygon = manager.addResult({
+      id: "draw-polygon",
+      type: "polygon",
+      entity: new Entity({ id: "draw-polygon" }),
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22),
+        Cartesian3.fromDegrees(114.01, 22.01)
+      ],
+      group: "geo",
+      properties: { label: "polygon" },
+      show: true,
+      locked: false,
+      editable: true,
+      createdAt: new Date()
+    });
+
+    const kairos = manager.toKairosJSON();
+    const geojson = manager.toGeoJSON();
+    manager.clear();
+    const restoredFromGeoJson = await manager.loadGeoJSON(geojson);
+
+    expect(geojson.type).toBe("FeatureCollection");
+    expect(geojson.features[0].geometry.type).toBe("Polygon");
+    expect(restoredFromGeoJson[0]).toMatchObject({
+      id: polygon.id,
+      type: "polygon",
+      group: "geo",
+      properties: { label: "polygon" }
+    });
+
+    manager.clear();
+    const restoredFromKairos = await manager.loadKairosJSON(kairos);
+    expect(restoredFromKairos[0].id).toBe("draw-polygon");
+    expect(restoredFromKairos[0].entity.polygon).toBeDefined();
+  });
+
   it("validates draw snapshots before clearing existing results", async () => {
     const map = createMapMock();
     const manager = new DrawManager(map);
@@ -376,6 +511,13 @@ describe("DrawManager", () => {
     expect(restored[0].primitives).toHaveLength(1);
     expect(manager.toJSON()[0].renderMode).toBe("primitive");
     expect(map.viewer.scene.primitives.add).toHaveBeenCalled();
+
+    manager.setShow("draw-primitive", false);
+    const runtime = manager.get("draw-primitive")?.primitives?.[0];
+    expect(manager.get("draw-primitive")?.entity.show).toBe(false);
+    if (runtime?.type === "polyline") {
+      expect(runtime.polyline.show).toBe(false);
+    }
 
     manager.setStyle("draw-primitive", {
       line: { color: "#35d07f", width: 6 }

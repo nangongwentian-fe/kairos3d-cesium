@@ -42,6 +42,9 @@ describe("draw geometry helpers", () => {
       type: "polyline",
       entity: new Entity({ id: "entity-1", polyline: { positions } }),
       positions,
+      show: true,
+      locked: false,
+      editable: true,
       createdAt: new Date()
     };
     const nextPositions = [new Cartesian3(2, 2, 2), new Cartesian3(3, 3, 3)];
@@ -60,6 +63,9 @@ describe("draw geometry helpers", () => {
       type: "polygon",
       entity: new Entity({ id: "entity-1" }),
       positions: [],
+      show: true,
+      locked: false,
+      editable: true,
       createdAt: new Date()
     };
 

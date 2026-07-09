@@ -14,10 +14,24 @@ export type OverlayType =
   | "rectangle"
   | "billboard"
   | "label"
-  | "model";
+  | "model"
+  | "ellipse"
+  | "wall"
+  | "corridor"
+  | "box"
+  | "cylinder";
 
 export interface OverlayData {
   radius?: number;
+  semiMajorAxis?: number;
+  semiMinorAxis?: number;
+  width?: number;
+  minimumHeights?: number[];
+  maximumHeights?: number[];
+  dimensions?: [number, number, number];
+  length?: number;
+  topRadius?: number;
+  bottomRadius?: number;
   text?: string;
   image?: string;
   uri?: string;
@@ -27,6 +41,15 @@ export interface OverlayData {
   heading?: number;
   pitch?: number;
   roll?: number;
+}
+
+export interface ManagedOverlayState {
+  properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  group?: string;
+  show?: boolean;
+  locked?: boolean;
+  editable?: boolean;
 }
 
 export interface OverlayConfig {
@@ -37,7 +60,11 @@ export interface OverlayConfig {
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   show?: boolean;
+  properties?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  group?: string;
+  locked?: boolean;
+  editable?: boolean;
 }
 
 export interface OverlayUpdateOptions {
@@ -46,6 +73,15 @@ export interface OverlayUpdateOptions {
   center?: Cartesian3;
   data?: OverlayData;
   radius?: number;
+  semiMajorAxis?: number;
+  semiMinorAxis?: number;
+  width?: number;
+  minimumHeights?: number[];
+  maximumHeights?: number[];
+  dimensions?: [number, number, number];
+  length?: number;
+  topRadius?: number;
+  bottomRadius?: number;
   text?: string;
   image?: string;
   uri?: string;
@@ -58,7 +94,11 @@ export interface OverlayUpdateOptions {
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   show?: boolean;
+  properties?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  group?: string;
+  locked?: boolean;
+  editable?: boolean;
 }
 
 export interface PointOverlayOptions extends Omit<OverlayConfig, "type" | "positions"> {
@@ -121,6 +161,52 @@ export interface ModelOverlayOptions
   >;
 }
 
+export interface EllipseOverlayOptions
+  extends Omit<OverlayConfig, "type" | "positions" | "data"> {
+  center: Cartesian3;
+  semiMajorAxis: number;
+  semiMinorAxis: number;
+  data?: Omit<OverlayData, "semiMajorAxis" | "semiMinorAxis">;
+}
+
+export interface WallOverlayOptions extends Omit<OverlayConfig, "type" | "data"> {
+  positions: Cartesian3[];
+  minimumHeights?: number[];
+  maximumHeights?: number[];
+  data?: Omit<OverlayData, "minimumHeights" | "maximumHeights">;
+}
+
+export interface CorridorOverlayOptions
+  extends Omit<OverlayConfig, "type" | "data"> {
+  positions: Cartesian3[];
+  width: number;
+  data?: Omit<OverlayData, "width">;
+}
+
+export interface BoxOverlayOptions
+  extends Omit<OverlayConfig, "type" | "positions" | "data"> {
+  position: Cartesian3;
+  dimensions: [number, number, number];
+  data?: Omit<OverlayData, "dimensions">;
+}
+
+export interface CylinderOverlayOptions
+  extends Omit<OverlayConfig, "type" | "positions" | "data"> {
+  position: Cartesian3;
+  length: number;
+  topRadius: number;
+  bottomRadius: number;
+  data?: Omit<OverlayData, "length" | "topRadius" | "bottomRadius">;
+}
+
+export interface OverlayQueryOptions {
+  type?: OverlayType | OverlayType[];
+  group?: string;
+  visible?: boolean;
+  locked?: boolean;
+  editable?: boolean;
+}
+
 export interface Overlay {
   id: string;
   type: OverlayType;
@@ -130,7 +216,11 @@ export interface Overlay {
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   show: boolean;
+  properties?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  group?: string;
+  locked: boolean;
+  editable: boolean;
   createdAt: Date;
   updatedAt?: Date;
 }
@@ -143,9 +233,28 @@ export interface OverlaySnapshot {
   style?: SerializableResultSymbolStyle;
   height?: HeightOptions;
   show: boolean;
+  properties?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  group?: string;
+  locked?: boolean;
+  editable?: boolean;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface KairosGeoJsonFeature {
+  type: "Feature";
+  id?: string;
+  geometry:
+    | { type: "Point"; coordinates: number[] }
+    | { type: "LineString"; coordinates: number[][] }
+    | { type: "Polygon"; coordinates: number[][][] };
+  properties: Record<string, unknown>;
+}
+
+export interface KairosGeoJsonFeatureCollection {
+  type: "FeatureCollection";
+  features: KairosGeoJsonFeature[];
 }
 
 export type OverlayLoadOptions = RuntimeResultLoadOptions;

@@ -70,7 +70,13 @@ export class DrawPointTool extends InteractiveTool<DrawToolOptions> {
       positions,
       createdAt: new Date(),
       style,
-      height
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show ?? true,
+      locked: this.options.locked ?? false,
+      editable: this.options.editable ?? true
     });
     this.emit("draw-created", result);
     this.notifyComplete(result);
@@ -173,7 +179,8 @@ export class DrawPolylineTool extends InteractiveTool<DrawToolOptions> {
         renderMode,
         renderMode === "primitive"
           ? renderDrawPrimitives(this.map, "polyline", entity.id, positions, style)
-          : undefined
+          : undefined,
+        this.options
       )
     );
     this.emit("draw-created", result);
@@ -322,7 +329,8 @@ export class DrawPolygonTool extends InteractiveTool<DrawToolOptions> {
         renderMode,
         renderMode === "primitive"
           ? renderDrawPrimitives(this.map, "polygon", entity.id, positions, style)
-          : undefined
+          : undefined,
+        this.options
       )
     );
     this.emit("draw-created", result);
@@ -479,7 +487,13 @@ export class DrawCircleTool extends InteractiveTool<DrawToolOptions> {
       center,
       radius,
       style,
-      height
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show,
+      locked: this.options.locked,
+      editable: this.options.editable
     });
     this.emit("draw-created", result);
     this.notifyComplete(result);
@@ -620,7 +634,13 @@ export class DrawRectangleTool extends InteractiveTool<DrawToolOptions> {
       id: createDrawId("rectangle"),
       positions,
       style,
-      height
+      height,
+      properties: this.options.properties,
+      metadata: this.options.metadata,
+      group: this.options.group,
+      show: this.options.show,
+      locked: this.options.locked,
+      editable: this.options.editable
     });
     this.emit("draw-created", result);
     this.notifyComplete(result);
@@ -673,7 +693,8 @@ function createDrawResult(
   style?: ResultSymbolStyle,
   height?: DrawResult["height"],
   renderMode?: ResultRenderMode,
-  primitives?: ResultPrimitiveRuntime[]
+  primitives?: ResultPrimitiveRuntime[],
+  options: DrawToolOptions = {}
 ): DrawResult {
   return {
     id: entity.id,
@@ -684,6 +705,12 @@ function createDrawResult(
     style,
     height,
     renderMode,
+    properties: options.properties,
+    metadata: options.metadata,
+    group: options.group,
+    show: options.show ?? true,
+    locked: options.locked ?? false,
+    editable: options.editable ?? true,
     primitives
   };
 }
