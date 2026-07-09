@@ -1,4 +1,4 @@
-import { Cartesian2, Cartesian3, Ellipsoid, Entity } from "cesium";
+import { Cartesian2, Cartesian3, Ellipsoid, Entity, SceneTransforms } from "cesium";
 import { describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
 import { PickingManager } from "./manager";
@@ -40,7 +40,8 @@ function createMapMock(picked: unknown[] = []) {
         findByRuntimeObject: vi.fn(() => layer)
       },
       overlays: {
-        findByEntity: vi.fn((entity: Entity) => overlays.get(entity))
+        findByEntity: vi.fn((entity: Entity) => overlays.get(entity)),
+        list: vi.fn(() => [...overlays.values()])
       },
       selection
     } as unknown as KairosMap,
@@ -122,5 +123,33 @@ describe("PickingManager", () => {
       }
     });
     expect(map.layers.findByRuntimeObject).not.toHaveBeenCalled();
+  });
+
+  it("falls back to overlay screen distance when Cesium drillPick misses an overlay", async () => {
+    const entity = new Entity({ id: "overlay-point" });
+    const { map, overlays } = createMapMock([]);
+    overlays.set(entity, {
+      id: "overlay-1",
+      type: "point",
+      entity,
+      positions: [new Cartesian3(1, 2, 3)],
+      style: { point: { pixelSize: 20 } },
+      show: true,
+      createdAt: new Date()
+    });
+    const transformSpy = vi
+      .spyOn(SceneTransforms, "worldToWindowCoordinates")
+      .mockReturnValue(new Cartesian2(14, 24));
+    const manager = new PickingManager(map);
+
+    const result = await manager.pick(new Cartesian2(10, 20), { width: 16, height: 16 });
+
+    expect(result).toMatchObject({
+      id: "overlay-point",
+      source: "overlay",
+      overlayId: "overlay-1",
+      overlayType: "point"
+    });
+    transformSpy.mockRestore();
   });
 });

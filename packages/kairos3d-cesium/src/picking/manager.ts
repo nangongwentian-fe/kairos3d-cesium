@@ -3,11 +3,13 @@ import {
   Cartesian3,
   type Cartographic,
   defined,
+  SceneTransforms,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType
 } from "cesium";
 import type { KairosMap } from "../core";
 import { Evented } from "../core";
+import type { Overlay } from "../overlays";
 import { getImageryFeature, getPickedEntity, getPrimitive, getTileFeature, normalizePickedObject } from "./normalize";
 import type { PickOptions, PickResult, PickingClickOptions, PickingManagerEvents } from "./types";
 
@@ -68,6 +70,25 @@ export class PickingManager extends Evented<PickingManagerEvents> {
 
     if (options.includeImagery) {
       results.push(...(await this.pickImageryFeatures(windowPosition, position, cartographic)));
+    }
+
+    if (!results.some((result) => result.source === "overlay")) {
+      const overlay = this.findOverlayByScreenDistance(windowPosition, options);
+      if (overlay) {
+        const overlayPosition = overlay.positions[0] ?? position;
+        const result = normalizePickedObject({
+          picked: overlay.entity,
+          overlay,
+          position: overlayPosition,
+          cartographic: overlayPosition
+            ? scene.globe?.ellipsoid.cartesianToCartographic(overlayPosition)
+            : cartographic,
+          windowPosition
+        });
+        if (result) {
+          results.unshift(result);
+        }
+      }
     }
 
     return dedupeResults(results).slice(0, options.limit ?? results.length);
@@ -174,6 +195,39 @@ export class PickingManager extends Evented<PickingManagerEvents> {
     const entity = getPickedEntity(picked);
     return entity ? this.map.overlays.findByEntity(entity) : undefined;
   }
+
+  private findOverlayByScreenDistance(
+    windowPosition: Cartesian2,
+    options: PickOptions
+  ): Overlay | undefined {
+    const pickRadius = Math.max(options.width ?? 1, options.height ?? 1, 12) / 2;
+    let nearest: { overlay: Overlay; distance: number } | undefined;
+
+    for (const overlay of this.map.overlays.list()) {
+      if (!overlay.show || overlay.positions.length === 0) {
+        continue;
+      }
+
+      const screenPosition = SceneTransforms.worldToWindowCoordinates(
+        this.map.viewer.scene,
+        overlay.positions[0]
+      );
+      if (!screenPosition) {
+        continue;
+      }
+
+      const radius = Math.max(pickRadius, overlayPickRadius(overlay));
+      const distance = Cartesian2.distance(windowPosition, screenPosition);
+      if (distance > radius) {
+        continue;
+      }
+      if (!nearest || distance < nearest.distance) {
+        nearest = { overlay, distance };
+      }
+    }
+
+    return nearest?.overlay;
+  }
 }
 
 function dedupeResults(results: PickResult[]): PickResult[] {
@@ -189,4 +243,20 @@ function dedupeResults(results: PickResult[]): PickResult[] {
   }
 
   return next;
+}
+
+function overlayPickRadius(overlay: Overlay): number {
+  if (overlay.type === "point") {
+    return (overlay.style?.point?.pixelSize ?? 8) / 2 + 6;
+  }
+  if (overlay.type === "billboard") {
+    return Math.max(overlay.style?.billboard?.width ?? 24, overlay.style?.billboard?.height ?? 24) / 2 + 6;
+  }
+  if (overlay.type === "label") {
+    return 24;
+  }
+  if (overlay.type === "model") {
+    return overlay.data?.minimumPixelSize ?? 24;
+  }
+  return 12;
 }

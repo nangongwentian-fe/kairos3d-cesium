@@ -5,6 +5,7 @@ import {
   ConstantPositionProperty,
   Cartographic,
   Entity,
+  SceneTransforms,
   ScreenSpaceEventType
 } from "cesium";
 import type { KairosMap } from "../core";
@@ -13,6 +14,7 @@ import { registerTool } from "../tools/registry";
 import {
   canDeletePosition,
   clonePositions,
+  isWithinHandleScreenDistance,
   midpoint
 } from "./geometry";
 import type {
@@ -30,6 +32,7 @@ interface EditHandle {
   index: number;
   insertIndex?: number;
   position: Cartesian3;
+  pixelSize: number;
 }
 
 const defaultHandleStyle = {
@@ -267,17 +270,18 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
     insertIndex?: number
   ): EditHandle {
     const style = this.options.handleStyle;
-      const color = selected
+    const color = selected
       ? style.selectedColor
       : kind === "vertex"
         ? style.vertexColor
         : style.midpointColor;
+    const pixelSize = kind === "midpoint" ? Math.max(6, style.pixelSize - 3) : style.pixelSize;
     const entity = this.viewer.entities.add({
       id: `draw-edit-${kind}-${Math.random().toString(36).slice(2, 10)}`,
       position,
       point: {
         color,
-        pixelSize: kind === "midpoint" ? Math.max(6, style.pixelSize - 3) : style.pixelSize,
+        pixelSize,
         outlineColor: Color.BLACK,
         outlineWidth: 1,
         disableDepthTestDistance: Number.POSITIVE_INFINITY
@@ -289,7 +293,8 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
       kind,
       index,
       insertIndex,
-      position: Cartesian3.clone(position)
+      position: Cartesian3.clone(position),
+      pixelSize
     };
   }
 
@@ -303,11 +308,34 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
   private pickHandle(windowPosition: Cartesian2): EditHandle | undefined {
     const picked = this.viewer.scene.pick(windowPosition);
     const pickedEntity = picked?.id;
-    if (!pickedEntity) {
-      return undefined;
+    if (pickedEntity) {
+      const pickedHandle = this.handles.find((handle) => handle.entity === pickedEntity);
+      if (pickedHandle) {
+        return pickedHandle;
+      }
     }
 
-    return this.handles.find((handle) => handle.entity === pickedEntity);
+    return this.pickNearestHandle(windowPosition);
+  }
+
+  private pickNearestHandle(windowPosition: Cartesian2): EditHandle | undefined {
+    let nearest: { handle: EditHandle; distance: number } | undefined;
+    for (const handle of this.handles) {
+      const screenPosition = SceneTransforms.worldToWindowCoordinates(
+        this.viewer.scene,
+        handle.position
+      );
+      if (!isWithinHandleScreenDistance(windowPosition, screenPosition, handle.pixelSize)) {
+        continue;
+      }
+
+      const distance = Cartesian2.distance(windowPosition, screenPosition);
+      if (!nearest || distance < nearest.distance) {
+        nearest = { handle, distance };
+      }
+    }
+
+    return nearest?.handle;
   }
 
   private setHandlePosition(handle: EditHandle, position: Cartesian3): void {

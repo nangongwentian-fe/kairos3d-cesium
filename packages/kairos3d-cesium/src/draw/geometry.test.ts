@@ -1,7 +1,8 @@
-import { Cartesian3, Entity } from "cesium";
+import { Cartesian2, Cartesian3, Entity } from "cesium";
 import { describe, expect, it } from "vitest";
 import {
   canDeletePosition,
+  isWithinHandleScreenDistance,
   midpoint,
   updateDrawResultGeometry
 } from "./geometry";
@@ -22,6 +23,16 @@ describe("draw geometry helpers", () => {
     const position = midpoint(new Cartesian3(0, 0, 0), new Cartesian3(2, 4, 6));
 
     expect(position).toEqual(new Cartesian3(1, 2, 3));
+  });
+
+  it("matches edit handles by screen distance as a picking fallback", () => {
+    expect(
+      isWithinHandleScreenDistance(new Cartesian2(100, 100), new Cartesian2(108, 100), 8)
+    ).toBe(true);
+    expect(
+      isWithinHandleScreenDistance(new Cartesian2(100, 100), new Cartesian2(130, 100), 8)
+    ).toBe(false);
+    expect(isWithinHandleScreenDistance(new Cartesian2(100, 100), undefined, 8)).toBe(false);
   });
 
   it("updates a draw result without replacing the result object", () => {

@@ -1,4 +1,5 @@
 import {
+  Cartesian2,
   Cartesian3,
   ConstantPositionProperty,
   ConstantProperty
@@ -28,6 +29,19 @@ export function canDeletePosition(type: DrawType, count: number): boolean {
 
 export function midpoint(start: Cartesian3, end: Cartesian3): Cartesian3 {
   return Cartesian3.midpoint(start, end, new Cartesian3());
+}
+
+export function isWithinHandleScreenDistance(
+  windowPosition: Cartesian2,
+  handleWindowPosition: Cartesian2 | undefined,
+  pixelSize: number
+): handleWindowPosition is Cartesian2 {
+  if (!handleWindowPosition) {
+    return false;
+  }
+
+  const threshold = Math.max(10, pixelSize / 2 + 4);
+  return Cartesian2.distance(windowPosition, handleWindowPosition) <= threshold;
 }
 
 export function updateDrawResultGeometry(
