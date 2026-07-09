@@ -10,6 +10,8 @@ export * from "./height";
 export * from "./results";
 export * from "./performance";
 export * from "./primitives";
+export * from "./overlays";
+export * from "./persistence";
 export {
   createViewer,
   destroyViewer,

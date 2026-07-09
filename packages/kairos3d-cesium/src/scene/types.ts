@@ -1,6 +1,8 @@
 import type { AnalysisResultsSnapshot } from "../analysis";
 import type { DrawResultSnapshot } from "../draw";
 import type { LayerConfig } from "../layers";
+import type { OverlaySnapshot } from "../overlays";
+import type { PrimitiveOverlaySnapshot } from "../primitives";
 
 export interface CameraView {
   longitude: number;
@@ -37,6 +39,8 @@ export interface SceneSnapshot {
   layers: LayerConfig[];
   bookmarks: CameraBookmark[];
   results?: RuntimeResultsSnapshot;
+  primitives?: PrimitiveOverlaySnapshot[];
+  overlays?: OverlaySnapshot[];
   createdAt: string;
 }
 
@@ -51,6 +55,8 @@ export interface RuntimeResultsSnapshot {
 
 export interface SceneStateSnapshotOptions {
   includeResults?: boolean;
+  includePrimitives?: boolean;
+  includeOverlays?: boolean;
 }
 
 export interface SceneStateLoadOptions {
@@ -58,4 +64,8 @@ export interface SceneStateLoadOptions {
   flyToCamera?: boolean;
   restoreResults?: boolean;
   clearResults?: boolean;
+  restorePrimitives?: boolean;
+  clearPrimitives?: boolean;
+  restoreOverlays?: boolean;
+  clearOverlays?: boolean;
 }

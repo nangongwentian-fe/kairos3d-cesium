@@ -6,6 +6,7 @@ import { LayerManager, type LayerConfig } from "../layers";
 import { PerformanceManager } from "../performance";
 import { PickingManager, SelectionManager } from "../picking";
 import { PrimitiveOverlayManager } from "../primitives";
+import { OverlayManager } from "../overlays";
 import { ResultManager } from "../results";
 import { SceneStateManager } from "../scene";
 import { StyleManager } from "../style";
@@ -37,6 +38,7 @@ export class KairosMap extends Evented<KairosMapEvents> {
   readonly results: ResultManager;
   readonly performance: PerformanceManager;
   readonly primitives: PrimitiveOverlayManager;
+  readonly overlays: OverlayManager;
 
   private destroyed = false;
 
@@ -54,6 +56,7 @@ export class KairosMap extends Evented<KairosMapEvents> {
     this.picking = new PickingManager(this);
     this.results = new ResultManager(this);
     this.primitives = new PrimitiveOverlayManager(this);
+    this.overlays = new OverlayManager(this);
     this.performance = new PerformanceManager(this);
   }
 
@@ -62,11 +65,12 @@ export class KairosMap extends Evented<KairosMapEvents> {
   }
 
   destroy(): void {
-    if (this.isDestroyed()) {
+    if (this.destroyed) {
       return;
     }
 
     this.primitives.destroy();
+    this.overlays.destroy();
     this.performance.destroy();
     this.results.destroy();
     this.tools.destroy();

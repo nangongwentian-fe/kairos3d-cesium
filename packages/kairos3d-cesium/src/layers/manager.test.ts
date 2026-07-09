@@ -195,6 +195,29 @@ describe("LayerManager", () => {
     );
   });
 
+  it("removes partially loaded layers when batch loading fails", async () => {
+    const created: MemoryLayer[] = [];
+    const manager = new LayerManager(createMapMock(), createRegistry(created));
+
+    await expect(
+      manager.load([
+        {
+          id: "base",
+          type: "xyz",
+          url: "https://example.com/base/{z}/{x}/{y}.png"
+        },
+        {
+          id: "base",
+          type: "xyz",
+          url: "https://example.com/duplicate/{z}/{x}/{y}.png"
+        }
+      ])
+    ).rejects.toThrow('Layer id "base" already exists.');
+
+    expect(created[0].destroyed).toBe(true);
+    expect(manager.list()).toEqual([]);
+  });
+
   it("flies to a managed layer and validates inputs", async () => {
     const created: MemoryLayer[] = [];
     const manager = new LayerManager(createMapMock(), createRegistry(created));

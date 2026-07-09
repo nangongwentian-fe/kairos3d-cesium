@@ -21,6 +21,14 @@ import type {
   PrimitivePolylineSnapshot
 } from "./types";
 
+interface PreparedPrimitivePolylineSnapshot {
+  options: Required<Pick<
+    PrimitivePolylineOptions,
+    "id" | "positions" | "color" | "width" | "show" | "loop"
+  >> & Pick<PrimitivePolylineOptions, "metadata">;
+  createdAt: Date;
+}
+
 export class PrimitiveOverlayManager {
   private readonly overlays = new Map<string, PrimitiveOverlay>();
   private polylineCollection?: PolylineCollection;
@@ -29,6 +37,7 @@ export class PrimitiveOverlayManager {
 
   addPolyline(options: PrimitivePolylineOptions): PrimitivePolylineOverlay {
     validatePositions(options.positions);
+    const width = normalizePolylineWidth(options.width);
     const id = options.id ?? createPrimitiveOverlayId("polyline");
     if (this.overlays.has(id)) {
       throw new Error(`Primitive overlay "${id}" already exists.`);
@@ -41,7 +50,7 @@ export class PrimitiveOverlayManager {
       material: Material.fromType("Color", {
         color: parseColorLike(color, "primitive.polyline.color")
       }),
-      width: options.width ?? 2,
+      width,
       show: options.show ?? true,
       loop: options.loop ?? false,
       id
@@ -51,7 +60,7 @@ export class PrimitiveOverlayManager {
       type: "polyline",
       positions: clonePositions(options.positions),
       color,
-      width: options.width ?? 2,
+      width,
       show: options.show ?? true,
       loop: options.loop ?? false,
       polyline,
@@ -108,31 +117,24 @@ export class PrimitiveOverlayManager {
     snapshots: PrimitiveOverlaySnapshot[],
     options: { clear?: boolean } = {}
   ): PrimitiveOverlay[] {
+    const prepared = preparePrimitiveSnapshots(snapshots);
     if (options.clear) {
       this.clear();
     }
-    return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
+    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
   destroy(): void {
     this.clear();
   }
 
-  private restoreSnapshot(snapshot: PrimitiveOverlaySnapshot): PrimitiveOverlay {
-    if (this.overlays.has(snapshot.id)) {
-      this.remove(snapshot.id);
+  private restoreSnapshot(snapshot: PreparedPrimitivePolylineSnapshot): PrimitiveOverlay {
+    if (this.overlays.has(snapshot.options.id)) {
+      this.remove(snapshot.options.id);
     }
 
-    const overlay = this.addPolyline({
-      id: snapshot.id,
-      positions: deserializePositions(snapshot.positions),
-      color: snapshot.color,
-      width: snapshot.width,
-      show: snapshot.show,
-      loop: snapshot.loop,
-      metadata: snapshot.metadata
-    });
-    overlay.createdAt = parseSnapshotDate(snapshot.createdAt, "Primitive overlay createdAt");
+    const overlay = this.addPolyline(snapshot.options);
+    overlay.createdAt = snapshot.createdAt;
     return overlay;
   }
 
@@ -181,6 +183,43 @@ function validatePositions(positions: Cartesian3[]): void {
   if (positions.length < 2) {
     throw new Error("Primitive polyline overlay requires at least two positions.");
   }
+}
+
+function normalizePolylineWidth(width = 2): number {
+  if (!Number.isFinite(width) || width <= 0) {
+    throw new Error("Primitive polyline width must be a positive finite number.");
+  }
+
+  return width;
+}
+
+function preparePrimitiveSnapshots(
+  snapshots: PrimitiveOverlaySnapshot[]
+): PreparedPrimitivePolylineSnapshot[] {
+  const ids = new Set<string>();
+  return snapshots.map((snapshot) => {
+    if (ids.has(snapshot.id)) {
+      throw new Error(`Primitive overlay snapshot id "${snapshot.id}" is duplicated.`);
+    }
+    ids.add(snapshot.id);
+
+    const positions = deserializePositions(snapshot.positions);
+    validatePositions(positions);
+    const width = normalizePolylineWidth(snapshot.width);
+
+    return {
+      options: {
+        id: snapshot.id,
+        positions,
+        color: snapshot.color,
+        width,
+        show: snapshot.show,
+        loop: snapshot.loop,
+        metadata: snapshot.metadata
+      },
+      createdAt: parseSnapshotDate(snapshot.createdAt, "Primitive overlay createdAt")
+    };
+  });
 }
 
 function clonePositions(positions: Cartesian3[]): Cartesian3[] {

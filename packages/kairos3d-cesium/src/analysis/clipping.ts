@@ -22,6 +22,7 @@ import type { ResultSymbolStyle } from "../style";
 import {
   applySymbolStyleToEntities,
   createLineGraphics,
+  createPointGraphics,
   mergeSymbolStyles,
   parseColorLike,
   serializeSymbolStyle
@@ -30,8 +31,10 @@ import type { Tool } from "../tools";
 import type {
   ClippingResultSnapshot,
   ClippingPlaneOptions,
+  ClippingPlaneUpdateOptions,
   ClippingPolygonDrawOptions,
   ClippingPolygonOptions,
+  ClippingPolygonUpdateOptions,
   ClippingResult,
   ClippingSnapshotTarget,
   ClippingTarget,
@@ -59,6 +62,29 @@ interface ClippingResultMeta {
   style?: ResultSymbolStyle;
 }
 
+type ClippingEditSnapshot =
+  | {
+      type: "plane";
+      normal: Cartesian3;
+      distance: number;
+      enabled: boolean;
+      style?: ResultSymbolStyle;
+    }
+  | {
+      type: "polygon";
+      positions: Cartesian3[];
+      enabled: boolean;
+      inverse?: boolean;
+      quality?: number;
+      style?: ResultSymbolStyle;
+    };
+
+interface ClippingEditState {
+  id: string;
+  snapshot: ClippingEditSnapshot;
+  handles: Entity[];
+}
+
 export interface ClippingManagerEvents {
   add: ClippingResult;
   update: ClippingResult;
@@ -71,6 +97,7 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   private readonly targetResultIds = new Map<string, string>();
   private readonly objectKeys = new WeakMap<object, string>();
   private objectKeyCounter = 0;
+  private editState?: ClippingEditState;
 
   constructor(private readonly map: KairosMap) {
     super();
@@ -144,6 +171,104 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     return this.map.tools.start("analysis.clipping.drawPolygon", options);
   }
 
+  edit(id: string): ClippingResult {
+    const runtime = this.requireRuntime(id);
+    this.map.tools.stop();
+    this.clearEditHandles();
+    this.editState = {
+      id,
+      snapshot: captureEditSnapshot(runtime.result),
+      handles: renderEditHandles(this.map, runtime.result)
+    };
+    return runtime.result;
+  }
+
+  stopEdit(): ClippingResult | undefined {
+    const state = this.editState;
+    this.clearEditHandles();
+    return state ? this.get(state.id) : undefined;
+  }
+
+  cancelEdit(): ClippingResult | undefined {
+    const state = this.editState;
+    if (!state) {
+      return undefined;
+    }
+
+    const result =
+      state.snapshot.type === "plane"
+        ? this.updatePlane(state.id, state.snapshot)
+        : this.updatePolygon(state.id, state.snapshot.positions, state.snapshot);
+    this.clearEditHandles();
+    return result;
+  }
+
+  updatePlane(id: string, options: ClippingPlaneUpdateOptions): ClippingResult {
+    const runtime = this.requireRuntime(id);
+    if (runtime.result.type !== "plane") {
+      throw new Error(`Clipping result "${id}" is not a plane clipping result.`);
+    }
+
+    const current = runtime.result.collection as ClippingPlaneCollection;
+    const currentPlane = current.get(0);
+    const normal = options.normal ? normalizeNormal(options.normal) : currentPlane.normal;
+    const distance = options.distance ?? currentPlane.distance;
+    if (!Number.isFinite(distance)) {
+      throw new Error("Plane clipping distance must be a finite number.");
+    }
+
+    const style = this.map.styles.resolveClippingStyle(
+      mergeSymbolStyles(runtime.result.style, clippingUpdateOptionsToStyle(options))
+    );
+    const collection = new ClippingPlaneCollection({
+      planes: [new ClippingPlane(normal, distance)],
+      enabled: options.enabled ?? runtime.result.enabled,
+      unionClippingRegions: options.unionClippingRegions ?? current.unionClippingRegions,
+      edgeColor: style.line?.color
+        ? parseColorLike(style.line.color, "clipping.line.color")
+        : current.edgeColor,
+      edgeWidth: style.line?.width ?? current.edgeWidth
+    });
+
+    return this.replaceRuntime(runtime, collection, [], undefined, style);
+  }
+
+  updatePolygon(
+    id: string,
+    positions: Cartesian3[],
+    options: ClippingPolygonUpdateOptions = {}
+  ): ClippingResult {
+    const runtime = this.requireRuntime(id);
+    if (runtime.result.type !== "polygon") {
+      throw new Error(`Clipping result "${id}" is not a polygon clipping result.`);
+    }
+    if (positions.length < 3) {
+      throw new Error("Polygon clipping requires at least three positions.");
+    }
+    if (typeof options.quality === "number" && options.quality <= 0) {
+      throw new Error("Polygon clipping quality must be greater than 0.");
+    }
+
+    const current = runtime.result.collection as ClippingPolygonCollection;
+    const style = this.map.styles.resolveClippingStyle(
+      mergeSymbolStyles(runtime.result.style, options.style)
+    );
+    const nextPositions = clonePositions(positions);
+    const collection = new ClippingPolygonCollection({
+      polygons: [new ClippingPolygon({ positions: nextPositions })],
+      enabled: options.enabled ?? runtime.result.enabled,
+      inverse: options.inverse ?? current.inverse,
+      quality: options.quality ?? current.quality
+    });
+    return this.replaceRuntime(
+      runtime,
+      collection,
+      [renderPolygonBoundary(this.map, nextPositions, style)],
+      nextPositions,
+      style
+    );
+  }
+
   setEnabled(id: string, enabled: boolean): ClippingResult {
     const runtime = this.requireRuntime(id);
     runtime.result.collection.enabled = enabled;
@@ -180,6 +305,7 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     snapshots: ClippingResultSnapshot[],
     options: RuntimeResultLoadOptions = {}
   ): Promise<ClippingResult[]> {
+    this.prepareSnapshots(snapshots);
     if (options.clear) {
       this.clear();
     }
@@ -193,6 +319,9 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
       return false;
     }
 
+    if (this.editState?.id === id) {
+      this.clearEditHandles();
+    }
     this.restoreRuntime(runtime);
     this.results.delete(id);
     this.targetResultIds.delete(runtime.target.key);
@@ -202,6 +331,7 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   }
 
   clear(): void {
+    this.clearEditHandles();
     const removed = [...this.results.values()];
     for (const runtime of removed) {
       this.restoreRuntime(runtime);
@@ -293,6 +423,39 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     );
   }
 
+  private prepareSnapshots(snapshots: ClippingResultSnapshot[]): void {
+    const ids = new Set<string>();
+    for (const snapshot of snapshots) {
+      if (ids.has(snapshot.id)) {
+        throw new Error(`Clipping result snapshot id "${snapshot.id}" is duplicated.`);
+      }
+      ids.add(snapshot.id);
+      parseSnapshotDate(snapshot.createdAt, "Clipping result createdAt");
+      const target = snapshotTargetToTarget(snapshot.target);
+      this.resolveTarget(target, snapshot.type);
+
+      if (snapshot.type === "plane") {
+        normalizeNormal(deserializeVector3(snapshot.normal));
+        if (!Number.isFinite(snapshot.distance)) {
+          throw new Error("Plane clipping distance must be a finite number.");
+        }
+        this.map.styles.resolveClippingStyle(snapshot.style);
+      } else {
+        const positions = deserializePositions(snapshot.positions);
+        if (positions.length < 3) {
+          throw new Error("Polygon clipping requires at least three positions.");
+        }
+        if (typeof snapshot.quality === "number" && snapshot.quality <= 0) {
+          throw new Error("Polygon clipping quality must be greater than 0.");
+        }
+        if (!ClippingPolygonCollection.isSupported(this.map.viewer.scene)) {
+          throw new Error("Polygon clipping is not supported by the current Cesium scene.");
+        }
+        this.map.styles.resolveClippingStyle(snapshot.style);
+      }
+    }
+  }
+
   private requireRuntime(id: string): ClippingRuntime {
     const runtime = this.results.get(id);
     if (!runtime) {
@@ -306,6 +469,46 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     runtime.target.object[runtime.target.property] = runtime.previousCollection;
     removeEntities(this.map, runtime.result.entities);
     destroyCollection(runtime.result.collection);
+  }
+
+  private replaceRuntime(
+    runtime: ClippingRuntime,
+    collection: ClippingResult["collection"],
+    entities: Entity[],
+    positions: Cartesian3[] | undefined,
+    style: ResultSymbolStyle
+  ): ClippingResult {
+    removeEntities(this.map, runtime.result.entities);
+    destroyCollection(runtime.result.collection);
+    runtime.target.object[runtime.target.property] = collection;
+    runtime.result.collection = collection;
+    runtime.result.enabled = collection.enabled;
+    runtime.result.entities = entities;
+    runtime.result.positions = positions;
+    runtime.result.style = style;
+    this.refreshEditHandles(runtime.result);
+    this.emit("update", runtime.result);
+    return runtime.result;
+  }
+
+  private refreshEditHandles(result: ClippingResult): void {
+    if (!this.editState || this.editState.id !== result.id) {
+      return;
+    }
+
+    removeEntities(this.map, this.editState.handles);
+    this.editState = {
+      ...this.editState,
+      handles: renderEditHandles(this.map, result)
+    };
+  }
+
+  private clearEditHandles(): void {
+    if (!this.editState) {
+      return;
+    }
+    removeEntities(this.map, this.editState.handles);
+    this.editState = undefined;
   }
 
   private resolveTarget(target: ClippingTarget, type: ClippingType): ResolvedClippingTarget {
@@ -556,4 +759,70 @@ function applyClippingCollectionStyle(
   if (style.line.width !== undefined) {
     collection.edgeWidth = style.line.width;
   }
+}
+
+function captureEditSnapshot(result: ClippingResult): ClippingEditSnapshot {
+  if (result.type === "plane") {
+    const collection = result.collection as ClippingPlaneCollection;
+    const plane = collection.get(0);
+    return {
+      type: "plane",
+      normal: Cartesian3.clone(plane.normal),
+      distance: plane.distance,
+      enabled: result.enabled,
+      style: result.style
+    };
+  }
+
+  const collection = result.collection as ClippingPolygonCollection;
+  return {
+    type: "polygon",
+    positions: clonePositions(result.positions ?? collection.get(0).positions),
+    enabled: result.enabled,
+    inverse: collection.inverse,
+    quality: collection.quality,
+    style: result.style
+  };
+}
+
+function renderEditHandles(map: KairosMap, result: ClippingResult): Entity[] {
+  const style = mergeSymbolStyles(
+    {
+      point: { color: "#ffd400", pixelSize: 10, outlineColor: "#000000", outlineWidth: 1 }
+    },
+    result.style
+  );
+
+  if (result.type === "plane") {
+    const collection = result.collection as ClippingPlaneCollection;
+    const plane = collection.get(0);
+    const distance = Math.abs(plane.distance) > 0 ? plane.distance : 1;
+    return [
+      map.viewer.entities.add({
+        position: Cartesian3.multiplyByScalar(plane.normal, distance, new Cartesian3()),
+        point: createPointGraphics(style.point)
+      })
+    ];
+  }
+
+  const collection = result.collection as ClippingPolygonCollection;
+  const positions = result.positions ?? collection.get(0).positions;
+  return positions.map((position) =>
+    map.viewer.entities.add({
+      position,
+      point: createPointGraphics(style.point)
+    })
+  );
+}
+
+function clippingUpdateOptionsToStyle(options: ClippingPlaneUpdateOptions): ResultSymbolStyle {
+  return mergeSymbolStyles(
+    {
+      line: {
+        color: options.edgeColor,
+        width: options.edgeWidth
+      }
+    },
+    options.style
+  );
 }

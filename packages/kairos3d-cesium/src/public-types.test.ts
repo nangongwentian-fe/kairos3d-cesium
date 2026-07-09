@@ -25,6 +25,7 @@ import type {
 import type {
   DrawEditEvent,
   DrawEditOptions,
+  DrawResultData,
   DrawResult,
   DrawResultSnapshot,
   DrawType
@@ -41,8 +42,10 @@ import type {
   AnalysisType,
   AnalysisResultsSnapshot,
   ClippingPlaneOptions,
+  ClippingPlaneUpdateOptions,
   ClippingPolygonDrawOptions,
   ClippingPolygonOptions,
+  ClippingPolygonUpdateOptions,
   ClippingResult,
   ClippingResultSnapshot,
   ClippingTarget,
@@ -69,33 +72,43 @@ import type {
   SlopeAspectResult,
   SlopeAspectResultSnapshot,
   TerrainAnalysisType,
+  TerrainAreaMode,
   TerrainGridSample,
+  TerrainPrecisionOptions,
   TerrainResult,
   TerrainResultSnapshot,
   TerrainSampleGrid,
+  TerrainVolumeMode,
   VolumeOptions,
   VolumeResult,
   VolumeResultSnapshot,
+  VisibilityBlockedBy,
+  VisibilityOcclusionMode,
   VisibilityResult,
   VisibilityResultSnapshot
 } from "./analysis";
 import type {
   PickOptions,
   PickResult,
+  PickResultSource,
   PickResultType,
   PickingClickOptions,
   SelectionState
 } from "./picking";
 import type {
+  BillboardSymbolStyle,
   ColorLike,
   LabelSymbolStyle,
   LineSymbolStyle,
+  ModelSymbolStyle,
   PointSymbolStyle,
   PolygonSymbolStyle,
   ResultSymbolStyle,
   SDKStyleDefaults,
   SelectionSymbolStyle,
+  SerializableBillboardSymbolStyle,
   SerializableColor,
+  SerializableModelSymbolStyle,
   SerializableResultSymbolStyle
 } from "./style";
 import type {
@@ -131,10 +144,36 @@ import type {
   PrimitivePolylineOverlay,
   PrimitivePolylineSnapshot
 } from "./primitives";
+import type {
+  BillboardOverlayOptions,
+  CircleOverlayOptions,
+  LabelOverlayOptions,
+  ModelOverlayOptions,
+  Overlay,
+  OverlayConfig,
+  OverlayData,
+  OverlaySnapshot,
+  OverlayType,
+  OverlayUpdateOptions,
+  PointOverlayOptions,
+  PolygonOverlayOptions,
+  PolylineOverlayOptions,
+  RectangleOverlayOptions
+} from "./overlays";
+import type { SnapshotStorageAdapter, SnapshotStorageRecord } from "./persistence";
 
 describe("public SDK types", () => {
   it("exposes stable draw and measure result contracts", () => {
-    expectTypeOf<DrawType>().toEqualTypeOf<"point" | "polyline" | "polygon">();
+    expectTypeOf<DrawType>().toEqualTypeOf<
+      | "point"
+      | "polyline"
+      | "polygon"
+      | "circle"
+      | "rectangle"
+      | "billboard"
+      | "label"
+      | "model"
+    >();
     expectTypeOf<MeasureType>().toEqualTypeOf<"distance" | "area" | "height">();
     expectTypeOf<MeasureUnit>().toEqualTypeOf<"m" | "km" | "m2" | "km2">();
     expectTypeOf<DistanceMeasureMode>().toEqualTypeOf<"space" | "surface">();
@@ -142,11 +181,22 @@ describe("public SDK types", () => {
     expectTypeOf<AnalysisType>().toEqualTypeOf<
       "visibility" | "profile" | "clipping" | "terrain"
     >();
+    expectTypeOf<TerrainAreaMode>().toEqualTypeOf<"planar" | "triangulated">();
+    expectTypeOf<TerrainVolumeMode>().toEqualTypeOf<"sample-cell" | "triangulated">();
+    expectTypeOf<TerrainPrecisionOptions>().toEqualTypeOf<{
+      areaMode?: TerrainAreaMode;
+      volumeMode?: TerrainVolumeMode;
+    }>();
+    expectTypeOf<VisibilityOcclusionMode>().toEqualTypeOf<
+      "terrain" | "scene" | "terrain-and-scene"
+    >();
+    expectTypeOf<VisibilityBlockedBy>().toEqualTypeOf<"terrain" | "scene">();
 
     expectTypeOf<DrawResult>().toMatchTypeOf<{
       id: string;
       entity: Entity;
       positions: Cartesian3[];
+      data?: DrawResultData;
       createdAt: Date;
       updatedAt?: Date;
       style?: ResultSymbolStyle;
@@ -175,6 +225,8 @@ describe("public SDK types", () => {
       visible: boolean;
       distance: number;
       blockedPosition?: Cartesian3;
+      blockedBy?: VisibilityBlockedBy;
+      blockedObject?: unknown;
       entities: Entity[];
       createdAt: Date;
       style?: ResultSymbolStyle;
@@ -213,6 +265,11 @@ describe("public SDK types", () => {
       normal: Cartesian3;
       distance: number;
     }>();
+    expectTypeOf<ClippingPlaneUpdateOptions>().toMatchTypeOf<{
+      normal?: Cartesian3;
+      distance?: number;
+      enabled?: boolean;
+    }>();
     expectTypeOf<ClippingPolygonOptions>().toMatchTypeOf<{
       target: ClippingTarget;
       positions: Cartesian3[];
@@ -222,6 +279,11 @@ describe("public SDK types", () => {
     expectTypeOf<ClippingPolygonDrawOptions>().toEqualTypeOf<
       Omit<ClippingPolygonOptions, "positions">
     >();
+    expectTypeOf<ClippingPolygonUpdateOptions>().toMatchTypeOf<{
+      inverse?: boolean;
+      quality?: number;
+      enabled?: boolean;
+    }>();
     expectTypeOf<ClippingResult>().toMatchTypeOf<{
       id: string;
       type: ClippingType;
@@ -264,6 +326,7 @@ describe("public SDK types", () => {
       maxSamples?: number;
       height?: HeightOptions;
       style?: ResultSymbolStyle;
+      precision?: TerrainPrecisionOptions;
     }>();
     expectTypeOf<ContourDrawOptions>().toMatchTypeOf<{
       interval: number;
@@ -316,6 +379,8 @@ describe("public SDK types", () => {
       fillVolume: number;
       netVolume: number;
       sampleArea: number;
+      surfaceArea: number;
+      calculationMode: TerrainVolumeMode;
       entities: Entity[];
     }>();
     expectTypeOf<FloodResult>().toMatchTypeOf<{
@@ -326,6 +391,8 @@ describe("public SDK types", () => {
       floodedArea: number;
       waterVolume: number;
       sampleArea: number;
+      surfaceArea: number;
+      calculationMode: TerrainVolumeMode;
       entities: Entity[];
     }>();
     expectTypeOf<ExcavationResult>().toMatchTypeOf<{
@@ -336,6 +403,8 @@ describe("public SDK types", () => {
       depth?: number;
       cutVolume: number;
       sampleArea: number;
+      surfaceArea: number;
+      calculationMode: TerrainVolumeMode;
       entities: Entity[];
     }>();
     expectTypeOf<TerrainResult>().toEqualTypeOf<
@@ -358,6 +427,7 @@ describe("public SDK types", () => {
       id: string;
       type: DrawType;
       positions: SerializablePosition[];
+      data?: DrawResultData;
       createdAt: string;
       updatedAt?: string;
       style?: SerializableResultSymbolStyle;
@@ -383,6 +453,7 @@ describe("public SDK types", () => {
       visible: boolean;
       distance: number;
       blockedPosition?: SerializablePosition;
+      blockedBy?: VisibilityBlockedBy;
       createdAt: string;
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
@@ -448,6 +519,8 @@ describe("public SDK types", () => {
       fillVolume: number;
       netVolume: number;
       sampleArea: number;
+      surfaceArea: number;
+      calculationMode?: TerrainVolumeMode;
       createdAt: string;
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
@@ -460,6 +533,8 @@ describe("public SDK types", () => {
       floodedArea: number;
       waterVolume: number;
       sampleArea: number;
+      surfaceArea: number;
+      calculationMode?: TerrainVolumeMode;
       createdAt: string;
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
@@ -472,6 +547,8 @@ describe("public SDK types", () => {
       depth?: number;
       cutVolume: number;
       sampleArea: number;
+      surfaceArea: number;
+      calculationMode?: TerrainVolumeMode;
       createdAt: string;
       style?: SerializableResultSymbolStyle;
       height?: HeightOptions;
@@ -523,11 +600,37 @@ describe("public SDK types", () => {
       font?: string;
       pixelOffset?: [number, number];
     }>();
+    expectTypeOf<BillboardSymbolStyle>().toMatchTypeOf<{
+      color?: ColorLike;
+      scale?: number;
+      pixelOffset?: [number, number];
+      width?: number;
+      height?: number;
+    }>();
+    expectTypeOf<ModelSymbolStyle>().toMatchTypeOf<{
+      color?: ColorLike;
+      scale?: number;
+      minimumPixelSize?: number;
+      maximumScale?: number;
+      silhouetteColor?: ColorLike;
+      silhouetteSize?: number;
+    }>();
+    expectTypeOf<SerializableBillboardSymbolStyle>().toMatchTypeOf<{
+      color?: SerializableColor;
+      scale?: number;
+    }>();
+    expectTypeOf<SerializableModelSymbolStyle>().toMatchTypeOf<{
+      color?: SerializableColor;
+      silhouetteColor?: SerializableColor;
+      scale?: number;
+    }>();
     expectTypeOf<ResultSymbolStyle>().toMatchTypeOf<{
       point?: PointSymbolStyle;
       line?: LineSymbolStyle;
       polygon?: PolygonSymbolStyle;
       label?: LabelSymbolStyle;
+      billboard?: BillboardSymbolStyle;
+      model?: ModelSymbolStyle;
     }>();
     expectTypeOf<SelectionSymbolStyle>().toMatchTypeOf<{
       entity?: { point?: PointSymbolStyle };
@@ -538,6 +641,11 @@ describe("public SDK types", () => {
         point?: ResultSymbolStyle;
         polyline?: ResultSymbolStyle;
         polygon?: ResultSymbolStyle;
+        circle?: ResultSymbolStyle;
+        rectangle?: ResultSymbolStyle;
+        billboard?: ResultSymbolStyle;
+        label?: ResultSymbolStyle;
+        model?: ResultSymbolStyle;
       };
       selection?: SelectionSymbolStyle;
       terrain?: {
@@ -635,6 +743,7 @@ describe("public SDK types", () => {
       resultEntityCount: number;
       resultPrimitiveCount: number;
       unmanagedEntityCount: number;
+      overlayEntityCount: number;
       primitiveOverlayCount: number;
       layerCount: number;
       layerRuntimeObjectCount: number;
@@ -721,6 +830,104 @@ describe("public SDK types", () => {
     >();
     expectTypeOf<import("./primitives").PrimitiveOverlayManager>().toMatchTypeOf<
       KairosMap["primitives"]
+    >();
+  });
+
+  it("exposes entity overlay manager types", () => {
+    expectTypeOf<OverlayType>().toEqualTypeOf<DrawType>();
+    expectTypeOf<OverlayData>().toEqualTypeOf<{
+      radius?: number;
+      text?: string;
+      image?: string;
+      uri?: string;
+      scale?: number;
+      minimumPixelSize?: number;
+      maximumScale?: number;
+      heading?: number;
+      pitch?: number;
+      roll?: number;
+    }>();
+    expectTypeOf<OverlayConfig>().toMatchTypeOf<{
+      id?: string;
+      type: OverlayType;
+      positions: Cartesian3[];
+      data?: OverlayData;
+      style?: ResultSymbolStyle;
+      height?: HeightOptions;
+      show?: boolean;
+      metadata?: Record<string, unknown>;
+    }>();
+    expectTypeOf<OverlayUpdateOptions>().toMatchTypeOf<{
+      positions?: Cartesian3[];
+      position?: Cartesian3;
+      center?: Cartesian3;
+      radius?: number;
+      text?: string;
+      image?: string;
+      uri?: string;
+      style?: ResultSymbolStyle;
+    }>();
+    expectTypeOf<PointOverlayOptions>().toMatchTypeOf<{ position: Cartesian3 }>();
+    expectTypeOf<PolylineOverlayOptions>().toMatchTypeOf<{ positions: Cartesian3[] }>();
+    expectTypeOf<PolygonOverlayOptions>().toMatchTypeOf<{ positions: Cartesian3[] }>();
+    expectTypeOf<CircleOverlayOptions>().toMatchTypeOf<{
+      center: Cartesian3;
+      radius: number;
+    }>();
+    expectTypeOf<RectangleOverlayOptions>().toMatchTypeOf<{
+      positions: Cartesian3[];
+    }>();
+    expectTypeOf<BillboardOverlayOptions>().toMatchTypeOf<{
+      position: Cartesian3;
+      image: string;
+      scale?: number;
+    }>();
+    expectTypeOf<LabelOverlayOptions>().toMatchTypeOf<{
+      position: Cartesian3;
+      text: string;
+    }>();
+    expectTypeOf<ModelOverlayOptions>().toMatchTypeOf<{
+      position: Cartesian3;
+      uri: string;
+      scale?: number;
+      minimumPixelSize?: number;
+      maximumScale?: number;
+      heading?: number;
+      pitch?: number;
+      roll?: number;
+    }>();
+    expectTypeOf<Overlay>().toMatchTypeOf<{
+      id: string;
+      type: OverlayType;
+      entity: Entity;
+      positions: Cartesian3[];
+      data?: OverlayData;
+      show: boolean;
+      createdAt: Date;
+      updatedAt?: Date;
+    }>();
+    expectTypeOf<OverlaySnapshot>().toMatchTypeOf<{
+      id: string;
+      type: OverlayType;
+      positions: SerializablePosition[];
+      data?: OverlayData;
+      style?: SerializableResultSymbolStyle;
+      height?: HeightOptions;
+      show: boolean;
+      createdAt: string;
+      updatedAt?: string;
+    }>();
+    expectTypeOf<KairosMap["overlays"]["add"]>().toMatchTypeOf<
+      (config: OverlayConfig) => Overlay
+    >();
+    expectTypeOf<KairosMap["overlays"]["update"]>().toMatchTypeOf<
+      (id: string, options: OverlayUpdateOptions) => Overlay
+    >();
+    expectTypeOf<KairosMap["overlays"]["toJSON"]>().toMatchTypeOf<
+      () => OverlaySnapshot[]
+    >();
+    expectTypeOf<import("./overlays").OverlayManager>().toMatchTypeOf<
+      KairosMap["overlays"]
     >();
   });
 
@@ -839,11 +1046,15 @@ describe("public SDK types", () => {
       camera?: CameraView;
       bookmarks: CameraBookmark[];
       results?: RuntimeResultsSnapshot;
+      primitives?: PrimitiveOverlaySnapshot[];
+      overlays?: OverlaySnapshot[];
       createdAt: string;
     }>();
 
     expectTypeOf<SceneStateSnapshotOptions>().toEqualTypeOf<{
       includeResults?: boolean;
+      includePrimitives?: boolean;
+      includeOverlays?: boolean;
     }>();
 
     expectTypeOf<SceneStateLoadOptions>().toEqualTypeOf<{
@@ -851,6 +1062,10 @@ describe("public SDK types", () => {
       flyToCamera?: boolean;
       restoreResults?: boolean;
       clearResults?: boolean;
+      restorePrimitives?: boolean;
+      clearPrimitives?: boolean;
+      restoreOverlays?: boolean;
+      clearOverlays?: boolean;
     }>();
 
     expectTypeOf<RuntimeResultsSnapshot>().toEqualTypeOf<{
@@ -863,10 +1078,29 @@ describe("public SDK types", () => {
     }>();
   });
 
+  it("exposes persistence adapter types", () => {
+    expectTypeOf<SnapshotStorageRecord>().toEqualTypeOf<{
+      id: string;
+      name?: string;
+      createdAt: string;
+      updatedAt?: string;
+    }>();
+    expectTypeOf<SnapshotStorageAdapter>().toMatchTypeOf<{
+      save: (id: string, snapshot: SceneSnapshot, options?: { name?: string }) => Promise<void>;
+      load: (id: string) => Promise<SceneSnapshot | undefined>;
+      remove: (id: string) => Promise<boolean>;
+      list: () => Promise<SnapshotStorageRecord[]>;
+    }>();
+    expectTypeOf<import("./persistence").SnapshotStorageAdapter>().toMatchTypeOf<
+      SnapshotStorageAdapter
+    >();
+  });
+
   it("exposes picking and selection types", () => {
     expectTypeOf<PickResultType>().toEqualTypeOf<
       "entity" | "3dtiles" | "imagery" | "primitive"
     >();
+    expectTypeOf<PickResultSource>().toEqualTypeOf<"layer" | "overlay">();
 
     expectTypeOf<PickOptions>().toEqualTypeOf<{
       includeImagery?: boolean;
@@ -882,7 +1116,10 @@ describe("public SDK types", () => {
     expectTypeOf<PickResult>().toMatchTypeOf<{
       id: string;
       type: PickResultType;
+      source?: PickResultSource;
       layerId?: string;
+      overlayId?: string;
+      overlayType?: OverlayType;
       object: unknown;
       entity?: Entity;
       feature?: Cesium3DTileFeature | ImageryLayerFeatureInfo;

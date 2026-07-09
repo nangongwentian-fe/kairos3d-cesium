@@ -60,6 +60,54 @@ function createResult(id: string): DrawResult {
 }
 
 describe("DrawManager", () => {
+  it("creates programmatic draw results for overlay-like types", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+
+    const circle = manager.circle({
+      id: "draw-circle",
+      center: Cartesian3.fromDegrees(114, 22),
+      radius: 80
+    });
+    const rectangle = manager.rectangle({
+      id: "draw-rectangle",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.02, 22.02)
+      ]
+    });
+    const billboard = manager.billboard({
+      id: "draw-billboard",
+      position: Cartesian3.fromDegrees(114, 22),
+      image: "/marker.png",
+      scale: 2
+    });
+    const label = manager.label({
+      id: "draw-label",
+      position: Cartesian3.fromDegrees(114, 22),
+      text: "Kairos"
+    });
+    const model = manager.model({
+      id: "draw-model",
+      position: Cartesian3.fromDegrees(114, 22),
+      uri: "/model.glb",
+      minimumPixelSize: 24,
+      heading: 0.3,
+      pitch: 0.2,
+      roll: 0.1
+    });
+
+    expect(circle.entity.ellipse?.semiMajorAxis?.getValue()).toBe(80);
+    expect(rectangle.entity.rectangle).toBeDefined();
+    expect(billboard.entity.billboard?.image?.getValue()).toBe("/marker.png");
+    expect(billboard.data?.scale).toBe(2);
+    expect(label.entity.label?.text?.getValue()).toBe("Kairos");
+    expect(model.entity.model?.uri?.getValue()).toBe("/model.glb");
+    expect(model.entity.orientation).toBeDefined();
+    expect(model.data).toMatchObject({ heading: 0.3, pitch: 0.2, roll: 0.1 });
+    expect(manager.list()).toEqual([circle, rectangle, billboard, label, model]);
+  });
+
   it("keeps completed results when tools stop elsewhere", () => {
     const map = createMapMock();
     const manager = new DrawManager(map);
@@ -94,6 +142,61 @@ describe("DrawManager", () => {
         })
       })
     );
+  });
+
+  it("updates programmatic draw result data", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const result = manager.label({
+      id: "draw-label",
+      position: Cartesian3.fromDegrees(114, 22),
+      text: "Before"
+    });
+    const firstEntity = result.entity;
+
+    const updated = manager.update("draw-label", {
+      position: Cartesian3.fromDegrees(114.01, 22.01),
+      text: "After",
+      style: { label: { color: "#ffffff" } }
+    });
+
+    expect(updated).toBe(result);
+    expect(updated.entity).not.toBe(firstEntity);
+    expect(updated.data?.text).toBe("After");
+    expect(updated.entity.label?.text?.getValue()).toBe("After");
+    expect(map.viewer.entities.remove).toHaveBeenCalledWith(firstEntity);
+  });
+
+  it("updates circle radius and rectangle positions for edit workflows", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const circle = manager.circle({
+      id: "draw-circle",
+      center: Cartesian3.fromDegrees(114, 22),
+      radius: 100
+    });
+    const rectangle = manager.rectangle({
+      id: "draw-rectangle",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.01)
+      ]
+    });
+
+    const updatedCircle = manager.update("draw-circle", { radius: 250 });
+    const updatedRectangle = manager.update("draw-rectangle", {
+      positions: [
+        Cartesian3.fromDegrees(114.02, 22.02),
+        Cartesian3.fromDegrees(114.03, 22.03)
+      ]
+    });
+
+    expect(updatedCircle).toBe(circle);
+    expect(updatedCircle.data?.radius).toBe(250);
+    expect(updatedCircle.entity.ellipse?.semiMajorAxis?.getValue()).toBe(250);
+    expect(updatedRectangle).toBe(rectangle);
+    expect(updatedRectangle.positions[0]).toEqual(Cartesian3.fromDegrees(114.02, 22.02));
+    expect(updatedRectangle.entity.rectangle).toBeDefined();
   });
 
   it("starts and stops edit through the shared tool manager", async () => {
@@ -138,6 +241,112 @@ describe("DrawManager", () => {
     expect(restored[0].updatedAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
     expect(map.viewer.entities.add).toHaveBeenCalled();
     expect(manager.get("draw-1")).toBe(restored[0]);
+  });
+
+  it("serializes and restores new draw result data", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    manager.model({
+      id: "draw-model",
+      position: Cartesian3.fromDegrees(114, 22, 10),
+      uri: "/model.glb",
+      scale: 1.5,
+      heading: 0.4,
+      pitch: 0.2,
+      roll: 0.1,
+      style: { model: { minimumPixelSize: 32 } },
+      height: { mode: "relativeToGround", offset: 10 }
+    });
+
+    const snapshot = manager.toJSON();
+    manager.clear();
+    const restored = await manager.load(snapshot);
+
+    expect(snapshot[0]).toMatchObject({
+      id: "draw-model",
+      type: "model",
+      data: {
+        uri: "/model.glb",
+        scale: 1.5,
+        heading: 0.4,
+        pitch: 0.2,
+        roll: 0.1
+      },
+      height: { mode: "relativeToGround", offset: 10 }
+    });
+    expect(restored[0].data?.uri).toBe("/model.glb");
+    expect(restored[0].data).toMatchObject({ heading: 0.4, pitch: 0.2, roll: 0.1 });
+    expect(restored[0].entity.model?.uri?.getValue()).toBe("/model.glb");
+    expect(restored[0].entity.orientation).toBeDefined();
+  });
+
+  it("validates draw snapshots before clearing existing results", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const existing = createResult("draw-existing");
+    manager.addResult(existing);
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "draw-bad",
+            type: "polyline",
+            positions: [{ longitude: 114, latitude: 22, height: 10 }],
+            createdAt: "2026-07-08T00:00:00.000Z"
+          }
+        ],
+        { clear: true }
+      )
+    ).rejects.toThrow('Draw result "draw-bad" requires at least 2 positions.');
+
+    expect(manager.list()).toEqual([existing]);
+    expect(map.viewer.entities.remove).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid new draw snapshots before clearing existing results", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const existing = createResult("draw-existing");
+    manager.addResult(existing);
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "draw-bad-circle",
+            type: "circle",
+            positions: [{ longitude: 114, latitude: 22, height: 10 }],
+            createdAt: "2026-07-08T00:00:00.000Z"
+          }
+        ],
+        { clear: true }
+      )
+    ).rejects.toThrow(
+      'Overlay "draw-bad-circle" radius must be a positive finite number.'
+    );
+
+    expect(manager.list()).toEqual([existing]);
+    expect(map.viewer.entities.remove).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate draw snapshot ids before restoring", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const snapshot = {
+      id: "draw-duplicate",
+      type: "polyline" as const,
+      positions: [
+        { longitude: 114, latitude: 22, height: 10 },
+        { longitude: 114.01, latitude: 22.01, height: 20 }
+      ],
+      createdAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    await expect(manager.load([snapshot, snapshot])).rejects.toThrow(
+      'Draw result snapshot id "draw-duplicate" is duplicated.'
+    );
+    expect(manager.list()).toEqual([]);
   });
 
   it("restores primitive draw results and cleans up primitive runtime", async () => {
@@ -207,6 +416,20 @@ describe("DrawManager", () => {
     expect(map.viewer.entities.remove).toHaveBeenCalledWith(result.entity);
     expect(map.tools.emitClear).toHaveBeenCalledWith({ source: "draw", ids: ["draw-1"] });
     expect(manager.get("draw-1")).toBeUndefined();
+  });
+
+  it("replaces duplicate result ids without leaking the previous entity", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const first = createResult("draw-1");
+    const second = createResult("draw-1");
+
+    manager.addResult(first);
+    manager.addResult(first);
+    manager.addResult(second);
+
+    expect(map.viewer.entities.remove).toHaveBeenCalledWith(first.entity);
+    expect(manager.list()).toEqual([second]);
   });
 
   it("clears all draw results", () => {

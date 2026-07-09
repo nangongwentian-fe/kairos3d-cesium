@@ -89,6 +89,22 @@ describe("MeasureManager", () => {
     expect(manager.get("measure-1")).toBeUndefined();
   });
 
+  it("replaces duplicate measurement ids without leaking previous entities", () => {
+    const map = createMapMock();
+    const manager = new MeasureManager(map);
+    const first = createResult("measure-1");
+    const second = createResult("measure-1");
+
+    manager.addResult(first);
+    manager.addResult(first);
+    manager.addResult(second);
+
+    for (const entity of first.entities) {
+      expect(map.viewer.entities.remove).toHaveBeenCalledWith(entity);
+    }
+    expect(manager.list()).toEqual([second]);
+  });
+
   it("clears all measurement results", () => {
     const map = createMapMock();
     const manager = new MeasureManager(map);
@@ -131,6 +147,53 @@ describe("MeasureManager", () => {
     expect(restored[0].positions).toHaveLength(2);
     expect(restored[0].entities.length).toBeGreaterThan(0);
     expect(manager.get("measure-1")).toBe(restored[0]);
+  });
+
+  it("validates measurement snapshots before clearing existing results", async () => {
+    const map = createMapMock();
+    const manager = new MeasureManager(map);
+    const existing = createResult("measure-existing");
+    manager.addResult(existing);
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "measure-bad",
+            type: "distance",
+            positions: [{ longitude: 114, latitude: 22, height: 10 }],
+            value: 0,
+            unit: "m",
+            createdAt: "2026-07-08T00:00:00.000Z"
+          }
+        ],
+        { clear: true }
+      )
+    ).rejects.toThrow('Measure result "distance" requires at least 2 positions.');
+
+    expect(manager.list()).toEqual([existing]);
+    expect(map.viewer.entities.remove).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate measurement snapshot ids before restoring", async () => {
+    const map = createMapMock();
+    const manager = new MeasureManager(map);
+    const snapshot = {
+      id: "measure-duplicate",
+      type: "distance" as const,
+      positions: [
+        { longitude: 114, latitude: 22, height: 10 },
+        { longitude: 114.01, latitude: 22.01, height: 20 }
+      ],
+      value: 10,
+      unit: "m" as const,
+      createdAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    await expect(manager.load([snapshot, snapshot])).rejects.toThrow(
+      'Measure result snapshot id "measure-duplicate" is duplicated.'
+    );
+    expect(manager.list()).toEqual([]);
   });
 
   it("updates and restores measurement style", async () => {
@@ -261,6 +324,37 @@ describe("VisibilityManager", () => {
     expect(restored[0].entities.length).toBeGreaterThan(0);
   });
 
+  it("validates visibility snapshots before clearing existing results", async () => {
+    const map = createMapMock();
+    const manager = new VisibilityManager(map);
+    const existing = await manager.compute({
+      start: Cartesian3.fromDegrees(114, 22, 100),
+      end: Cartesian3.fromDegrees(114.01, 22, 100),
+      sampleCount: 8
+    });
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "visibility-bad",
+            type: "visibility",
+            positions: [
+              { longitude: 114, latitude: 22, height: 100 },
+              { longitude: 114.01, latitude: 22, height: 100 }
+            ],
+            visible: true,
+            distance: Number.NaN,
+            createdAt: "2026-07-08T00:00:00.000Z"
+          }
+        ],
+        { clear: true }
+      )
+    ).rejects.toThrow("Visibility result distance must be a finite number.");
+
+    expect(manager.list()).toEqual([existing]);
+  });
+
   it("serializes and restores visibility style", async () => {
     const map = createMapMock();
     const manager = new VisibilityManager(map);
@@ -374,6 +468,47 @@ describe("ProfileManager", () => {
     expect(restored[0].height).toEqual({ mode: "relativeToGround", offset: 5 });
     expect(restored[0].samples).toHaveLength(3);
     expect(restored[0].entities.length).toBeGreaterThan(0);
+  });
+
+  it("validates profile snapshots before clearing existing results", async () => {
+    const map = createMapMock();
+    const manager = new ProfileManager(map);
+    const existing = await manager.compute({
+      positions: [
+        Cartesian3.fromDegrees(114, 22, 0),
+        Cartesian3.fromDegrees(114.01, 22, 0)
+      ],
+      sampleCount: 3
+    });
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "profile-bad",
+            type: "profile",
+            positions: [
+              { longitude: 114, latitude: 22, height: 0 },
+              { longitude: 114.01, latitude: 22, height: 0 }
+            ],
+            samples: [
+              {
+                position: { longitude: 114, latitude: 22, height: 0 },
+                distance: Number.NaN,
+                height: 0
+              }
+            ],
+            totalDistance: 10,
+            minHeight: 0,
+            maxHeight: 0,
+            createdAt: "2026-07-08T00:00:00.000Z"
+          }
+        ],
+        { clear: true }
+      )
+    ).rejects.toThrow("Profile sample distance must be a finite number.");
+
+    expect(manager.list()).toEqual([existing]);
   });
 
   it("updates and restores profile style", async () => {

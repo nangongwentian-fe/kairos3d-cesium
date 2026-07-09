@@ -128,11 +128,18 @@ export class LayerManager extends Evented<LayerManagerEvents> {
     }
 
     const layers: LayerAdapter[] = [];
-    for (const config of configs) {
-      const nextConfig = options.flyTo === undefined
-        ? config
-        : { ...config, flyTo: options.flyTo };
-      layers.push(await this.add(nextConfig));
+    try {
+      for (const config of configs) {
+        const nextConfig = options.flyTo === undefined
+          ? config
+          : { ...config, flyTo: options.flyTo };
+        layers.push(await this.add(nextConfig));
+      }
+    } catch (error) {
+      for (const layer of [...layers].reverse()) {
+        this.remove(layer.id);
+      }
+      throw error;
     }
 
     this.emit("load", layers);

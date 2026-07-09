@@ -62,6 +62,17 @@ function createMapMock() {
       profile: { clear: vi.fn() },
       clipping: { clear: vi.fn() },
       terrain: { clear: vi.fn() }
+    },
+    primitives: {
+      toJSON: vi.fn(() => []),
+      load: vi.fn(() => []),
+      clear: vi.fn()
+    },
+    overlays: {
+      toJSON: vi.fn(() => []),
+      load: vi.fn(async () => []),
+      clear: vi.fn(),
+      validateSnapshots: vi.fn()
     }
   } as unknown as KairosMap;
 }
@@ -170,6 +181,26 @@ describe("SceneStateManager", () => {
     expect(map.analysis.toJSON).toHaveBeenCalledOnce();
   });
 
+  it("exports primitive overlays when requested", () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+
+    const snapshot = manager.toJSON({ includePrimitives: true });
+
+    expect(snapshot.primitives).toEqual([]);
+    expect(map.primitives.toJSON).toHaveBeenCalledOnce();
+  });
+
+  it("exports entity overlays when requested", () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+
+    const snapshot = manager.toJSON({ includeOverlays: true });
+
+    expect(snapshot.overlays).toEqual([]);
+    expect(map.overlays.toJSON).toHaveBeenCalledOnce();
+  });
+
   it("loads snapshot layers, bookmarks, and camera by default", async () => {
     const map = createMapMock();
     const manager = new SceneStateManager(map);
@@ -249,5 +280,62 @@ describe("SceneStateManager", () => {
       },
       { clear: false }
     );
+  });
+
+  it("restores primitive overlays when requested", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [layerConfig],
+      bookmarks: [],
+      primitives: [],
+      createdAt: "2026-07-07T00:00:00.000Z"
+    };
+
+    await manager.load(snapshot, { restorePrimitives: true, flyToCamera: false });
+
+    expect(map.primitives.clear).toHaveBeenCalledOnce();
+    expect(map.primitives.load).toHaveBeenCalledWith([], { clear: false });
+  });
+
+  it("restores entity overlays when requested", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [layerConfig],
+      bookmarks: [],
+      overlays: [],
+      createdAt: "2026-07-07T00:00:00.000Z"
+    };
+
+    await manager.load(snapshot, { restoreOverlays: true, flyToCamera: false });
+
+    expect(map.overlays.validateSnapshots).toHaveBeenCalledWith([]);
+    expect(map.overlays.clear).toHaveBeenCalledOnce();
+    expect(map.overlays.load).toHaveBeenCalledWith([], { clear: false });
+  });
+
+  it("validates entity overlays before clearing existing overlays", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    vi.mocked(map.overlays.validateSnapshots).mockImplementation(() => {
+      throw new Error("invalid overlay");
+    });
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [layerConfig],
+      bookmarks: [],
+      overlays: [],
+      createdAt: "2026-07-07T00:00:00.000Z"
+    };
+
+    await expect(
+      manager.load(snapshot, { restoreOverlays: true, flyToCamera: false })
+    ).rejects.toThrow("invalid overlay");
+
+    expect(map.overlays.clear).not.toHaveBeenCalled();
+    expect(map.layers.load).not.toHaveBeenCalled();
   });
 });

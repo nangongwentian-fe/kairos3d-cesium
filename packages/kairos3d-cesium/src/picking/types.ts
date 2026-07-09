@@ -6,8 +6,10 @@ import type {
   Entity,
   ImageryLayerFeatureInfo
 } from "cesium";
+import type { OverlayType } from "../overlays";
 
 export type PickResultType = "entity" | "3dtiles" | "imagery" | "primitive";
+export type PickResultSource = "layer" | "overlay";
 
 export interface PickOptions {
   includeImagery?: boolean;
@@ -23,7 +25,10 @@ export interface PickingClickOptions extends PickOptions {
 export interface PickResult {
   id: string;
   type: PickResultType;
+  source?: PickResultSource;
   layerId?: string;
+  overlayId?: string;
+  overlayType?: OverlayType;
   name?: string;
   object: unknown;
   entity?: Entity;

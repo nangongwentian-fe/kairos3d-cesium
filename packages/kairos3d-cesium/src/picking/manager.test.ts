@@ -5,6 +5,7 @@ import { PickingManager } from "./manager";
 
 function createMapMock(picked: unknown[] = []) {
   const position = Cartesian3.fromDegrees(114, 22, 100);
+  const overlays = new Map<Entity, unknown>();
   const layer = {
     id: "layer-1",
     ownsRuntimeObject: vi.fn(() => true),
@@ -38,8 +39,12 @@ function createMapMock(picked: unknown[] = []) {
       layers: {
         findByRuntimeObject: vi.fn(() => layer)
       },
+      overlays: {
+        findByEntity: vi.fn((entity: Entity) => overlays.get(entity))
+      },
       selection
-    } as unknown as KairosMap
+    } as unknown as KairosMap,
+    overlays
   };
 }
 
@@ -83,5 +88,39 @@ describe("PickingManager", () => {
     expect(createHandler).toHaveBeenCalledTimes(2);
     expect(firstHandler.destroy).toHaveBeenCalledOnce();
     expect(secondHandler.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("attributes picked SDK overlay entities before layer ownership", async () => {
+    const entity = new Entity({ id: "overlay-entity" });
+    const { map, overlays } = createMapMock([{ id: entity }]);
+    overlays.set(entity, {
+      id: "overlay-1",
+      type: "label",
+      entity,
+      positions: [],
+      data: { text: "Overlay" },
+      metadata: { group: "test" },
+      show: true,
+      createdAt: new Date()
+    });
+    const manager = new PickingManager(map);
+
+    const result = await manager.pick(new Cartesian2(10, 20));
+
+    expect(result).toMatchObject({
+      id: "overlay-entity",
+      type: "entity",
+      source: "overlay",
+      overlayId: "overlay-1",
+      overlayType: "label",
+      layerId: undefined,
+      properties: {
+        overlayId: "overlay-1",
+        overlayType: "label",
+        data: { text: "Overlay" },
+        metadata: { group: "test" }
+      }
+    });
+    expect(map.layers.findByRuntimeObject).not.toHaveBeenCalled();
   });
 });

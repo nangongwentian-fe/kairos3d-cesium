@@ -33,6 +33,7 @@ function createMapMock(globe: ClippingHost = createClippingHost()) {
     },
     tools: {
       start: vi.fn(),
+      stop: vi.fn(),
       emitClear: vi.fn()
     },
     styles: new StyleManager()
@@ -223,6 +224,54 @@ describe("ClippingManager", () => {
     expect(globe.clippingPlanes).toBe(restored[0].collection);
   });
 
+  it("validates clipping snapshots before clearing existing results", async () => {
+    const globe = createClippingHost();
+    const map = createMapMock(globe);
+    vi.mocked(map.layers.getRuntimeObjects).mockReturnValue([]);
+    const manager = new ClippingManager(map);
+    const existing = manager.addPlane({
+      target: { type: "globe" },
+      normal: Cartesian3.UNIT_X,
+      distance: 12
+    });
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "missing-layer-clipping",
+            type: "plane",
+            target: { type: "layer", layerId: "missing" },
+            enabled: true,
+            normal: { x: 1, y: 0, z: 0 },
+            distance: 0,
+            createdAt: "2026-07-08T00:00:00.000Z"
+          }
+        ],
+        { clear: true }
+      )
+    ).rejects.toThrow('Clipping target "layer" does not support plane clipping.');
+
+    expect(manager.get(existing.id)).toBe(existing);
+    expect(globe.clippingPlanes).toBe(existing.collection);
+  });
+
+  it("rejects duplicate clipping snapshot ids before restoring", async () => {
+    const globe = createClippingHost();
+    const map = createMapMock(globe);
+    const manager = new ClippingManager(map);
+    const result = manager.addPlane({
+      target: { type: "globe" },
+      normal: Cartesian3.UNIT_X,
+      distance: 12
+    });
+    const snapshot = manager.toJSON()[0];
+
+    await expect(manager.load([snapshot, snapshot])).rejects.toThrow(
+      `Clipping result snapshot id "${result.id}" is duplicated.`
+    );
+  });
+
   it("updates and restores clipping style", async () => {
     const globe = createClippingHost();
     const map = createMapMock(globe);
@@ -301,5 +350,101 @@ describe("ClippingManager", () => {
     expect(map.tools.start).toHaveBeenCalledWith("analysis.clipping.drawPolygon", {
       target: { type: "globe" }
     });
+  });
+
+  it("updates plane clipping while keeping the result id stable", () => {
+    const globe = createClippingHost();
+    const map = createMapMock(globe);
+    const manager = new ClippingManager(map);
+    const result = manager.addPlane({
+      target: { type: "globe" },
+      normal: Cartesian3.UNIT_X,
+      distance: 1
+    });
+
+    const updated = manager.updatePlane(result.id, {
+      normal: Cartesian3.UNIT_Y,
+      distance: 8,
+      enabled: false,
+      edgeWidth: 5
+    });
+
+    expect(updated.id).toBe(result.id);
+    expect(updated.enabled).toBe(false);
+    expect((updated.collection as ClippingPlaneCollection).get(0).distance).toBe(8);
+    expect((updated.collection as ClippingPlaneCollection).edgeWidth).toBe(5);
+    expect(globe.clippingPlanes).toBe(updated.collection);
+  });
+
+  it("updates polygon clipping positions and rejects invalid updates", () => {
+    vi.spyOn(ClippingPolygonCollection, "isSupported").mockReturnValue(true);
+    const map = createMapMock();
+    const manager = new ClippingManager(map);
+    const result = manager.addPolygon({
+      target: { type: "globe" },
+      positions: createPositions()
+    });
+    const nextPositions = [
+      Cartesian3.fromDegrees(114, 22, 0),
+      Cartesian3.fromDegrees(114.02, 22, 0),
+      Cartesian3.fromDegrees(114.02, 22.02, 0)
+    ];
+
+    const updated = manager.updatePolygon(result.id, nextPositions, { inverse: true });
+
+    expect(updated.id).toBe(result.id);
+    expect(updated.positions).toEqual(nextPositions);
+    expect((updated.collection as ClippingPolygonCollection).inverse).toBe(true);
+    expect(() => manager.updatePolygon(result.id, nextPositions.slice(0, 2))).toThrow(
+      "at least three positions"
+    );
+  });
+
+  it("can stop or cancel an edit session and clean temporary handles", () => {
+    vi.spyOn(ClippingPolygonCollection, "isSupported").mockReturnValue(true);
+    const map = createMapMock();
+    const manager = new ClippingManager(map);
+    const result = manager.addPolygon({
+      target: { type: "globe" },
+      positions: createPositions()
+    });
+
+    manager.edit(result.id);
+    expect(map.tools.stop).toHaveBeenCalledOnce();
+    expect(map.viewer.entities.add).toHaveBeenCalledTimes(4);
+
+    const changedPositions = [
+      Cartesian3.fromDegrees(114, 22, 0),
+      Cartesian3.fromDegrees(114.03, 22, 0),
+      Cartesian3.fromDegrees(114.03, 22.03, 0)
+    ];
+    manager.updatePolygon(result.id, changedPositions);
+    const restored = manager.cancelEdit();
+
+    expect(restored?.id).toBe(result.id);
+    expect(restored?.positions).toEqual(createPositions());
+    expect(map.viewer.entities.remove).toHaveBeenCalled();
+
+    manager.edit(result.id);
+    expect(manager.stopEdit()?.id).toBe(result.id);
+  });
+
+  it("does not clear the active clipping edit session when editing a missing id", () => {
+    vi.spyOn(ClippingPolygonCollection, "isSupported").mockReturnValue(true);
+    const map = createMapMock();
+    const manager = new ClippingManager(map);
+    const result = manager.addPolygon({
+      target: { type: "globe" },
+      positions: createPositions()
+    });
+
+    manager.edit(result.id);
+    expect(() => manager.edit("missing")).toThrow(
+      'Clipping result "missing" does not exist.'
+    );
+
+    expect(map.tools.stop).toHaveBeenCalledOnce();
+    expect(map.viewer.entities.remove).not.toHaveBeenCalled();
+    expect(manager.stopEdit()?.id).toBe(result.id);
   });
 });

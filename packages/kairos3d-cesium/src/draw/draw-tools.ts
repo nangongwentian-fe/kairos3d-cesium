@@ -2,8 +2,10 @@ import {
   CallbackProperty,
   Cartesian2,
   Cartesian3,
+  Color,
   ConstantProperty,
   Entity,
+  Rectangle,
   ScreenSpaceEventType
 } from "cesium";
 import type { KairosMap } from "../core";
@@ -16,7 +18,8 @@ import type { ResultSymbolStyle } from "../style";
 import {
   createLineGraphics,
   createPointGraphics,
-  createPolygonGraphics
+  createPolygonGraphics,
+  parseColorLike
 } from "../style";
 import {
   resolveResultRenderMode,
@@ -375,10 +378,292 @@ export class DrawPolygonTool extends InteractiveTool<DrawToolOptions> {
   }
 }
 
+export class DrawCircleTool extends InteractiveTool<DrawToolOptions> {
+  private center?: Cartesian3;
+  private edgePosition?: Cartesian3;
+  private entity?: Entity;
+  private options: DrawToolOptions = {};
+  private resolvedStyle?: ResultSymbolStyle;
+  private completed = false;
+
+  constructor(map: KairosMap) {
+    super(map, "draw.circle");
+  }
+
+  override start(options: DrawToolOptions = {}): void {
+    super.start(options);
+    this.options = options;
+    this.resetDraft();
+
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (!position) {
+        return;
+      }
+
+      if (!this.center) {
+        this.center = Cartesian3.clone(position);
+        this.edgePosition = undefined;
+        this.ensureEntity();
+        this.notifyPointAdd([Cartesian3.clone(this.center)]);
+        return;
+      }
+
+      this.edgePosition = Cartesian3.clone(position);
+      void this.finish();
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    this.handler?.setInputAction((movement: { endPosition: Cartesian2 }) => {
+      if (!this.center) {
+        return;
+      }
+
+      const position = this.pickPosition(movement.endPosition);
+      if (!position) {
+        return;
+      }
+
+      this.edgePosition = Cartesian3.clone(position);
+      this.ensureEntity();
+    }, ScreenSpaceEventType.MOUSE_MOVE);
+
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+  }
+
+  override stop(): void {
+    this.discardDraft();
+    super.stop();
+  }
+
+  private ensureEntity(): void {
+    if (this.entity || !this.center) {
+      return;
+    }
+
+    const style = resolveDrawToolStyle(this.map, "circle", this.options.style);
+    this.resolvedStyle = style;
+    this.entity = this.viewer.entities.add({
+      id: createDrawId("circle-preview"),
+      position: this.center,
+      ellipse: {
+        semiMajorAxis: new CallbackProperty(() => Math.max(this.radius(), 0.01), false),
+        semiMinorAxis: new CallbackProperty(() => Math.max(this.radius(), 0.01), false),
+        material: parseColorLike(
+          style.polygon?.fillColor ?? Color.CYAN.withAlpha(0.22),
+          "polygon.fillColor"
+        ),
+        outline: true,
+        outlineColor: parseColorLike(
+          style.polygon?.outlineColor ?? style.line?.color ?? Color.CYAN,
+          "polygon.outlineColor"
+        ),
+        outlineWidth: style.polygon?.outlineWidth ?? style.line?.width
+      }
+    });
+    applyHeightOptionsToEntity(this.entity, this.options.height);
+  }
+
+  private async finish(): Promise<void> {
+    if (!this.center || !this.edgePosition || this.completed || this.radius() <= 0) {
+      return;
+    }
+
+    this.completed = true;
+    const height = serializeHeightOptions(this.options.height);
+    const [center] = await resolveDrawPositions(this.map, [this.center], height);
+    const radius = this.radius();
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, "circle", this.options.style);
+    const result = this.map.draw.circle({
+      id: createDrawId("circle"),
+      center,
+      radius,
+      style,
+      height
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+
+    if (this.options.once ?? true) {
+      this.map.tools.stop();
+      return;
+    }
+
+    this.discardDraft();
+  }
+
+  private radius(): number {
+    return this.center && this.edgePosition
+      ? Cartesian3.distance(this.center, this.edgePosition)
+      : 0;
+  }
+
+  private discardDraft(): void {
+    if (this.entity) {
+      this.viewer.entities.remove(this.entity);
+    }
+    this.resetDraft();
+  }
+
+  private resetDraft(): void {
+    this.center = undefined;
+    this.edgePosition = undefined;
+    this.entity = undefined;
+    this.resolvedStyle = undefined;
+    this.completed = false;
+  }
+}
+
+export class DrawRectangleTool extends InteractiveTool<DrawToolOptions> {
+  private firstCorner?: Cartesian3;
+  private oppositeCorner?: Cartesian3;
+  private entity?: Entity;
+  private options: DrawToolOptions = {};
+  private resolvedStyle?: ResultSymbolStyle;
+  private completed = false;
+
+  constructor(map: KairosMap) {
+    super(map, "draw.rectangle");
+  }
+
+  override start(options: DrawToolOptions = {}): void {
+    super.start(options);
+    this.options = options;
+    this.resetDraft();
+
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (!position) {
+        return;
+      }
+
+      if (!this.firstCorner) {
+        this.firstCorner = Cartesian3.clone(position);
+        this.oppositeCorner = undefined;
+        this.ensureEntity();
+        this.notifyPointAdd([Cartesian3.clone(this.firstCorner)]);
+        return;
+      }
+
+      this.oppositeCorner = Cartesian3.clone(position);
+      void this.finish();
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    this.handler?.setInputAction((movement: { endPosition: Cartesian2 }) => {
+      if (!this.firstCorner) {
+        return;
+      }
+
+      const position = this.pickPosition(movement.endPosition);
+      if (!position) {
+        return;
+      }
+
+      this.oppositeCorner = Cartesian3.clone(position);
+      this.ensureEntity();
+    }, ScreenSpaceEventType.MOUSE_MOVE);
+
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+  }
+
+  override stop(): void {
+    this.discardDraft();
+    super.stop();
+  }
+
+  private ensureEntity(): void {
+    if (this.entity || !this.firstCorner) {
+      return;
+    }
+
+    const style = resolveDrawToolStyle(this.map, "rectangle", this.options.style);
+    this.resolvedStyle = style;
+    this.entity = this.viewer.entities.add({
+      id: createDrawId("rectangle-preview"),
+      rectangle: {
+        coordinates: new CallbackProperty(() => this.rectangleCoordinates(), false),
+        material: parseColorLike(
+          style.polygon?.fillColor ?? Color.CYAN.withAlpha(0.22),
+          "polygon.fillColor"
+        ),
+        outline: true,
+        outlineColor: parseColorLike(
+          style.polygon?.outlineColor ?? style.line?.color ?? Color.CYAN,
+          "polygon.outlineColor"
+        ),
+        outlineWidth: style.polygon?.outlineWidth ?? style.line?.width
+      }
+    });
+    applyHeightOptionsToEntity(this.entity, this.options.height);
+  }
+
+  private async finish(): Promise<void> {
+    if (
+      !this.firstCorner ||
+      !this.oppositeCorner ||
+      this.completed ||
+      Cartesian3.equals(this.firstCorner, this.oppositeCorner)
+    ) {
+      return;
+    }
+
+    this.completed = true;
+    const height = serializeHeightOptions(this.options.height);
+    const positions = await resolveDrawPositions(
+      this.map,
+      [this.firstCorner, this.oppositeCorner],
+      height
+    );
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, "rectangle", this.options.style);
+    const result = this.map.draw.rectangle({
+      id: createDrawId("rectangle"),
+      positions,
+      style,
+      height
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+
+    if (this.options.once ?? true) {
+      this.map.tools.stop();
+      return;
+    }
+
+    this.discardDraft();
+  }
+
+  private rectangleCoordinates(): Rectangle {
+    const positions = this.oppositeCorner && this.firstCorner
+      ? [this.firstCorner, this.oppositeCorner]
+      : this.firstCorner
+        ? [this.firstCorner, this.firstCorner]
+        : [new Cartesian3(), new Cartesian3()];
+    return Rectangle.fromCartesianArray(positions);
+  }
+
+  private discardDraft(): void {
+    if (this.entity) {
+      this.viewer.entities.remove(this.entity);
+    }
+    this.resetDraft();
+  }
+
+  private resetDraft(): void {
+    this.firstCorner = undefined;
+    this.oppositeCorner = undefined;
+    this.entity = undefined;
+    this.resolvedStyle = undefined;
+    this.completed = false;
+  }
+}
+
 export function registerDefaultDrawTools(): void {
   registerTool("draw.point", (map) => new DrawPointTool(map));
   registerTool("draw.polyline", (map) => new DrawPolylineTool(map));
   registerTool("draw.polygon", (map) => new DrawPolygonTool(map));
+  registerTool("draw.circle", (map) => new DrawCircleTool(map));
+  registerTool("draw.rectangle", (map) => new DrawRectangleTool(map));
 }
 
 function createDrawResult(
@@ -403,7 +688,7 @@ function createDrawResult(
   };
 }
 
-function createDrawId(type: DrawType): string {
+function createDrawId(type: string): string {
   return `draw-${type}-${Math.random().toString(36).slice(2, 10)}`;
 }
 

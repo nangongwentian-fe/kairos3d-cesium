@@ -51,10 +51,12 @@ export class PickingManager extends Evented<PickingManagerEvents> {
     const results: PickResult[] = [];
 
     for (const picked of rawPicks) {
-      const layer = this.findLayerForPickedObject(picked);
+      const overlay = this.findOverlayForPickedObject(picked);
+      const layer = overlay ? undefined : this.findLayerForPickedObject(picked);
       const result = normalizePickedObject({
         picked,
         layer,
+        overlay,
         position,
         cartographic,
         windowPosition
@@ -166,6 +168,11 @@ export class PickingManager extends Evented<PickingManagerEvents> {
     }
 
     return undefined;
+  }
+
+  private findOverlayForPickedObject(picked: unknown) {
+    const entity = getPickedEntity(picked);
+    return entity ? this.map.overlays.findByEntity(entity) : undefined;
   }
 }
 

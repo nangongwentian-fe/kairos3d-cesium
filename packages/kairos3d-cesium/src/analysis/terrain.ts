@@ -25,12 +25,15 @@ import {
   calculateCutFillVolume,
   calculateExcavationVolume,
   calculateFloodVolume,
+  calculateTerrainArea,
   computeSlopeAspectGrid,
   createContourLines,
   createTerrainSampleGrid,
   getHeightRange,
   getSlopeRange,
-  resolveExcavationBottomHeight
+  resolveExcavationBottomHeight,
+  resolveTerrainAreaMode,
+  resolveTerrainVolumeMode
 } from "./terrain-utils";
 import type {
   ContourDrawOptions,
@@ -54,6 +57,7 @@ import type {
   TerrainResultSnapshot,
   TerrainSampleGrid,
   TerrainSampleGridSnapshot,
+  TerrainVolumeMode,
   VolumeOptions,
   VolumeResult,
   VolumeResultSnapshot
@@ -103,7 +107,11 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
       options
     );
     const range = getHeightRange(grid);
-    const volume = calculateCutFillVolume(grid, options.baseHeight);
+    const volume = calculateCutFillVolume(
+      grid,
+      options.baseHeight,
+      resolveTerrainVolumeMode(options.precision)
+    );
     const style = this.map.styles.resolveTerrainStyle("volume", options.style);
     const result: VolumeResult = {
       id: createTerrainAnalysisId("volume"),
@@ -115,6 +123,8 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
       fillVolume: volume.fillVolume,
       netVolume: volume.netVolume,
       sampleArea: volume.sampleArea,
+      surfaceArea: volume.surfaceArea,
+      calculationMode: volume.calculationMode,
       minHeight: range.minHeight,
       maxHeight: range.maxHeight,
       entities: renderAreaEntities(this.map, options.area, style, options.height),
@@ -134,7 +144,11 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
       options
     );
     const range = getHeightRange(grid);
-    const flood = calculateFloodVolume(grid, options.waterHeight);
+    const flood = calculateFloodVolume(
+      grid,
+      options.waterHeight,
+      resolveTerrainVolumeMode(options.precision)
+    );
     const style = this.map.styles.resolveTerrainStyle("flood", options.style);
     const result: FloodResult = {
       id: createTerrainAnalysisId("flood"),
@@ -145,6 +159,8 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
       floodedArea: flood.floodedArea,
       waterVolume: flood.waterVolume,
       sampleArea: flood.sampleArea,
+      surfaceArea: flood.surfaceArea,
+      calculationMode: flood.calculationMode,
       minHeight: range.minHeight,
       maxHeight: range.maxHeight,
       entities: renderAreaEntities(this.map, options.area, style, options.height),
@@ -165,7 +181,11 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
     );
     const range = getHeightRange(grid);
     const plane = resolveExcavationBottomHeight(grid, options);
-    const excavation = calculateExcavationVolume(grid, plane.bottomHeight);
+    const excavation = calculateExcavationVolume(
+      grid,
+      plane.bottomHeight,
+      resolveTerrainVolumeMode(options.precision)
+    );
     const style = this.map.styles.resolveTerrainStyle("excavation", options.style);
     const result: ExcavationResult = {
       id: createTerrainAnalysisId("excavation"),
@@ -176,6 +196,8 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
       depth: plane.depth,
       cutVolume: excavation.cutVolume,
       sampleArea: excavation.sampleArea,
+      surfaceArea: excavation.surfaceArea,
+      calculationMode: excavation.calculationMode,
       minHeight: range.minHeight,
       maxHeight: range.maxHeight,
       entities: renderAreaEntities(this.map, options.area, style, options.height),
@@ -220,6 +242,13 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
   }
 
   addResult(result: TerrainResult): TerrainResult {
+    const existing = this.results.get(result.id);
+    if (existing === result) {
+      return result;
+    }
+    if (existing) {
+      this.remove(result.id);
+    }
     this.results.set(result.id, result);
     this.emit("add", result);
     return result;
@@ -241,6 +270,7 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
     snapshots: TerrainResultSnapshot[],
     options: RuntimeResultLoadOptions = {}
   ): Promise<TerrainResult[]> {
+    validateTerrainSnapshots(this.map, snapshots);
     if (options.clear) {
       this.clear();
     }
@@ -393,6 +423,8 @@ function volumeToSnapshot(result: VolumeResult): VolumeResultSnapshot {
     fillVolume: result.fillVolume,
     netVolume: result.netVolume,
     sampleArea: result.sampleArea,
+    surfaceArea: result.surfaceArea,
+    calculationMode: result.calculationMode,
     minHeight: result.minHeight,
     maxHeight: result.maxHeight,
     createdAt: result.createdAt.toISOString(),
@@ -411,6 +443,8 @@ function floodToSnapshot(result: FloodResult): FloodResultSnapshot {
     floodedArea: result.floodedArea,
     waterVolume: result.waterVolume,
     sampleArea: result.sampleArea,
+    surfaceArea: result.surfaceArea,
+    calculationMode: result.calculationMode,
     minHeight: result.minHeight,
     maxHeight: result.maxHeight,
     createdAt: result.createdAt.toISOString(),
@@ -429,6 +463,8 @@ function excavationToSnapshot(result: ExcavationResult): ExcavationResultSnapsho
     depth: result.depth,
     cutVolume: result.cutVolume,
     sampleArea: result.sampleArea,
+    surfaceArea: result.surfaceArea,
+    calculationMode: result.calculationMode,
     minHeight: result.minHeight,
     maxHeight: result.maxHeight,
     createdAt: result.createdAt.toISOString(),
@@ -511,6 +547,8 @@ function restoreVolume(map: KairosMap, snapshot: VolumeResultSnapshot): VolumeRe
     fillVolume: snapshot.fillVolume,
     netVolume: snapshot.netVolume,
     sampleArea: snapshot.sampleArea,
+    surfaceArea: snapshot.surfaceArea ?? calculateRestoredSurfaceArea(grid, snapshot.calculationMode),
+    calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
     entities: renderAreaEntities(map, area, style, height),
@@ -534,6 +572,8 @@ function restoreFlood(map: KairosMap, snapshot: FloodResultSnapshot): FloodResul
     floodedArea: snapshot.floodedArea,
     waterVolume: snapshot.waterVolume,
     sampleArea: snapshot.sampleArea,
+    surfaceArea: snapshot.surfaceArea ?? calculateRestoredSurfaceArea(grid, snapshot.calculationMode),
+    calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
     entities: renderAreaEntities(map, area, style, height),
@@ -560,6 +600,8 @@ function restoreExcavation(
     depth: snapshot.depth,
     cutVolume: snapshot.cutVolume,
     sampleArea: snapshot.sampleArea,
+    surfaceArea: snapshot.surfaceArea ?? calculateRestoredSurfaceArea(grid, snapshot.calculationMode),
+    calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
     entities: renderAreaEntities(map, area, style, height),
@@ -587,6 +629,94 @@ function restoreTerrainSnapshot(
   }
 }
 
+function validateTerrainSnapshots(
+  map: KairosMap,
+  snapshots: TerrainResultSnapshot[]
+): void {
+  const ids = new Set<string>();
+  for (const snapshot of snapshots) {
+    if (ids.has(snapshot.id)) {
+      throw new Error(`Terrain result snapshot id "${snapshot.id}" is duplicated.`);
+    }
+    ids.add(snapshot.id);
+    validateTerrainSnapshot(map, snapshot);
+  }
+}
+
+function validateTerrainSnapshot(map: KairosMap, snapshot: TerrainResultSnapshot): void {
+  parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt");
+  serializeHeightOptions(snapshot.height);
+
+  switch (snapshot.type) {
+    case "slope-aspect":
+      deserializePositions(snapshot.area);
+      deserializeGrid(snapshot.grid);
+      map.styles.resolveTerrainStyle("slope-aspect", snapshot.style);
+      assertFiniteTerrainSnapshotNumber(snapshot.minSlope, "Terrain minSlope");
+      assertFiniteTerrainSnapshotNumber(snapshot.maxSlope, "Terrain maxSlope");
+      assertFiniteTerrainSnapshotNumber(snapshot.averageSlope, "Terrain averageSlope");
+      return;
+    case "contour":
+      deserializePositions(snapshot.area);
+      snapshot.lines.map(deserializeContourLine);
+      map.styles.resolveTerrainStyle("contour", snapshot.style);
+      assertFiniteTerrainSnapshotNumber(snapshot.interval, "Terrain contour interval");
+      assertFiniteTerrainSnapshotNumber(snapshot.sampleStep, "Terrain contour sampleStep");
+      assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
+      assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      return;
+    case "volume":
+      deserializePositions(snapshot.area);
+      deserializeGrid(snapshot.grid);
+      map.styles.resolveTerrainStyle("volume", snapshot.style);
+      assertFiniteTerrainSnapshotNumber(snapshot.baseHeight, "Terrain baseHeight");
+      assertFiniteTerrainSnapshotNumber(snapshot.cutVolume, "Terrain cutVolume");
+      assertFiniteTerrainSnapshotNumber(snapshot.fillVolume, "Terrain fillVolume");
+      assertFiniteTerrainSnapshotNumber(snapshot.netVolume, "Terrain netVolume");
+      assertFiniteTerrainSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
+      assertOptionalFiniteTerrainSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
+      assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      return;
+    case "flood":
+      deserializePositions(snapshot.area);
+      deserializeGrid(snapshot.grid);
+      map.styles.resolveTerrainStyle("flood", snapshot.style);
+      assertFiniteTerrainSnapshotNumber(snapshot.waterHeight, "Terrain waterHeight");
+      assertFiniteTerrainSnapshotNumber(snapshot.floodedArea, "Terrain floodedArea");
+      assertFiniteTerrainSnapshotNumber(snapshot.waterVolume, "Terrain waterVolume");
+      assertFiniteTerrainSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
+      assertOptionalFiniteTerrainSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
+      assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      return;
+    case "excavation":
+      deserializePositions(snapshot.area);
+      deserializeGrid(snapshot.grid);
+      map.styles.resolveTerrainStyle("excavation", snapshot.style);
+      assertFiniteTerrainSnapshotNumber(snapshot.bottomHeight, "Terrain bottomHeight");
+      assertOptionalFiniteTerrainSnapshotNumber(snapshot.depth, "Terrain depth");
+      assertFiniteTerrainSnapshotNumber(snapshot.cutVolume, "Terrain cutVolume");
+      assertFiniteTerrainSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
+      assertOptionalFiniteTerrainSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
+      assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      return;
+  }
+}
+
+function calculateRestoredSurfaceArea(
+  grid: TerrainSampleGrid,
+  calculationMode: TerrainVolumeMode | undefined
+): number {
+  return calculateTerrainArea(
+    grid,
+    resolveTerrainAreaMode({
+      areaMode: calculationMode === "triangulated" ? "triangulated" : "planar"
+    })
+  );
+}
+
 function serializeGrid(grid: TerrainSampleGrid): TerrainSampleGridSnapshot {
   return {
     area: serializePositions(grid.area),
@@ -599,6 +729,9 @@ function serializeGrid(grid: TerrainSampleGrid): TerrainSampleGridSnapshot {
 }
 
 function deserializeGrid(snapshot: TerrainSampleGridSnapshot): TerrainSampleGrid {
+  assertPositiveInteger(snapshot.rows, "Terrain grid rows");
+  assertPositiveInteger(snapshot.columns, "Terrain grid columns");
+  assertFiniteTerrainSnapshotNumber(snapshot.sampleStep, "Terrain grid sampleStep");
   return {
     area: deserializePositions(snapshot.area),
     rows: snapshot.rows,
@@ -622,6 +755,12 @@ function serializeGridSample(sample: TerrainGridSample): TerrainGridSampleSnapsh
 }
 
 function deserializeGridSample(snapshot: TerrainGridSampleSnapshot): TerrainGridSample {
+  assertNonNegativeInteger(snapshot.row, "Terrain grid sample row");
+  assertNonNegativeInteger(snapshot.column, "Terrain grid sample column");
+  assertFiniteTerrainSnapshotNumber(snapshot.height, "Terrain grid sample height");
+  assertOptionalFiniteTerrainSnapshotNumber(snapshot.slope, "Terrain grid sample slope");
+  assertOptionalFiniteTerrainSnapshotNumber(snapshot.aspect, "Terrain grid sample aspect");
+
   return {
     row: snapshot.row,
     column: snapshot.column,
@@ -641,10 +780,39 @@ function serializeContourLine(line: ContourLine): ContourLineSnapshot {
 }
 
 function deserializeContourLine(snapshot: ContourLineSnapshot): ContourLine {
+  assertFiniteTerrainSnapshotNumber(snapshot.height, "Terrain contour height");
+
   return {
     height: snapshot.height,
     positions: deserializePositions(snapshot.positions)
   };
+}
+
+function assertPositiveInteger(value: number, label: string): void {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+}
+
+function assertNonNegativeInteger(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative integer.`);
+  }
+}
+
+function assertOptionalFiniteTerrainSnapshotNumber(
+  value: number | undefined,
+  label: string
+): void {
+  if (value !== undefined) {
+    assertFiniteTerrainSnapshotNumber(value, label);
+  }
+}
+
+function assertFiniteTerrainSnapshotNumber(value: number, label: string): void {
+  if (!Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number.`);
+  }
 }
 
 function removeEntities(map: KairosMap, entities: Entity[]): void {

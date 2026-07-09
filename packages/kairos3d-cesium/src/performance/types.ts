@@ -60,6 +60,7 @@ export interface PerformanceStats {
   resultEntityCount: number;
   resultPrimitiveCount: number;
   unmanagedEntityCount: number;
+  overlayEntityCount: number;
   primitiveOverlayCount: number;
   layerCount: number;
   layerRuntimeObjectCount: number;

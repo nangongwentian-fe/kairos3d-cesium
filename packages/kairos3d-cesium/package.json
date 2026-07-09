@@ -72,6 +72,16 @@
       "types": "./dist/primitives/index.d.ts",
       "import": "./dist/primitives/index.js",
       "require": "./dist/primitives/index.cjs"
+    },
+    "./overlays": {
+      "types": "./dist/overlays/index.d.ts",
+      "import": "./dist/overlays/index.js",
+      "require": "./dist/overlays/index.cjs"
+    },
+    "./persistence": {
+      "types": "./dist/persistence/index.d.ts",
+      "import": "./dist/persistence/index.js",
+      "require": "./dist/persistence/index.cjs"
     }
   },
   "files": ["dist", "README.md"],

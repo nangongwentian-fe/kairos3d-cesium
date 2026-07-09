@@ -190,6 +190,62 @@ describe("TerrainAnalysisManager", () => {
     expect(restored[0].entities).toHaveLength(1);
   });
 
+  it("validates terrain snapshots before clearing existing results", async () => {
+    const map = createMapMock();
+    const manager = new TerrainAnalysisManager(map);
+    const existing = await manager.slopeAspect({
+      area: createArea(),
+      sampleStep: 80,
+      maxSamples: 16
+    });
+    const invalidSnapshot: ContourResultSnapshot = {
+      id: "contour-bad",
+      type: "contour",
+      area: [
+        { longitude: 114, latitude: 22, height: 0 },
+        { longitude: 114.001, latitude: 22, height: 0 },
+        { longitude: 114.001, latitude: 22.001, height: 0 }
+      ],
+      interval: 10,
+      sampleStep: Number.NaN,
+      lines: [],
+      minHeight: 0,
+      maxHeight: 20,
+      createdAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    await expect(manager.load([invalidSnapshot], { clear: true })).rejects.toThrow(
+      "Terrain contour sampleStep must be a finite number."
+    );
+
+    expect(manager.list()).toEqual([existing]);
+  });
+
+  it("rejects duplicate terrain snapshot ids before restoring", async () => {
+    const map = createMapMock();
+    const manager = new TerrainAnalysisManager(map);
+    const snapshot: ContourResultSnapshot = {
+      id: "contour-duplicate",
+      type: "contour",
+      area: [
+        { longitude: 114, latitude: 22, height: 0 },
+        { longitude: 114.001, latitude: 22, height: 0 },
+        { longitude: 114.001, latitude: 22.001, height: 0 }
+      ],
+      interval: 10,
+      sampleStep: 50,
+      lines: [],
+      minHeight: 0,
+      maxHeight: 20,
+      createdAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    await expect(manager.load([snapshot, snapshot])).rejects.toThrow(
+      'Terrain result snapshot id "contour-duplicate" is duplicated.'
+    );
+    expect(manager.list()).toEqual([]);
+  });
+
   it("updates style and clears terrain results", async () => {
     const map = createMapMock();
     const manager = new TerrainAnalysisManager(map);
@@ -211,6 +267,28 @@ describe("TerrainAnalysisManager", () => {
       ids: [result.id]
     });
     expect(manager.list()).toEqual([]);
+  });
+
+  it("replaces duplicate terrain result ids without leaking previous entities", async () => {
+    const map = createMapMock();
+    const manager = new TerrainAnalysisManager(map);
+    const first = await manager.slopeAspect({
+      area: createArea(),
+      sampleStep: 80,
+      maxSamples: 16
+    });
+    const second = {
+      ...first,
+      entities: [new Entity({ id: "replacement" })]
+    };
+
+    manager.addResult(first);
+    manager.addResult(second);
+
+    for (const entity of first.entities) {
+      expect(map.viewer.entities.remove).toHaveBeenCalledWith(entity);
+    }
+    expect(manager.list()).toEqual([second]);
   });
 
   it("updates styles for non-contour terrain area results", async () => {

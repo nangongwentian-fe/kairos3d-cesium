@@ -5,11 +5,14 @@ import {
   calculateCutFillVolume,
   calculateExcavationVolume,
   calculateFloodVolume,
+  calculateTerrainArea,
   computeSlopeAspectGrid,
   createContourLines,
   createTerrainSampleGrid,
   getSlopeRange,
-  resolveExcavationBottomHeight
+  resolveExcavationBottomHeight,
+  resolveTerrainAreaMode,
+  resolveTerrainVolumeMode
 } from "./terrain-utils";
 
 function createTerrainProviderMock() {
@@ -109,6 +112,26 @@ describe("terrain utilities", () => {
     expect(volume.cutVolume).toBe(300000);
     expect(volume.fillVolume).toBe(300000);
     expect(volume.netVolume).toBe(0);
+  });
+
+  it("calculates triangulated area and volume summaries", () => {
+    const grid = createManualGrid();
+    const area = calculateTerrainArea(grid, "triangulated");
+    const volume = calculateCutFillVolume(grid, 10, "triangulated");
+    const flood = calculateFloodVolume(grid, 15, "triangulated");
+    const excavation = calculateExcavationVolume(grid, 5, "triangulated");
+
+    expect(resolveTerrainAreaMode({ areaMode: "triangulated" })).toBe("triangulated");
+    expect(resolveTerrainVolumeMode({ volumeMode: "triangulated" })).toBe("triangulated");
+    expect(area).toBeGreaterThan(0);
+    expect(volume.calculationMode).toBe("triangulated");
+    expect(volume.surfaceArea).toBe(volume.sampleArea);
+    expect(volume.cutVolume).toBeGreaterThan(0);
+    expect(volume.fillVolume).toBeGreaterThan(0);
+    expect(flood.calculationMode).toBe("triangulated");
+    expect(flood.floodedArea).toBeGreaterThan(0);
+    expect(excavation.calculationMode).toBe("triangulated");
+    expect(excavation.cutVolume).toBeGreaterThan(0);
   });
 
   it("calculates flood area and water volume below a water height", () => {

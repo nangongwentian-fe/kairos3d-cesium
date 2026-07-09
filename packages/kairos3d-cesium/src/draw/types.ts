@@ -5,13 +5,23 @@ import type {
   ResultPrimitiveRuntime,
   ResultRenderMode
 } from "../primitives";
+import type { OverlayData } from "../overlays/types";
 import type {
   ResultSymbolStyle,
   SerializableResultSymbolStyle
 } from "../style";
 
-export type DrawType = "point" | "polyline" | "polygon";
+export type DrawType =
+  | "point"
+  | "polyline"
+  | "polygon"
+  | "circle"
+  | "rectangle"
+  | "billboard"
+  | "label"
+  | "model";
 export type DrawEditReason = "drag" | "insert" | "delete" | "programmatic";
+export type DrawResultData = OverlayData;
 
 export interface DrawStyle {
   pointColor?: Color;
@@ -26,6 +36,7 @@ export interface DrawResult {
   type: DrawType;
   entity: Entity;
   positions: Cartesian3[];
+  data?: DrawResultData;
   createdAt: Date;
   updatedAt?: Date;
   style?: ResultSymbolStyle;
@@ -38,6 +49,7 @@ export interface DrawResultSnapshot {
   id: string;
   type: DrawType;
   positions: SerializablePosition[];
+  data?: DrawResultData;
   createdAt: string;
   updatedAt?: string;
   style?: SerializableResultSymbolStyle;
@@ -50,6 +62,78 @@ export type DrawResultLoadOptions = RuntimeResultLoadOptions;
 export interface DrawToolOptions {
   style?: ResultSymbolStyle | DrawStyle;
   once?: boolean;
+  height?: HeightOptions;
+  renderMode?: ResultRenderMode;
+}
+
+export interface DrawCreateOptions {
+  id?: string;
+  style?: ResultSymbolStyle;
+  height?: HeightOptions;
+  renderMode?: ResultRenderMode;
+}
+
+export interface DrawCircleOptions extends DrawCreateOptions {
+  center: Cartesian3;
+  radius: number;
+  data?: Omit<DrawResultData, "radius">;
+}
+
+export interface DrawRectangleOptions extends DrawCreateOptions {
+  positions: Cartesian3[];
+  data?: DrawResultData;
+}
+
+export interface DrawBillboardOptions extends DrawCreateOptions {
+  position: Cartesian3;
+  image: string;
+  scale?: number;
+  data?: Omit<DrawResultData, "image" | "scale">;
+}
+
+export interface DrawLabelOptions extends DrawCreateOptions {
+  position: Cartesian3;
+  text: string;
+  data?: Omit<DrawResultData, "text">;
+}
+
+export interface DrawModelOptions extends DrawCreateOptions {
+  position: Cartesian3;
+  uri: string;
+  scale?: number;
+  minimumPixelSize?: number;
+  maximumScale?: number;
+  heading?: number;
+  pitch?: number;
+  roll?: number;
+  data?: Omit<
+    DrawResultData,
+    | "uri"
+    | "scale"
+    | "minimumPixelSize"
+    | "maximumScale"
+    | "heading"
+    | "pitch"
+    | "roll"
+  >;
+}
+
+export interface DrawResultUpdateOptions {
+  positions?: Cartesian3[];
+  position?: Cartesian3;
+  center?: Cartesian3;
+  data?: DrawResultData;
+  radius?: number;
+  text?: string;
+  image?: string;
+  uri?: string;
+  scale?: number;
+  minimumPixelSize?: number;
+  maximumScale?: number;
+  heading?: number;
+  pitch?: number;
+  roll?: number;
+  style?: ResultSymbolStyle;
   height?: HeightOptions;
   renderMode?: ResultRenderMode;
 }

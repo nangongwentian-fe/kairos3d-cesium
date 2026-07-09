@@ -11,6 +11,17 @@ import {
   mergeSymbolStyles
 } from "./utils";
 
+const drawTypes: DrawType[] = [
+  "point",
+  "polyline",
+  "polygon",
+  "circle",
+  "rectangle",
+  "billboard",
+  "label",
+  "model"
+];
+
 export class StyleManager {
   private defaults: SDKStyleDefaults = createDefaultStyles();
   private readonly presets = new Map<string, ResultSymbolStyle>();
@@ -86,6 +97,23 @@ function createDefaultStyles(): SDKStyleDefaults {
       polygon: {
         line: { color: Color.CYAN, width: 2, clampToGround: false },
         polygon: { fillColor: Color.CYAN.withAlpha(0.28), outlineColor: Color.CYAN }
+      },
+      circle: {
+        line: { color: Color.CYAN, width: 2, clampToGround: false },
+        polygon: { fillColor: Color.CYAN.withAlpha(0.22), outlineColor: Color.CYAN }
+      },
+      rectangle: {
+        line: { color: Color.CYAN, width: 2, clampToGround: false },
+        polygon: { fillColor: Color.CYAN.withAlpha(0.22), outlineColor: Color.CYAN }
+      },
+      billboard: {
+        billboard: { color: Color.WHITE, scale: 1 }
+      },
+      label: {
+        label: { color: Color.WHITE, outlineColor: Color.BLACK }
+      },
+      model: {
+        model: { scale: 1 }
       }
     },
     measure: {
@@ -168,12 +196,13 @@ function mergeDefaults(
   current: SDKStyleDefaults,
   next: SDKStyleDefaults
 ): SDKStyleDefaults {
+  const draw: SDKStyleDefaults["draw"] = {};
+  for (const type of drawTypes) {
+    draw[type] = mergeSymbolStyles(current.draw?.[type], next.draw?.[type]);
+  }
+
   return {
-    draw: {
-      point: mergeSymbolStyles(current.draw?.point, next.draw?.point),
-      polyline: mergeSymbolStyles(current.draw?.polyline, next.draw?.polyline),
-      polygon: mergeSymbolStyles(current.draw?.polygon, next.draw?.polygon)
-    },
+    draw,
     measure: {
       distance: mergeSymbolStyles(current.measure?.distance, next.measure?.distance),
       area: mergeSymbolStyles(current.measure?.area, next.measure?.area),

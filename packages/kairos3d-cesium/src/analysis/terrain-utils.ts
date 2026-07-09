@@ -8,8 +8,11 @@ import {
 } from "cesium";
 import type {
   ContourLine,
+  TerrainAreaMode,
   TerrainGridSample,
-  TerrainSampleGrid
+  TerrainPrecisionOptions,
+  TerrainSampleGrid,
+  TerrainVolumeMode
 } from "./types";
 
 const defaultSampleStep = 30;
@@ -183,24 +186,36 @@ export interface CutFillVolumeSummary {
   fillVolume: number;
   netVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode: TerrainVolumeMode;
 }
 
 export interface FloodVolumeSummary {
   floodedArea: number;
   waterVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode: TerrainVolumeMode;
 }
 
 export interface ExcavationVolumeSummary {
   cutVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode: TerrainVolumeMode;
 }
 
 export function calculateCutFillVolume(
   grid: TerrainSampleGrid,
-  baseHeight: number
+  baseHeight: number,
+  mode: TerrainVolumeMode = "sample-cell"
 ): CutFillVolumeSummary {
   const normalizedBaseHeight = normalizeAnalysisHeight(baseHeight, "baseHeight");
+  const calculationMode = normalizeTerrainVolumeMode(mode);
+  if (calculationMode === "triangulated") {
+    return calculateTriangulatedCutFillVolume(grid, normalizedBaseHeight);
+  }
+
   const sampleArea = getApproximateSampleArea(grid);
   let cutVolume = 0;
   let fillVolume = 0;
@@ -218,15 +233,23 @@ export function calculateCutFillVolume(
     cutVolume,
     fillVolume,
     netVolume: cutVolume - fillVolume,
-    sampleArea
+    sampleArea,
+    surfaceArea: sampleArea * grid.samples.length,
+    calculationMode
   };
 }
 
 export function calculateFloodVolume(
   grid: TerrainSampleGrid,
-  waterHeight: number
+  waterHeight: number,
+  mode: TerrainVolumeMode = "sample-cell"
 ): FloodVolumeSummary {
   const normalizedWaterHeight = normalizeAnalysisHeight(waterHeight, "waterHeight");
+  const calculationMode = normalizeTerrainVolumeMode(mode);
+  if (calculationMode === "triangulated") {
+    return calculateTriangulatedFloodVolume(grid, normalizedWaterHeight);
+  }
+
   const sampleArea = getApproximateSampleArea(grid);
   let floodedArea = 0;
   let waterVolume = 0;
@@ -242,15 +265,23 @@ export function calculateFloodVolume(
   return {
     floodedArea,
     waterVolume,
-    sampleArea
+    sampleArea,
+    surfaceArea: sampleArea * grid.samples.length,
+    calculationMode
   };
 }
 
 export function calculateExcavationVolume(
   grid: TerrainSampleGrid,
-  bottomHeight: number
+  bottomHeight: number,
+  mode: TerrainVolumeMode = "sample-cell"
 ): ExcavationVolumeSummary {
   const normalizedBottomHeight = normalizeAnalysisHeight(bottomHeight, "bottomHeight");
+  const calculationMode = normalizeTerrainVolumeMode(mode);
+  if (calculationMode === "triangulated") {
+    return calculateTriangulatedExcavationVolume(grid, normalizedBottomHeight);
+  }
+
   const sampleArea = getApproximateSampleArea(grid);
   let cutVolume = 0;
 
@@ -263,8 +294,41 @@ export function calculateExcavationVolume(
 
   return {
     cutVolume,
-    sampleArea
+    sampleArea,
+    surfaceArea: sampleArea * grid.samples.length,
+    calculationMode
   };
+}
+
+export function calculateTerrainArea(
+  grid: TerrainSampleGrid,
+  mode: TerrainAreaMode = "planar"
+): number {
+  const areaMode = normalizeTerrainAreaMode(mode);
+  if (areaMode === "triangulated") {
+    return calculateTriangulatedSurfaceArea(grid);
+  }
+
+  return getApproximateSampleArea(grid) * grid.samples.length;
+}
+
+export function calculateTriangulatedSurfaceArea(grid: TerrainSampleGrid): number {
+  return getGridTriangles(grid).reduce(
+    (sum, triangle) => sum + triangleArea(triangle[0].position, triangle[1].position, triangle[2].position),
+    0
+  );
+}
+
+export function resolveTerrainAreaMode(
+  options?: TerrainPrecisionOptions
+): TerrainAreaMode {
+  return normalizeTerrainAreaMode(options?.areaMode ?? "planar");
+}
+
+export function resolveTerrainVolumeMode(
+  options?: TerrainPrecisionOptions
+): TerrainVolumeMode {
+  return normalizeTerrainVolumeMode(options?.volumeMode ?? "sample-cell");
 }
 
 export function resolveExcavationBottomHeight(
@@ -512,6 +576,144 @@ function normalizeContourInterval(interval: number): number {
 
 export function getApproximateSampleArea(grid: TerrainSampleGrid): number {
   return grid.sampleStep * grid.sampleStep;
+}
+
+function calculateTriangulatedCutFillVolume(
+  grid: TerrainSampleGrid,
+  baseHeight: number
+): CutFillVolumeSummary {
+  let cutVolume = 0;
+  let fillVolume = 0;
+  let sampleArea = 0;
+
+  for (const triangle of getGridTriangles(grid)) {
+    const area = triangleArea(
+      triangle[0].position,
+      triangle[1].position,
+      triangle[2].position
+    );
+    sampleArea += area;
+    const deltas = triangle.map((sample) => sample.height - baseHeight);
+    cutVolume += weightedTriangleVolume(area, deltas, (delta) => delta > 0);
+    fillVolume += weightedTriangleVolume(area, deltas, (delta) => delta < 0, true);
+  }
+
+  return {
+    cutVolume,
+    fillVolume,
+    netVolume: cutVolume - fillVolume,
+    sampleArea,
+    surfaceArea: sampleArea,
+    calculationMode: "triangulated"
+  };
+}
+
+function calculateTriangulatedFloodVolume(
+  grid: TerrainSampleGrid,
+  waterHeight: number
+): FloodVolumeSummary {
+  let floodedArea = 0;
+  let waterVolume = 0;
+  let sampleArea = 0;
+
+  for (const triangle of getGridTriangles(grid)) {
+    const area = triangleArea(
+      triangle[0].position,
+      triangle[1].position,
+      triangle[2].position
+    );
+    sampleArea += area;
+    const depths = triangle.map((sample) => waterHeight - sample.height);
+    const floodedCount = depths.filter((depth) => depth > 0).length;
+    floodedArea += area * (floodedCount / 3);
+    waterVolume += weightedTriangleVolume(area, depths, (depth) => depth > 0);
+  }
+
+  return {
+    floodedArea,
+    waterVolume,
+    sampleArea,
+    surfaceArea: sampleArea,
+    calculationMode: "triangulated"
+  };
+}
+
+function calculateTriangulatedExcavationVolume(
+  grid: TerrainSampleGrid,
+  bottomHeight: number
+): ExcavationVolumeSummary {
+  let cutVolume = 0;
+  let sampleArea = 0;
+
+  for (const triangle of getGridTriangles(grid)) {
+    const area = triangleArea(
+      triangle[0].position,
+      triangle[1].position,
+      triangle[2].position
+    );
+    sampleArea += area;
+    const depths = triangle.map((sample) => sample.height - bottomHeight);
+    cutVolume += weightedTriangleVolume(area, depths, (depth) => depth > 0);
+  }
+
+  return {
+    cutVolume,
+    sampleArea,
+    surfaceArea: sampleArea,
+    calculationMode: "triangulated"
+  };
+}
+
+function weightedTriangleVolume(
+  area: number,
+  values: number[],
+  predicate: (value: number) => boolean,
+  absolute = false
+): number {
+  const selected = values.filter(predicate);
+  if (selected.length === 0) {
+    return 0;
+  }
+  const average = selected.reduce((sum, value) => sum + Math.abs(value), 0) / selected.length;
+  return average * area * (selected.length / values.length) * (absolute ? 1 : 1);
+}
+
+function getGridTriangles(grid: TerrainSampleGrid): TerrainGridSample[][] {
+  const byKey = new Map<string, TerrainGridSample>();
+  for (const sample of grid.samples) {
+    byKey.set(sampleKey(sample.row, sample.column), sample);
+  }
+
+  const triangles: TerrainGridSample[][] = [];
+  for (let row = 0; row < grid.rows - 1; row += 1) {
+    for (let column = 0; column < grid.columns - 1; column += 1) {
+      const southWest = byKey.get(sampleKey(row, column));
+      const southEast = byKey.get(sampleKey(row, column + 1));
+      const northEast = byKey.get(sampleKey(row + 1, column + 1));
+      const northWest = byKey.get(sampleKey(row + 1, column));
+      if (!southWest || !southEast || !northEast || !northWest) {
+        continue;
+      }
+
+      triangles.push([southWest, southEast, northEast]);
+      triangles.push([southWest, northEast, northWest]);
+    }
+  }
+  return triangles;
+}
+
+function triangleArea(a: Cartesian3, b: Cartesian3, c: Cartesian3): number {
+  const ab = Cartesian3.subtract(b, a, new Cartesian3());
+  const ac = Cartesian3.subtract(c, a, new Cartesian3());
+  return Cartesian3.magnitude(Cartesian3.cross(ab, ac, new Cartesian3())) / 2;
+}
+
+function normalizeTerrainAreaMode(mode: TerrainAreaMode): TerrainAreaMode {
+  return mode === "triangulated" ? "triangulated" : "planar";
+}
+
+function normalizeTerrainVolumeMode(mode: TerrainVolumeMode): TerrainVolumeMode {
+  return mode === "triangulated" ? "triangulated" : "sample-cell";
 }
 
 function normalizeAnalysisHeight(value: number, label: string): number {

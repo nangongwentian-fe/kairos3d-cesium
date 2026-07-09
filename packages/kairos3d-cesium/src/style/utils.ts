@@ -12,15 +12,19 @@ import {
   type Entity
 } from "cesium";
 import type {
+  BillboardSymbolStyle,
   ColorLike,
   LabelSymbolStyle,
   LineSymbolStyle,
+  ModelSymbolStyle,
   PointSymbolStyle,
   PolygonSymbolStyle,
+  SerializableBillboardSymbolStyle,
   ResultSymbolStyle,
   SerializableColor,
   SerializableLabelSymbolStyle,
   SerializableLineSymbolStyle,
+  SerializableModelSymbolStyle,
   SerializablePointSymbolStyle,
   SerializablePolygonSymbolStyle,
   SerializableResultSymbolStyle
@@ -31,6 +35,8 @@ const styleKeys = [
   "line",
   "polygon",
   "label",
+  "billboard",
+  "model",
   "visibleLine",
   "blockedLine",
   "blockedPoint"
@@ -111,6 +117,12 @@ export function serializeSymbolStyle(
   }
   if (style.label) {
     serialized.label = serializeLabelStyle(style.label);
+  }
+  if (style.billboard) {
+    serialized.billboard = serializeBillboardStyle(style.billboard);
+  }
+  if (style.model) {
+    serialized.model = serializeModelStyle(style.model);
   }
   if (style.visibleLine) {
     serialized.visibleLine = serializeLineStyle(style.visibleLine);
@@ -207,6 +219,73 @@ export function applyLabelStyle(entity: Entity, style: LabelSymbolStyle): void {
   }
 }
 
+export function applyBillboardStyle(entity: Entity, style: BillboardSymbolStyle): void {
+  if (!entity.billboard) {
+    return;
+  }
+
+  if (style.color) {
+    entity.billboard.color = new ConstantProperty(
+      parseColorLike(style.color, "billboard.color")
+    );
+  }
+  if (style.scale !== undefined) {
+    entity.billboard.scale = new ConstantProperty(style.scale);
+  }
+  if (style.pixelOffset) {
+    entity.billboard.pixelOffset = new ConstantProperty(
+      new Cartesian2(style.pixelOffset[0], style.pixelOffset[1])
+    );
+  }
+  if (style.width !== undefined) {
+    entity.billboard.width = new ConstantProperty(style.width);
+  }
+  if (style.height !== undefined) {
+    entity.billboard.height = new ConstantProperty(style.height);
+  }
+  if (style.rotation !== undefined) {
+    entity.billboard.rotation = new ConstantProperty(style.rotation);
+  }
+  if (style.sizeInMeters !== undefined) {
+    entity.billboard.sizeInMeters = new ConstantProperty(style.sizeInMeters);
+  }
+  if (style.disableDepthTestDistance !== undefined) {
+    entity.billboard.disableDepthTestDistance = new ConstantProperty(
+      style.disableDepthTestDistance
+    );
+  }
+}
+
+export function applyModelStyle(entity: Entity, style: ModelSymbolStyle): void {
+  if (!entity.model) {
+    return;
+  }
+
+  if (style.color) {
+    entity.model.color = new ConstantProperty(parseColorLike(style.color, "model.color"));
+  }
+  if (style.scale !== undefined) {
+    entity.model.scale = new ConstantProperty(style.scale);
+  }
+  if (style.minimumPixelSize !== undefined) {
+    entity.model.minimumPixelSize = new ConstantProperty(style.minimumPixelSize);
+  }
+  if (style.maximumScale !== undefined) {
+    entity.model.maximumScale = new ConstantProperty(style.maximumScale);
+  }
+  if (style.silhouetteColor) {
+    entity.model.silhouetteColor = new ConstantProperty(
+      parseColorLike(style.silhouetteColor, "model.silhouetteColor")
+    );
+  }
+  if (style.silhouetteSize !== undefined) {
+    entity.model.silhouetteSize = new ConstantProperty(style.silhouetteSize);
+  }
+  if (style.colorBlendAmount !== undefined) {
+    entity.model.colorBlendAmount = new ConstantProperty(style.colorBlendAmount);
+  }
+}
+
 export function applySymbolStyleToEntities(
   entities: Entity[],
   style: ResultSymbolStyle
@@ -223,6 +302,12 @@ export function applySymbolStyleToEntities(
     }
     if (style.label) {
       applyLabelStyle(entity, style.label);
+    }
+    if (style.billboard) {
+      applyBillboardStyle(entity, style.billboard);
+    }
+    if (style.model) {
+      applyModelStyle(entity, style.model);
     }
   }
 }
@@ -281,6 +366,40 @@ export function createLabelGraphics(text: string, style: LabelSymbolStyle = {}) 
   };
 }
 
+export function createBillboardGraphics(image: string, style: BillboardSymbolStyle = {}) {
+  return {
+    image,
+    color: parseColorLike(style.color ?? Color.WHITE, "billboard.color"),
+    scale: style.scale ?? 1,
+    pixelOffset: style.pixelOffset
+      ? new Cartesian2(style.pixelOffset[0], style.pixelOffset[1])
+      : undefined,
+    width: style.width,
+    height: style.height,
+    rotation: style.rotation,
+    sizeInMeters: style.sizeInMeters,
+    horizontalOrigin: HorizontalOrigin.CENTER,
+    verticalOrigin: VerticalOrigin.BOTTOM,
+    disableDepthTestDistance:
+      style.disableDepthTestDistance ?? Number.POSITIVE_INFINITY
+  };
+}
+
+export function createModelGraphics(uri: string, style: ModelSymbolStyle = {}) {
+  return {
+    uri,
+    color: style.color ? parseColorLike(style.color, "model.color") : undefined,
+    scale: style.scale ?? 1,
+    minimumPixelSize: style.minimumPixelSize,
+    maximumScale: style.maximumScale,
+    silhouetteColor: style.silhouetteColor
+      ? parseColorLike(style.silhouetteColor, "model.silhouetteColor")
+      : undefined,
+    silhouetteSize: style.silhouetteSize,
+    colorBlendAmount: style.colorBlendAmount
+  };
+}
+
 function serializePointStyle(style: PointSymbolStyle): SerializablePointSymbolStyle {
   return {
     ...style,
@@ -309,6 +428,25 @@ function serializeLabelStyle(style: LabelSymbolStyle): SerializableLabelSymbolSt
     ...style,
     color: style.color ? serializeColor(style.color) : undefined,
     outlineColor: style.outlineColor ? serializeColor(style.outlineColor) : undefined
+  };
+}
+
+function serializeBillboardStyle(
+  style: BillboardSymbolStyle
+): SerializableBillboardSymbolStyle {
+  return {
+    ...style,
+    color: style.color ? serializeColor(style.color) : undefined
+  };
+}
+
+function serializeModelStyle(style: ModelSymbolStyle): SerializableModelSymbolStyle {
+  return {
+    ...style,
+    color: style.color ? serializeColor(style.color) : undefined,
+    silhouetteColor: style.silhouetteColor
+      ? serializeColor(style.silhouetteColor)
+      : undefined
   };
 }
 

@@ -8,6 +8,7 @@ import {
   ImageryLayerFeatureInfo
 } from "cesium";
 import type { LayerAdapter } from "../layers";
+import type { Overlay } from "../overlays";
 import {
   extractEntityProperties,
   extractImageryFeatureProperties,
@@ -22,12 +23,13 @@ export interface NormalizePickOptions {
   position?: Cartesian3;
   cartographic?: Cartographic;
   layer?: LayerAdapter;
+  overlay?: Overlay;
 }
 
 let pickResultCounter = 0;
 
 export function normalizePickedObject(options: NormalizePickOptions): PickResult | undefined {
-  const { picked, windowPosition, position, cartographic, layer } = options;
+  const { picked, windowPosition, position, cartographic, layer, overlay } = options;
   if (!defined(picked)) {
     return undefined;
   }
@@ -40,6 +42,7 @@ export function normalizePickedObject(options: NormalizePickOptions): PickResult
   const primitive = getPrimitive(picked);
   const layerProperties = layer?.getFeatureProperties?.(object);
   const properties =
+    getOverlayProperties(overlay) ??
     layerProperties ??
     getDefaultProperties({
       entity,
@@ -50,7 +53,10 @@ export function normalizePickedObject(options: NormalizePickOptions): PickResult
   return {
     id: createPickResultId(type, object),
     type,
+    source: overlay ? "overlay" : layer ? "layer" : undefined,
     layerId: layer?.id,
+    overlayId: overlay?.id,
+    overlayType: overlay?.type,
     name: getPickResultName({ entity, tileFeature, imageryFeature, properties }),
     object,
     entity,
@@ -60,6 +66,19 @@ export function normalizePickedObject(options: NormalizePickOptions): PickResult
     cartographic,
     windowPosition: Cartesian2.clone(windowPosition),
     properties
+  };
+}
+
+function getOverlayProperties(overlay?: Overlay): Record<string, unknown> | undefined {
+  if (!overlay) {
+    return undefined;
+  }
+
+  return {
+    overlayId: overlay.id,
+    overlayType: overlay.type,
+    data: overlay.data ? { ...overlay.data } : undefined,
+    metadata: overlay.metadata ? { ...overlay.metadata } : undefined
   };
 }
 

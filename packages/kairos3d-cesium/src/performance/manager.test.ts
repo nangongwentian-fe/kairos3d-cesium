@@ -33,7 +33,7 @@ function createRecord(
   };
 }
 
-function createMapMock(records: ResultRecord[] = []) {
+function createMapMock(records: ResultRecord[] = [], overlayCount = 0) {
   const runtimeObjects = new Map<string, unknown[]>([
     ["tileset", [{ kind: "tileset" }]],
     ["geojson", [{ kind: "geojson" }, { kind: "data-source" }]]
@@ -62,6 +62,9 @@ function createMapMock(records: ResultRecord[] = []) {
     },
     primitives: {
       list: () => [{ id: "primitive-1" }]
+    },
+    overlays: {
+      list: () => Array.from({ length: overlayCount }, (_, index) => ({ id: `overlay-${index}` }))
     }
   } as unknown as KairosMap;
 }
@@ -72,7 +75,7 @@ describe("PerformanceManager", () => {
       createMapMock([
         createRecord("draw-1", "draw", "polyline", 1),
         createRecord("terrain-1", "terrain", "contour", 3)
-      ])
+      ], 1)
     );
 
     const stats = manager.getStats();
@@ -81,7 +84,8 @@ describe("PerformanceManager", () => {
     expect(stats.resultCount).toBe(2);
     expect(stats.resultEntityCount).toBe(4);
     expect(stats.resultPrimitiveCount).toBe(0);
-    expect(stats.unmanagedEntityCount).toBe(1);
+    expect(stats.overlayEntityCount).toBe(1);
+    expect(stats.unmanagedEntityCount).toBe(0);
     expect(stats.primitiveOverlayCount).toBe(1);
     expect(stats.layerCount).toBe(2);
     expect(stats.layerRuntimeObjectCount).toBe(3);

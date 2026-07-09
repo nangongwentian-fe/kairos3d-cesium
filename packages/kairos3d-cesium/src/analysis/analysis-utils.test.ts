@@ -1,11 +1,13 @@
 import { Cartesian3, Cartographic } from "cesium";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createProfileSamples,
   getProfileHeightRange,
   interpolateProfilePoints
 } from "./profile-utils";
 import {
+  chooseNearestVisibilityBlock,
+  classifySceneVisibility,
   classifyVisibility,
   interpolateVisibilitySamples,
   type VisibilitySample
@@ -68,6 +70,50 @@ describe("visibility utilities", () => {
     ]);
 
     expect(result.visible).toBe(false);
+    expect(result.blockedBy).toBe("terrain");
     expect(result.blockedPosition).toBeInstanceOf(Cartesian3);
+  });
+
+  it("detects scene occlusion from ray picking", () => {
+    const start = Cartesian3.fromDegrees(114, 22, 100);
+    const end = Cartesian3.fromDegrees(114.01, 22, 100);
+    const blocked = Cartesian3.lerp(start, end, 0.4, new Cartesian3());
+    const scene = {
+      pickFromRay: () => ({ object: { id: "tileset" }, position: blocked })
+    };
+
+    const result = classifySceneVisibility(scene as never, start, end);
+
+    expect(result.visible).toBe(false);
+    expect(result.blockedBy).toBe("scene");
+    expect(result.blockedObject).toEqual({ id: "tileset" });
+  });
+
+  it("passes scene occlusion exclusions and ignores endpoint picks", () => {
+    const start = Cartesian3.fromDegrees(114, 22, 100);
+    const end = Cartesian3.fromDegrees(114.01, 22, 100);
+    const exclude = [{ id: "ignore" }];
+    const scene = {
+      pickFromRay: vi.fn(() => ({ object: { id: "endpoint" }, position: end }))
+    };
+
+    const result = classifySceneVisibility(scene as never, start, end, exclude, 2);
+
+    expect(result.visible).toBe(true);
+    expect(scene.pickFromRay).toHaveBeenCalledWith(expect.anything(), exclude, 2);
+  });
+
+  it("chooses the nearest block when terrain and scene both block", () => {
+    const start = Cartesian3.fromDegrees(114, 22, 0);
+    const terrainBlock = Cartesian3.fromDegrees(114.01, 22, 0);
+    const sceneBlock = Cartesian3.fromDegrees(114.001, 22, 0);
+
+    const result = chooseNearestVisibilityBlock(
+      start,
+      { visible: false, blockedBy: "terrain", blockedPosition: terrainBlock },
+      { visible: false, blockedBy: "scene", blockedPosition: sceneBlock }
+    );
+
+    expect(result.blockedBy).toBe("scene");
   });
 });

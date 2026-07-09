@@ -1,7 +1,5 @@
 import {
   Cartesian3,
-  ConstantPositionProperty,
-  ConstantProperty,
   Entity
 } from "cesium";
 import type { KairosMap } from "../core/map";
@@ -13,33 +11,39 @@ import {
 } from "../core/serialization";
 import type { Tool } from "../tools";
 import type { ResultSymbolStyle } from "../style";
-import {
-  applyHeightOptionsToEntity,
-  lineStyleWithHeight,
-  serializeHeightOptions
-} from "../height";
+import { serializeHeightOptions } from "../height";
 import {
   applySymbolStyleToEntities,
-  createLineGraphics,
-  createPointGraphics,
-  createPolygonGraphics,
   serializeSymbolStyle
 } from "../style";
+import {
+  cloneOverlayData,
+  normalizeOverlayHeight,
+  renderOverlayEntity,
+  validateOverlayShape
+} from "../overlays/render";
+import type { OverlayData } from "../overlays/types";
 import {
   createResultPolygonPrimitives,
   createResultPolylinePrimitive,
   removeResultPrimitiveRuntimes,
   resolveResultRenderMode
 } from "../primitives";
-import { clonePositions, minPositionCount, updateDrawResultGeometry } from "./geometry";
+import { clonePositions, minPositionCount } from "./geometry";
 import type {
   DrawEditEvent,
   DrawEditOptions,
   DrawEditReason,
   DrawEditStartOptions,
+  DrawBillboardOptions,
+  DrawCircleOptions,
+  DrawLabelOptions,
+  DrawModelOptions,
+  DrawRectangleOptions,
   DrawResult,
   DrawResultLoadOptions,
   DrawResultSnapshot,
+  DrawResultUpdateOptions,
   DrawToolOptions
 } from "./types";
 
@@ -49,6 +53,29 @@ export interface DrawManagerEvents {
   clear: DrawResult[];
   "edit-change": DrawEditEvent;
 }
+
+interface PreparedDrawSnapshot {
+  snapshot: DrawResultSnapshot;
+  positions: Cartesian3[];
+  data?: OverlayData;
+  createdAt: Date;
+  updatedAt?: Date;
+  style: ResultSymbolStyle;
+  height?: DrawResult["height"];
+  renderMode: NonNullable<DrawResult["renderMode"]>;
+}
+
+interface DrawProgrammaticConfig {
+  id?: string;
+  type: DrawResult["type"];
+  positions: Cartesian3[];
+  data?: OverlayData;
+  style?: ResultSymbolStyle;
+  height?: DrawResult["height"];
+  renderMode?: DrawResult["renderMode"];
+}
+
+let drawResultIdSeed = 0;
 
 export class DrawManager extends Evented<DrawManagerEvents> {
   private readonly results = new Map<string, DrawResult>();
@@ -76,6 +103,75 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     return this.map.tools.start("draw.polygon", options);
   }
 
+  circle(options: DrawCircleOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "circle",
+      positions: [options.center],
+      data: { ...options.data, radius: options.radius },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode
+    });
+  }
+
+  rectangle(options: DrawRectangleOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "rectangle",
+      positions: options.positions,
+      data: options.data,
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode
+    });
+  }
+
+  billboard(options: DrawBillboardOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "billboard",
+      positions: [options.position],
+      data: { ...options.data, image: options.image, scale: options.scale },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode
+    });
+  }
+
+  label(options: DrawLabelOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "label",
+      positions: [options.position],
+      data: { ...options.data, text: options.text },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode
+    });
+  }
+
+  model(options: DrawModelOptions): DrawResult {
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: "model",
+      positions: [options.position],
+      data: {
+        ...options.data,
+        uri: options.uri,
+        scale: options.scale,
+        minimumPixelSize: options.minimumPixelSize,
+        maximumScale: options.maximumScale,
+        heading: options.heading,
+        pitch: options.pitch,
+        roll: options.roll
+      },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode
+    });
+  }
+
   async edit(id: string, options: DrawEditOptions = {}): Promise<Tool<DrawEditStartOptions>> {
     if (!this.results.has(id)) {
       throw new Error(`Draw result "${id}" does not exist.`);
@@ -99,6 +195,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   addResult(result: DrawResult): DrawResult {
+    const existing = this.results.get(result.id);
+    if (existing === result) {
+      return result;
+    }
+    if (existing) {
+      this.remove(result.id);
+    }
     this.results.set(result.id, result);
     this.emit("add", result);
     return result;
@@ -117,6 +220,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       id: result.id,
       type: result.type,
       positions: serializePositions(result.positions),
+      data: cloneOverlayData(result.data),
       createdAt: result.createdAt.toISOString(),
       updatedAt: result.updatedAt?.toISOString(),
       style: serializeSymbolStyle(result.style),
@@ -129,11 +233,12 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     snapshots: DrawResultSnapshot[],
     options: DrawResultLoadOptions = {}
   ): Promise<DrawResult[]> {
+    const prepared = this.prepareSnapshots(snapshots);
     if (options.clear) {
       this.clear();
     }
 
-    return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
+    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
   setStyle(id: string, style: ResultSymbolStyle): DrawResult {
@@ -154,15 +259,18 @@ export class DrawManager extends Evented<DrawManagerEvents> {
         result.style
       );
     } else {
-      applySymbolStyleToEntities([result.entity], result.style);
-      applyHeightOptionsToEntity(result.entity, result.height);
+      if (result.type === "circle" || result.type === "rectangle") {
+        rerenderDrawEntity(this.map, result);
+      } else {
+        applySymbolStyleToEntities([result.entity], result.style);
+      }
     }
     return result;
   }
 
   update(
     id: string,
-    positions: Cartesian3[],
+    positionsOrOptions: Cartesian3[] | DrawResultUpdateOptions,
     reason: DrawEditReason = "programmatic"
   ): DrawResult {
     const result = this.results.get(id);
@@ -171,7 +279,14 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     }
 
     const previousPositions = clonePositions(result.positions);
-    updateDrawResultGeometry(result, positions);
+    const update = this.resolveDrawUpdate(result, positionsOrOptions);
+    result.positions = update.positions;
+    result.data = update.data;
+    result.height = update.height;
+    result.style = update.style;
+    result.renderMode = update.renderMode;
+    result.updatedAt = new Date();
+
     if (result.renderMode === "primitive") {
       removeResultPrimitiveRuntimes(this.map, result.primitives);
       result.primitives = renderDrawPrimitives(
@@ -181,6 +296,8 @@ export class DrawManager extends Evented<DrawManagerEvents> {
         result.positions,
         result.style ?? this.map.styles.resolveDrawStyle(result.type)
       );
+    } else {
+      rerenderDrawEntity(this.map, result);
     }
     const event = {
       result,
@@ -233,8 +350,103 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     this.off();
   }
 
-  private restoreSnapshot(snapshot: DrawResultSnapshot): DrawResult {
-    const positions = deserializePositions(snapshot.positions);
+  private addProgrammaticResult(config: DrawProgrammaticConfig): DrawResult {
+    const id = config.id ?? createDrawResultId(config.type);
+    const positions = clonePositions(config.positions);
+    const data = cloneOverlayData(config.data);
+    const style = this.map.styles.resolveDrawStyle(config.type, config.style);
+    const height = normalizeOverlayHeight(config.height);
+    const renderMode = resolveDrawRenderMode(config.type, config.renderMode);
+    validateOverlayShape(id, config.type, positions, data);
+
+    const entity =
+      renderMode === "primitive"
+        ? new Entity({ id })
+        : renderDrawEntity(this.map, config.type, id, positions, style, height, data);
+    const primitives =
+      renderMode === "primitive"
+        ? renderDrawPrimitives(this.map, config.type, id, positions, style)
+        : undefined;
+
+    return this.addResult({
+      id,
+      type: config.type,
+      entity,
+      positions,
+      data,
+      createdAt: new Date(),
+      style,
+      height,
+      renderMode,
+      primitives
+    });
+  }
+
+  private resolveDrawUpdate(
+    result: DrawResult,
+    positionsOrOptions: Cartesian3[] | DrawResultUpdateOptions
+  ): Required<Pick<DrawResult, "positions" | "renderMode">> &
+    Pick<DrawResult, "data" | "height" | "style"> {
+    const options = Array.isArray(positionsOrOptions)
+      ? { positions: positionsOrOptions }
+      : positionsOrOptions;
+    const positions = resolveUpdatedPositions(result.type, result.positions, options);
+    const data = mergeDrawData(result.data, options);
+    const height = options.height
+      ? normalizeOverlayHeight(options.height)
+      : result.height;
+    const style = options.style
+      ? this.map.styles.resolveDrawStyle(result.type, options.style)
+      : result.style ?? this.map.styles.resolveDrawStyle(result.type);
+    const renderMode = resolveDrawRenderMode(
+      result.type,
+      options.renderMode ?? result.renderMode
+    );
+
+    validateOverlayShape(result.id, result.type, positions, data);
+    return {
+      positions,
+      data,
+      height,
+      style,
+      renderMode
+    };
+  }
+
+  private prepareSnapshots(snapshots: DrawResultSnapshot[]): PreparedDrawSnapshot[] {
+    const ids = new Set<string>();
+    return snapshots.map((snapshot) => {
+      if (ids.has(snapshot.id)) {
+        throw new Error(`Draw result snapshot id "${snapshot.id}" is duplicated.`);
+      }
+      ids.add(snapshot.id);
+
+      const positions = deserializePositions(snapshot.positions);
+      const data = cloneOverlayData(snapshot.data);
+      if (positions.length < minPositionCount(snapshot.type)) {
+        throw new Error(
+          `Draw result "${snapshot.id}" requires at least ${minPositionCount(snapshot.type)} positions.`
+        );
+      }
+      validateOverlayShape(snapshot.id, snapshot.type, positions, data);
+
+      return {
+        snapshot,
+        positions,
+        data,
+        createdAt: parseSnapshotDate(snapshot.createdAt, "Draw result createdAt"),
+        updatedAt: snapshot.updatedAt
+          ? parseSnapshotDate(snapshot.updatedAt, "Draw result updatedAt")
+          : undefined,
+        style: this.map.styles.resolveDrawStyle(snapshot.type, snapshot.style),
+        height: serializeHeightOptions(snapshot.height),
+        renderMode: resolveDrawRenderMode(snapshot.type, snapshot.renderMode)
+      };
+    });
+  }
+
+  private restoreSnapshot(prepared: PreparedDrawSnapshot): DrawResult {
+    const { snapshot, positions, data, style, height, renderMode } = prepared;
     if (positions.length < minPositionCount(snapshot.type)) {
       throw new Error(
         `Draw result "${snapshot.id}" requires at least ${minPositionCount(snapshot.type)} positions.`
@@ -244,13 +456,10 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       this.remove(snapshot.id);
     }
 
-    const style = this.map.styles.resolveDrawStyle(snapshot.type, snapshot.style);
-    const height = serializeHeightOptions(snapshot.height);
-    const renderMode = resolveDrawRenderMode(snapshot.type, snapshot.renderMode);
     const entity =
       renderMode === "primitive"
         ? new Entity({ id: snapshot.id })
-        : renderDrawEntity(this.map, snapshot.type, snapshot.id, positions, style, height);
+        : renderDrawEntity(this.map, snapshot.type, snapshot.id, positions, style, height, data);
     const primitives =
       renderMode === "primitive"
         ? renderDrawPrimitives(this.map, snapshot.type, snapshot.id, positions, style)
@@ -260,10 +469,9 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       type: snapshot.type,
       entity,
       positions,
-      createdAt: parseSnapshotDate(snapshot.createdAt, "Draw result createdAt"),
-      updatedAt: snapshot.updatedAt
-        ? parseSnapshotDate(snapshot.updatedAt, "Draw result updatedAt")
-        : undefined,
+      data,
+      createdAt: prepared.createdAt,
+      updatedAt: prepared.updatedAt,
       style,
       height,
       renderMode,
@@ -280,36 +488,17 @@ function renderDrawEntity(
   id: string,
   positions: Cartesian3[],
   style: ResultSymbolStyle,
-  height?: DrawResult["height"]
+  height?: DrawResult["height"],
+  data?: OverlayData
 ): Entity {
-  if (type === "point") {
-    const entity = map.viewer.entities.add({
-      id,
-      position: new ConstantPositionProperty(positions[0]),
-      point: createPointGraphics(style.point)
-    });
-    applyHeightOptionsToEntity(entity, height);
-    return entity;
-  }
-
-  if (type === "polyline") {
-    const entity = map.viewer.entities.add({
-      id,
-      polyline: createLineGraphics(
-        new ConstantProperty(positions),
-        lineStyleWithHeight(style.line, height)
-      )
-    });
-    applyHeightOptionsToEntity(entity, height);
-    return entity;
-  }
-
-  const entity = map.viewer.entities.add({
+  return renderOverlayEntity(map, {
     id,
-    polygon: createPolygonGraphics(new ConstantProperty(positions), style.polygon)
+    type,
+    positions,
+    data,
+    style,
+    height
   });
-  applyHeightOptionsToEntity(entity, height);
-  return entity;
 }
 
 export function renderDrawPrimitives(
@@ -344,8 +533,93 @@ function resolveDrawRenderMode(
   type: DrawResult["type"],
   renderMode: DrawResultSnapshot["renderMode"]
 ) {
-  if (type === "point") {
+  if (type !== "polyline" && type !== "polygon") {
     return "entity";
   }
   return resolveResultRenderMode(renderMode);
+}
+
+function rerenderDrawEntity(map: KairosMap, result: DrawResult): void {
+  map.viewer.entities.remove(result.entity);
+  result.entity = renderDrawEntity(
+    map,
+    result.type,
+    result.id,
+    result.positions,
+    result.style ?? map.styles.resolveDrawStyle(result.type),
+    result.height,
+    result.data
+  );
+}
+
+function resolveUpdatedPositions(
+  type: DrawResult["type"],
+  current: Cartesian3[],
+  options: DrawResultUpdateOptions
+): Cartesian3[] {
+  if (options.positions) {
+    return clonePositions(options.positions);
+  }
+
+  const singlePosition = options.position ?? options.center;
+  if (
+    singlePosition &&
+    (type === "point" ||
+      type === "circle" ||
+      type === "billboard" ||
+      type === "label" ||
+      type === "model")
+  ) {
+    return [Cartesian3.clone(singlePosition)];
+  }
+
+  return clonePositions(current);
+}
+
+function mergeDrawData(
+  current: DrawResult["data"],
+  options: DrawResultUpdateOptions
+): DrawResult["data"] {
+  const data = {
+    ...current,
+    ...options.data
+  };
+
+  if (options.radius !== undefined) {
+    data.radius = options.radius;
+  }
+  if (options.text !== undefined) {
+    data.text = options.text;
+  }
+  if (options.image !== undefined) {
+    data.image = options.image;
+  }
+  if (options.uri !== undefined) {
+    data.uri = options.uri;
+  }
+  if (options.scale !== undefined) {
+    data.scale = options.scale;
+  }
+  if (options.minimumPixelSize !== undefined) {
+    data.minimumPixelSize = options.minimumPixelSize;
+  }
+  if (options.maximumScale !== undefined) {
+    data.maximumScale = options.maximumScale;
+  }
+  if (options.heading !== undefined) {
+    data.heading = options.heading;
+  }
+  if (options.pitch !== undefined) {
+    data.pitch = options.pitch;
+  }
+  if (options.roll !== undefined) {
+    data.roll = options.roll;
+  }
+
+  return Object.keys(data).length ? data : undefined;
+}
+
+function createDrawResultId(type: DrawResult["type"]): string {
+  drawResultIdSeed += 1;
+  return `draw-${type}-${drawResultIdSeed}`;
 }

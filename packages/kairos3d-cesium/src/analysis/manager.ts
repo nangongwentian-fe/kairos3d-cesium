@@ -38,8 +38,11 @@ import {
 import { ClippingManager } from "./clipping";
 import { TerrainAnalysisManager } from "./terrain";
 import {
+  chooseNearestVisibilityBlock,
+  classifySceneVisibility,
   classifyVisibility,
-  interpolateVisibilitySamples
+  interpolateVisibilitySamples,
+  type VisibilityClassification
 } from "./visibility-utils";
 import {
   createProfileSamples,
@@ -123,6 +126,15 @@ export interface MeasureManagerEvents {
   clear: MeasureResult[];
 }
 
+interface PreparedMeasureSnapshot {
+  snapshot: MeasureResultSnapshot;
+  positions: Cartesian3[];
+  createdAt: Date;
+  style: ResultSymbolStyle;
+  height?: MeasureResult["height"];
+  renderMode: NonNullable<MeasureResult["renderMode"]>;
+}
+
 export class MeasureManager extends Evented<MeasureManagerEvents> {
   private readonly results = new Map<string, MeasureResult>();
 
@@ -143,6 +155,13 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   }
 
   addResult(result: MeasureResult): MeasureResult {
+    const existing = this.results.get(result.id);
+    if (existing === result) {
+      return result;
+    }
+    if (existing) {
+      this.remove(result.id);
+    }
     this.results.set(result.id, result);
     this.emit("add", result);
     return result;
@@ -176,11 +195,12 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
     snapshots: MeasureResultSnapshot[],
     options: AnalysisResultLoadOptions = {}
   ): Promise<MeasureResult[]> {
+    const prepared = this.prepareSnapshots(snapshots);
     if (options.clear) {
       this.clear();
     }
 
-    return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
+    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
   setStyle(id: string, style: ResultSymbolStyle): MeasureResult {
@@ -239,16 +259,34 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
     this.off();
   }
 
-  private restoreSnapshot(snapshot: MeasureResultSnapshot): MeasureResult {
-    const positions = deserializePositions(snapshot.positions);
-    validateMeasurePositions(snapshot.type, positions);
+  private prepareSnapshots(snapshots: MeasureResultSnapshot[]): PreparedMeasureSnapshot[] {
+    const ids = new Set<string>();
+    return snapshots.map((snapshot) => {
+      if (ids.has(snapshot.id)) {
+        throw new Error(`Measure result snapshot id "${snapshot.id}" is duplicated.`);
+      }
+      ids.add(snapshot.id);
+
+      const positions = deserializePositions(snapshot.positions);
+      validateMeasurePositions(snapshot.type, positions);
+
+      return {
+        snapshot,
+        positions,
+        createdAt: parseSnapshotDate(snapshot.createdAt, "Measure result createdAt"),
+        style: this.map.styles.resolveMeasureStyle(snapshot.type, snapshot.style),
+        height: serializeHeightOptions(snapshot.height),
+        renderMode: resolveMeasureRenderMode(snapshot.type, snapshot.renderMode)
+      };
+    });
+  }
+
+  private restoreSnapshot(prepared: PreparedMeasureSnapshot): MeasureResult {
+    const { snapshot, positions, style, height, renderMode } = prepared;
     if (this.results.has(snapshot.id)) {
       this.remove(snapshot.id);
     }
 
-    const style = this.map.styles.resolveMeasureStyle(snapshot.type, snapshot.style);
-    const height = serializeHeightOptions(snapshot.height);
-    const renderMode = resolveMeasureRenderMode(snapshot.type, snapshot.renderMode);
     const rendered = renderMeasureResult(
       this.map,
       snapshot,
@@ -266,7 +304,7 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
       label: snapshot.label,
       entities: rendered.entities,
       entityIds: rendered.entities.map((entity) => entity.id),
-      createdAt: parseSnapshotDate(snapshot.createdAt, "Measure result createdAt"),
+      createdAt: prepared.createdAt,
       style,
       height,
       mode: snapshot.mode,
@@ -280,6 +318,16 @@ export interface VisibilityManagerEvents {
   add: VisibilityResult;
   remove: VisibilityResult;
   clear: VisibilityResult[];
+}
+
+interface PreparedVisibilitySnapshot {
+  snapshot: VisibilityResultSnapshot;
+  start: Cartesian3;
+  end: Cartesian3;
+  blockedPosition?: Cartesian3;
+  createdAt: Date;
+  style: ResultSymbolStyle;
+  height?: VisibilityResult["height"];
 }
 
 export class VisibilityManager extends Evented<VisibilityManagerEvents> {
@@ -297,21 +345,43 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
     const [start, end] = options.height
       ? await this.map.height.resolvePositions([options.start, options.end], options.height)
       : [Cartesian3.clone(options.start), Cartesian3.clone(options.end)];
-    const samples = interpolateVisibilitySamples(
-      start,
-      end,
-      options.sampleCount
-    );
-    const ground = await sampleGroundCartographics(
-      this.map.viewer.terrainProvider,
-      samples.map((sample) => sample.cartographic)
-    );
-    const classification = classifyVisibility(samples, ground, options.heightTolerance);
+    const mode = options.occlusionMode ?? "terrain";
+    let classification: VisibilityClassification = { visible: true };
+
+    if (mode === "terrain" || mode === "terrain-and-scene") {
+      const samples = interpolateVisibilitySamples(start, end, options.sampleCount);
+      const ground = await sampleGroundCartographics(
+        this.map.viewer.terrainProvider,
+        samples.map((sample) => sample.cartographic)
+      );
+      classification = classifyVisibility(samples, ground, options.heightTolerance);
+    }
+
+    if (mode === "scene" || mode === "terrain-and-scene") {
+      const sceneClassification = classifySceneVisibility(
+        this.map.viewer.scene,
+        start,
+        end,
+        options.exclude
+      );
+      classification =
+        mode === "terrain-and-scene"
+          ? chooseNearestVisibilityBlock(start, classification, sceneClassification)
+          : sceneClassification;
+    }
+
     const result = this.createResult(options, classification, [start, end]);
     return this.addResult(result);
   }
 
   addResult(result: VisibilityResult): VisibilityResult {
+    const existing = this.results.get(result.id);
+    if (existing === result) {
+      return result;
+    }
+    if (existing) {
+      this.remove(result.id);
+    }
     this.results.set(result.id, result);
     this.emit("add", result);
     return result;
@@ -338,6 +408,7 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
       blockedPosition: result.blockedPosition
         ? serializePosition(result.blockedPosition)
         : undefined,
+      blockedBy: result.blockedBy,
       createdAt: result.createdAt.toISOString(),
       style: serializeSymbolStyle(result.style),
       height: serializeHeightOptions(result.height)
@@ -348,11 +419,12 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
     snapshots: VisibilityResultSnapshot[],
     options: AnalysisResultLoadOptions = {}
   ): Promise<VisibilityResult[]> {
+    const prepared = this.prepareSnapshots(snapshots);
     if (options.clear) {
       this.clear();
     }
 
-    return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
+    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
   setStyle(id: string, style: ResultSymbolStyle): VisibilityResult {
@@ -407,18 +479,35 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
     this.off();
   }
 
-  private restoreSnapshot(snapshot: VisibilityResultSnapshot): VisibilityResult {
+  private prepareSnapshots(snapshots: VisibilityResultSnapshot[]): PreparedVisibilitySnapshot[] {
+    const ids = new Set<string>();
+    return snapshots.map((snapshot) => {
+      if (ids.has(snapshot.id)) {
+        throw new Error(`Visibility result snapshot id "${snapshot.id}" is duplicated.`);
+      }
+      ids.add(snapshot.id);
+      assertFiniteSnapshotNumber(snapshot.distance, "Visibility result distance");
+
+      return {
+        snapshot,
+        start: deserializePosition(snapshot.positions[0]),
+        end: deserializePosition(snapshot.positions[1]),
+        blockedPosition: snapshot.blockedPosition
+          ? deserializePosition(snapshot.blockedPosition)
+          : undefined,
+        createdAt: parseSnapshotDate(snapshot.createdAt, "Visibility result createdAt"),
+        style: this.map.styles.resolveVisibilityStyle(snapshot.style),
+        height: serializeHeightOptions(snapshot.height)
+      };
+    });
+  }
+
+  private restoreSnapshot(prepared: PreparedVisibilitySnapshot): VisibilityResult {
+    const { snapshot, start, end, blockedPosition, style, height } = prepared;
     if (this.results.has(snapshot.id)) {
       this.remove(snapshot.id);
     }
 
-    const start = deserializePosition(snapshot.positions[0]);
-    const end = deserializePosition(snapshot.positions[1]);
-    const blockedPosition = snapshot.blockedPosition
-      ? deserializePosition(snapshot.blockedPosition)
-      : undefined;
-    const style = this.map.styles.resolveVisibilityStyle(snapshot.style);
-    const height = serializeHeightOptions(snapshot.height);
     const entities = renderVisibilityEntities(this.map, start, end, blockedPosition, style, height);
 
     return this.addResult({
@@ -428,8 +517,9 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
       visible: snapshot.visible,
       distance: snapshot.distance,
       blockedPosition,
+      blockedBy: snapshot.blockedBy,
       entities,
-      createdAt: parseSnapshotDate(snapshot.createdAt, "Visibility result createdAt"),
+      createdAt: prepared.createdAt,
       style,
       height
     });
@@ -437,7 +527,7 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
 
   private createResult(
     options: VisibilityComputeOptions,
-    classification: { visible: boolean; blockedPosition?: Cartesian3 },
+    classification: VisibilityClassification,
     positions: [Cartesian3, Cartesian3]
   ): VisibilityResult {
     const id = createAnalysisId("visibility");
@@ -463,6 +553,8 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
       visible: classification.visible,
       distance: Cartesian3.distance(start, end),
       blockedPosition,
+      blockedBy: classification.blockedBy,
+      blockedObject: classification.blockedObject,
       entities,
       createdAt: new Date(),
       style,
@@ -475,6 +567,15 @@ export interface ProfileManagerEvents {
   add: ProfileResult;
   remove: ProfileResult;
   clear: ProfileResult[];
+}
+
+interface PreparedProfileSnapshot {
+  snapshot: ProfileResultSnapshot;
+  positions: Cartesian3[];
+  samples: ReturnType<typeof deserializeProfileSample>[];
+  createdAt: Date;
+  style: ResultSymbolStyle;
+  height?: ProfileResult["height"];
 }
 
 export class ProfileManager extends Evented<ProfileManagerEvents> {
@@ -519,6 +620,13 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
   }
 
   addResult(result: ProfileResult): ProfileResult {
+    const existing = this.results.get(result.id);
+    if (existing === result) {
+      return result;
+    }
+    if (existing) {
+      this.remove(result.id);
+    }
     this.results.set(result.id, result);
     this.emit("add", result);
     return result;
@@ -555,11 +663,12 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
     snapshots: ProfileResultSnapshot[],
     options: AnalysisResultLoadOptions = {}
   ): Promise<ProfileResult[]> {
+    const prepared = this.prepareSnapshots(snapshots);
     if (options.clear) {
       this.clear();
     }
 
-    return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
+    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
   setStyle(id: string, style: ResultSymbolStyle): ProfileResult {
@@ -607,15 +716,34 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
     this.off();
   }
 
-  private restoreSnapshot(snapshot: ProfileResultSnapshot): ProfileResult {
+  private prepareSnapshots(snapshots: ProfileResultSnapshot[]): PreparedProfileSnapshot[] {
+    const ids = new Set<string>();
+    return snapshots.map((snapshot) => {
+      if (ids.has(snapshot.id)) {
+        throw new Error(`Profile result snapshot id "${snapshot.id}" is duplicated.`);
+      }
+      ids.add(snapshot.id);
+      assertFiniteSnapshotNumber(snapshot.totalDistance, "Profile result totalDistance");
+      assertFiniteSnapshotNumber(snapshot.minHeight, "Profile result minHeight");
+      assertFiniteSnapshotNumber(snapshot.maxHeight, "Profile result maxHeight");
+
+      return {
+        snapshot,
+        positions: deserializePositions(snapshot.positions),
+        samples: snapshot.samples.map(deserializeProfileSample),
+        createdAt: parseSnapshotDate(snapshot.createdAt, "Profile result createdAt"),
+        style: this.map.styles.resolveProfileStyle(snapshot.style),
+        height: serializeHeightOptions(snapshot.height)
+      };
+    });
+  }
+
+  private restoreSnapshot(prepared: PreparedProfileSnapshot): ProfileResult {
+    const { snapshot, positions, samples, style, height } = prepared;
     if (this.results.has(snapshot.id)) {
       this.remove(snapshot.id);
     }
 
-    const positions = deserializePositions(snapshot.positions);
-    const samples = snapshot.samples.map(deserializeProfileSample);
-    const style = this.map.styles.resolveProfileStyle(snapshot.style);
-    const height = serializeHeightOptions(snapshot.height);
     const entities = renderProfileEntities(this.map, samples, style, height);
 
     return this.addResult({
@@ -627,7 +755,7 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
       minHeight: snapshot.minHeight,
       maxHeight: snapshot.maxHeight,
       entities,
-      createdAt: parseSnapshotDate(snapshot.createdAt, "Profile result createdAt"),
+      createdAt: prepared.createdAt,
       style,
       height
     });
@@ -758,11 +886,20 @@ function validateMeasurePositions(type: MeasureResult["type"], positions: Cartes
 }
 
 function deserializeProfileSample(sample: ProfileSampleSnapshot) {
+  assertFiniteSnapshotNumber(sample.distance, "Profile sample distance");
+  assertFiniteSnapshotNumber(sample.height, "Profile sample height");
+
   return {
     position: deserializePosition(sample.position),
     distance: sample.distance,
     height: sample.height
   };
+}
+
+function assertFiniteSnapshotNumber(value: number, label: string): void {
+  if (!Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number.`);
+  }
 }
 
 function renderProfileEntities(

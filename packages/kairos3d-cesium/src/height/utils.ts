@@ -108,6 +108,15 @@ export function applyHeightOptionsToEntity(entity: Entity, height?: HeightOption
   if (entity.point) {
     entity.point.heightReference = new ConstantProperty(reference);
   }
+  if (entity.billboard) {
+    entity.billboard.heightReference = new ConstantProperty(reference);
+  }
+  if (entity.label) {
+    entity.label.heightReference = new ConstantProperty(reference);
+  }
+  if (entity.model) {
+    entity.model.heightReference = new ConstantProperty(reference);
+  }
   if (entity.polyline) {
     entity.polyline.clampToGround = new ConstantProperty(resolved.mode === "clampToGround");
   }
@@ -117,6 +126,22 @@ export function applyHeightOptionsToEntity(entity: Entity, height?: HeightOption
       entity.polygon.height = new ConstantProperty(0);
     } else if (resolved.mode === "relativeToGround") {
       entity.polygon.height = new ConstantProperty(resolved.offset);
+    }
+  }
+  if (entity.ellipse) {
+    entity.ellipse.heightReference = new ConstantProperty(reference);
+    if (resolved.mode === "clampToGround") {
+      entity.ellipse.height = new ConstantProperty(0);
+    } else if (resolved.mode === "relativeToGround") {
+      entity.ellipse.height = new ConstantProperty(resolved.offset);
+    }
+  }
+  if (entity.rectangle) {
+    entity.rectangle.heightReference = new ConstantProperty(reference);
+    if (resolved.mode === "clampToGround") {
+      entity.rectangle.height = new ConstantProperty(0);
+    } else if (resolved.mode === "relativeToGround") {
+      entity.rectangle.height = new ConstantProperty(resolved.offset);
     }
   }
 }

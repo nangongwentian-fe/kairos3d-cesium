@@ -32,6 +32,11 @@ import {
   resolveMeasureRenderMode
 } from "./manager";
 import {
+  calculateTerrainArea,
+  createTerrainSampleGrid,
+  resolveTerrainAreaMode
+} from "./terrain-utils";
+import {
   formatArea,
   formatDistance,
   measureArea,
@@ -307,8 +312,8 @@ export class AreaMeasureTool extends BaseMeasureTool {
       this.ensurePolygon();
     }, ScreenSpaceEventType.MOUSE_MOVE);
 
-    this.handler?.setInputAction(() => this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
-    this.handler?.setInputAction(() => this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
   }
 
   private ensurePolygon(): void {
@@ -325,19 +330,15 @@ export class AreaMeasureTool extends BaseMeasureTool {
     this.entities.push(this.polygon);
   }
 
-  private finish(): void {
+  private async finish(): Promise<void> {
     if (!this.polygon || this.positions.length < 3 || this.completed) {
       return;
     }
 
-    if (resolveAreaMeasureMode(this.options) === "surface") {
-      throw new Error("Surface area measurement is not implemented yet.");
-    }
-
-    const positions = clonePositions(this.positions);
-    const area = measureArea(positions);
-    const display = areaDisplay(area);
     this.completed = true;
+    const positions = await resolveAreaPositions(this.map, this.positions, this.options);
+    const area = await measureAreaByMode(this.map, positions, this.options);
+    const display = areaDisplay(area);
     this.freezePolygon(this.polygon, positions);
     const renderMode = resolveMeasureRenderMode("area", this.options.renderMode);
     const primitives = this.replacePolygonWithPrimitive(renderMode, positions);
@@ -374,6 +375,30 @@ export class AreaMeasureTool extends BaseMeasureTool {
       this.resolveStyle("area")
     );
   }
+}
+
+async function resolveAreaPositions(
+  map: KairosMap,
+  positions: Cartesian3[],
+  options: MeasureToolOptions
+): Promise<Cartesian3[]> {
+  return options.height ? map.height.resolvePositions(positions, options.height) : clonePositions(positions);
+}
+
+async function measureAreaByMode(
+  map: KairosMap,
+  positions: Cartesian3[],
+  options: MeasureToolOptions
+): Promise<number> {
+  if (resolveAreaMeasureMode(options) !== "surface") {
+    return measureArea(positions);
+  }
+
+  const grid = await createTerrainSampleGrid(map.viewer.terrainProvider, positions, {
+    sampleStep: options.sampleStep,
+    maxSamples: options.maxSamples
+  });
+  return calculateTerrainArea(grid, resolveTerrainAreaMode(options.precision));
 }
 
 export class HeightMeasureTool extends BaseMeasureTool {

@@ -52,17 +52,23 @@ export class PerformanceManager {
       (sum, result) => sum + result.primitiveCount,
       0
     );
+    const overlayEntityCount = countOverlayEntities(this.map);
     const layerRuntimeObjectCount = layers.reduce(
       (sum, layer) => sum + layer.runtimeObjectCount,
       0
     );
+    const entityCount = countViewerEntities(this.map);
     const statsWithoutWarnings = {
       createdAt: new Date(),
-      entityCount: countViewerEntities(this.map),
+      entityCount,
       resultCount: results.length,
       resultEntityCount,
       resultPrimitiveCount,
-      unmanagedEntityCount: Math.max(0, countViewerEntities(this.map) - resultEntityCount),
+      unmanagedEntityCount: Math.max(
+        0,
+        entityCount - resultEntityCount - overlayEntityCount
+      ),
+      overlayEntityCount,
       primitiveOverlayCount: this.map.primitives.list().length,
       layerCount: layers.length,
       layerRuntimeObjectCount,
@@ -109,6 +115,11 @@ export class PerformanceManager {
 function countViewerEntities(map: KairosMap): number {
   const collection = map.viewer.entities as unknown as { values?: Entity[] };
   return Array.isArray(collection.values) ? collection.values.length : 0;
+}
+
+function countOverlayEntities(map: KairosMap): number {
+  const overlays = map.overlays as unknown as { list?: () => unknown[] } | undefined;
+  return overlays?.list?.().length ?? 0;
 }
 
 function countResultEntities(result: unknown): number {

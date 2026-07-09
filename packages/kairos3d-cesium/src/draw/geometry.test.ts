@@ -14,6 +14,8 @@ describe("draw geometry helpers", () => {
     expect(canDeletePosition("polyline", 3)).toBe(true);
     expect(canDeletePosition("polygon", 3)).toBe(false);
     expect(canDeletePosition("polygon", 4)).toBe(true);
+    expect(canDeletePosition("rectangle", 2)).toBe(false);
+    expect(canDeletePosition("rectangle", 3)).toBe(true);
   });
 
   it("computes segment midpoints", () => {

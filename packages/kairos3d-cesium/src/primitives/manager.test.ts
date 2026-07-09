@@ -118,6 +118,9 @@ describe("PrimitiveOverlayManager", () => {
     expect(() =>
       manager.addPolyline({ id: "primitive-line", positions: createPositions() })
     ).toThrow('Primitive overlay "primitive-line" already exists.');
+    expect(() =>
+      manager.addPolyline({ positions: createPositions(), width: Number.NaN })
+    ).toThrow("Primitive polyline width must be a positive finite number.");
   });
 
   it("loads primitive snapshots with clear", () => {
@@ -141,5 +144,52 @@ describe("PrimitiveOverlayManager", () => {
     manager.load([snapshot], { clear: true });
 
     expect(manager.list().map((overlay) => overlay.id)).toEqual(["new"]);
+  });
+
+  it("validates primitive snapshots before mutating existing overlays", () => {
+    const { map } = createMapMock();
+    const manager = new PrimitiveOverlayManager(map);
+    manager.addPolyline({ id: "old", positions: createPositions() });
+    const invalidSnapshot: PrimitivePolylineSnapshot = {
+      id: "new",
+      type: "polyline",
+      positions: [
+        { longitude: 114, latitude: 22, height: 10 },
+        { longitude: 114.01, latitude: 22.01, height: 20 }
+      ],
+      color: { red: 0, green: 1, blue: 1, alpha: 1 },
+      width: 0,
+      show: true,
+      loop: false,
+      createdAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    expect(() => manager.load([invalidSnapshot], { clear: true })).toThrow(
+      "Primitive polyline width must be a positive finite number."
+    );
+    expect(manager.list().map((overlay) => overlay.id)).toEqual(["old"]);
+  });
+
+  it("rejects duplicate primitive snapshot ids before restoring", () => {
+    const { map } = createMapMock();
+    const manager = new PrimitiveOverlayManager(map);
+    const snapshot: PrimitivePolylineSnapshot = {
+      id: "line",
+      type: "polyline",
+      positions: [
+        { longitude: 114, latitude: 22, height: 10 },
+        { longitude: 114.01, latitude: 22.01, height: 20 }
+      ],
+      color: { red: 0, green: 1, blue: 1, alpha: 1 },
+      width: 2,
+      show: true,
+      loop: false,
+      createdAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    expect(() => manager.load([snapshot, snapshot])).toThrow(
+      'Primitive overlay snapshot id "line" is duplicated.'
+    );
+    expect(manager.list()).toEqual([]);
   });
 });

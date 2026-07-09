@@ -30,12 +30,21 @@ export type MeasureUnit = "m" | "km" | "m2" | "km2";
 export type AnalysisType = "visibility" | "profile" | "clipping" | "terrain";
 export type ClippingType = "plane" | "polygon";
 export type ClippingTargetType = "globe" | "layer" | "picked";
+export type TerrainAreaMode = "planar" | "triangulated";
+export type TerrainVolumeMode = "sample-cell" | "triangulated";
+export type VisibilityOcclusionMode = "terrain" | "scene" | "terrain-and-scene";
+export type VisibilityBlockedBy = "terrain" | "scene";
 export type TerrainAnalysisType =
   | "slope-aspect"
   | "contour"
   | "volume"
   | "flood"
   | "excavation";
+
+export interface TerrainPrecisionOptions {
+  areaMode?: TerrainAreaMode;
+  volumeMode?: TerrainVolumeMode;
+}
 
 export interface MeasureToolOptions {
   lineColor?: Color;
@@ -45,6 +54,9 @@ export interface MeasureToolOptions {
   height?: HeightOptions;
   mode?: DistanceMeasureMode | AreaMeasureMode;
   renderMode?: ResultRenderMode;
+  sampleStep?: number;
+  maxSamples?: number;
+  precision?: TerrainPrecisionOptions;
 }
 
 export interface VisibilityComputeOptions {
@@ -57,6 +69,8 @@ export interface VisibilityComputeOptions {
   pointColor?: Color;
   style?: ResultSymbolStyle;
   height?: HeightOptions;
+  occlusionMode?: VisibilityOcclusionMode;
+  exclude?: unknown[];
 }
 
 export type VisibilityPickOptions = Omit<VisibilityComputeOptions, "start" | "end">;
@@ -78,6 +92,7 @@ export interface TerrainAnalysisOptions {
   maxSamples?: number;
   style?: ResultSymbolStyle;
   height?: HeightOptions;
+  precision?: TerrainPrecisionOptions;
 }
 
 export interface SlopeAspectOptions extends TerrainAnalysisOptions {}
@@ -117,6 +132,16 @@ export interface ClippingPlaneOptions {
   style?: ResultSymbolStyle;
 }
 
+export interface ClippingPlaneUpdateOptions {
+  normal?: Cartesian3;
+  distance?: number;
+  unionClippingRegions?: boolean;
+  edgeColor?: Color;
+  edgeWidth?: number;
+  enabled?: boolean;
+  style?: ResultSymbolStyle;
+}
+
 export interface ClippingPolygonOptions {
   target: ClippingTarget;
   positions: Cartesian3[];
@@ -126,6 +151,13 @@ export interface ClippingPolygonOptions {
 }
 
 export type ClippingPolygonDrawOptions = Omit<ClippingPolygonOptions, "positions">;
+
+export interface ClippingPolygonUpdateOptions {
+  inverse?: boolean;
+  quality?: number;
+  enabled?: boolean;
+  style?: ResultSymbolStyle;
+}
 
 export interface MeasureResult {
   id: string;
@@ -165,6 +197,8 @@ export interface VisibilityResult {
   visible: boolean;
   distance: number;
   blockedPosition?: Cartesian3;
+  blockedBy?: VisibilityBlockedBy;
+  blockedObject?: unknown;
   entities: Entity[];
   createdAt: Date;
   style?: ResultSymbolStyle;
@@ -178,6 +212,7 @@ export interface VisibilityResultSnapshot {
   visible: boolean;
   distance: number;
   blockedPosition?: SerializablePosition;
+  blockedBy?: VisibilityBlockedBy;
   createdAt: string;
   style?: SerializableResultSymbolStyle;
   height?: HeightOptions;
@@ -309,6 +344,8 @@ export interface VolumeResult {
   fillVolume: number;
   netVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode: TerrainVolumeMode;
   minHeight: number;
   maxHeight: number;
   entities: Entity[];
@@ -326,6 +363,8 @@ export interface FloodResult {
   floodedArea: number;
   waterVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode: TerrainVolumeMode;
   minHeight: number;
   maxHeight: number;
   entities: Entity[];
@@ -343,6 +382,8 @@ export interface ExcavationResult {
   depth?: number;
   cutVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode: TerrainVolumeMode;
   minHeight: number;
   maxHeight: number;
   entities: Entity[];
@@ -388,6 +429,8 @@ export interface VolumeResultSnapshot {
   fillVolume: number;
   netVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode?: TerrainVolumeMode;
   minHeight: number;
   maxHeight: number;
   createdAt: string;
@@ -404,6 +447,8 @@ export interface FloodResultSnapshot {
   floodedArea: number;
   waterVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode?: TerrainVolumeMode;
   minHeight: number;
   maxHeight: number;
   createdAt: string;
@@ -420,6 +465,8 @@ export interface ExcavationResultSnapshot {
   depth?: number;
   cutVolume: number;
   sampleArea: number;
+  surfaceArea: number;
+  calculationMode?: TerrainVolumeMode;
   minHeight: number;
   maxHeight: number;
   createdAt: string;

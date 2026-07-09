@@ -3,6 +3,7 @@ import {
   Cartesian3,
   Color,
   ConstantPositionProperty,
+  Cartographic,
   Entity,
   ScreenSpaceEventType
 } from "cesium";
@@ -21,7 +22,7 @@ import type {
   DrawResult
 } from "./types";
 
-type HandleKind = "vertex" | "midpoint";
+type HandleKind = "vertex" | "midpoint" | "circle-edge";
 
 interface EditHandle {
   entity: Entity;
@@ -42,8 +43,11 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
   private result?: DrawResult;
   private positions: Cartesian3[] = [];
   private originalPositions: Cartesian3[] = [];
+  private data?: DrawResult["data"];
+  private originalData?: DrawResult["data"];
   private handles: EditHandle[] = [];
   private selectedIndex?: number;
+  private selectedKind?: HandleKind;
   private dragging = false;
   private options: Required<Omit<DrawEditOptions, "handleStyle">> & {
     handleStyle: Required<DrawEditHandleStyle>;
@@ -69,7 +73,10 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
     this.result = result;
     this.positions = clonePositions(result.positions);
     this.originalPositions = clonePositions(result.positions);
+    this.data = cloneData(result.data);
+    this.originalData = cloneData(result.data);
     this.selectedIndex = undefined;
+    this.selectedKind = undefined;
     this.dragging = false;
     this.options = normalizeOptions(options);
     this.bindDeleteKey();
@@ -98,7 +105,10 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
 
   override cancel(): void {
     if (this.result) {
-      this.map.draw.update(this.result.id, this.originalPositions);
+      this.map.draw.update(this.result.id, {
+        positions: this.originalPositions,
+        data: this.originalData
+      });
     }
     super.cancel();
   }
@@ -117,10 +127,12 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
       const position = this.pickPosition(windowPosition) ?? handle.position;
       this.positions.splice(handle.insertIndex, 0, Cartesian3.clone(position));
       this.selectedIndex = handle.insertIndex;
+      this.selectedKind = "vertex";
       this.map.draw.update(this.result.id, this.positions, "insert");
       this.rebuildHandles(this.selectedIndex);
     } else {
       this.selectedIndex = handle.index;
+      this.selectedKind = handle.kind;
       this.rebuildHandles(this.selectedIndex);
     }
 
@@ -137,10 +149,23 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
       return;
     }
 
-    this.positions[this.selectedIndex] = Cartesian3.clone(position);
-    this.map.draw.update(this.result.id, this.positions, "drag");
+    if (this.selectedKind === "circle-edge") {
+      this.data = {
+        ...this.data,
+        radius: Cartesian3.distance(this.positions[0], position)
+      };
+      this.map.draw.update(this.result.id, { data: this.data }, "drag");
+    } else {
+      this.positions[this.selectedIndex] = Cartesian3.clone(position);
+      this.map.draw.update(this.result.id, {
+        positions: this.positions,
+        data: this.data
+      }, "drag");
+    }
+
     const handle = this.handles.find(
-      (candidate) => candidate.kind === "vertex" && candidate.index === this.selectedIndex
+      (candidate) =>
+        candidate.kind === this.selectedKind && candidate.index === this.selectedIndex
     );
     if (handle) {
       this.setHandlePosition(handle, position);
@@ -153,6 +178,7 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
     }
 
     this.dragging = false;
+    this.selectedKind = undefined;
     this.rebuildHandles(this.selectedIndex);
   }
 
@@ -172,7 +198,10 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
         ? undefined
         : Math.min(this.selectedIndex, this.positions.length - 1);
     this.selectedIndex = nextSelected;
-    this.map.draw.update(this.result.id, this.positions, "delete");
+    this.map.draw.update(this.result.id, {
+      positions: this.positions,
+      data: this.data
+    }, "delete");
     this.rebuildHandles(nextSelected);
   }
 
@@ -184,6 +213,21 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
 
     this.selectedIndex = selectedIndex;
 
+    if (this.result.type === "circle") {
+      this.handles.push(
+        this.createHandle("vertex", 0, this.positions[0], selectedIndex === 0)
+      );
+      this.handles.push(
+        this.createHandle(
+          "circle-edge",
+          0,
+          circleEdgePosition(this.positions[0], this.data?.radius ?? 1),
+          false
+        )
+      );
+      return;
+    }
+
     for (let index = 0; index < this.positions.length; index += 1) {
       this.handles.push(
         this.createHandle("vertex", index, this.positions[index], selectedIndex === index)
@@ -192,6 +236,7 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
 
     if (
       this.result.type === "point" ||
+      this.result.type === "rectangle" ||
       !this.options.allowInsert ||
       !this.options.showMidpoints
     ) {
@@ -222,7 +267,7 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
     insertIndex?: number
   ): EditHandle {
     const style = this.options.handleStyle;
-    const color = selected
+      const color = selected
       ? style.selectedColor
       : kind === "vertex"
         ? style.vertexColor
@@ -232,7 +277,7 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
       position,
       point: {
         color,
-        pixelSize: kind === "vertex" ? style.pixelSize : Math.max(6, style.pixelSize - 3),
+        pixelSize: kind === "midpoint" ? Math.max(6, style.pixelSize - 3) : style.pixelSize,
         outlineColor: Color.BLACK,
         outlineWidth: 1,
         disableDepthTestDistance: Number.POSITIVE_INFINITY
@@ -310,4 +355,24 @@ function normalizeOptions(
       ...options.handleStyle
     }
   };
+}
+
+function cloneData(data: DrawResult["data"]): DrawResult["data"] {
+  return data ? { ...data } : undefined;
+}
+
+function circleEdgePosition(center: Cartesian3, radius: number): Cartesian3 {
+  const cartographic = Cartographic.fromCartesian(center);
+  if (!cartographic || !Number.isFinite(radius) || radius <= 0) {
+    return Cartesian3.clone(center);
+  }
+
+  const earthRadius = 6378137;
+  const longitudeDelta =
+    radius / (earthRadius * Math.max(Math.abs(Math.cos(cartographic.latitude)), 0.01));
+  return Cartesian3.fromRadians(
+    cartographic.longitude + longitudeDelta,
+    cartographic.latitude,
+    cartographic.height
+  );
 }
