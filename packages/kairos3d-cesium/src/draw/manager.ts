@@ -45,6 +45,7 @@ import type {
   DrawCorridorOptions,
   DrawCylinderOptions,
   DrawEllipseOptions,
+  DrawGeoJsonExportOptions,
   DrawGeoJsonFeatureCollection,
   DrawLabelOptions,
   DrawModelOptions,
@@ -374,6 +375,49 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     return [...this.results.values()].filter((result) => matchesDrawQuery(result, options));
   }
 
+  getProperties(id: string): Record<string, unknown> | undefined {
+    return cloneRecord(this.getRequired(id).properties);
+  }
+
+  setProperties(
+    id: string,
+    properties: Record<string, unknown> | undefined
+  ): DrawResult {
+    const result = this.getRequired(id);
+    result.properties = cloneRecord(properties);
+    result.updatedAt = new Date();
+    this.emitProgrammaticChange(result);
+    return result;
+  }
+
+  mergeProperties(id: string, patch: Record<string, unknown>): DrawResult {
+    const result = this.getRequired(id);
+    return this.setProperties(id, {
+      ...(result.properties ?? {}),
+      ...patch
+    });
+  }
+
+  getMetadata(id: string): Record<string, unknown> | undefined {
+    return cloneRecord(this.getRequired(id).metadata);
+  }
+
+  setMetadata(id: string, metadata: Record<string, unknown> | undefined): DrawResult {
+    const result = this.getRequired(id);
+    result.metadata = cloneRecord(metadata);
+    result.updatedAt = new Date();
+    this.emitProgrammaticChange(result);
+    return result;
+  }
+
+  mergeMetadata(id: string, patch: Record<string, unknown>): DrawResult {
+    const result = this.getRequired(id);
+    return this.setMetadata(id, {
+      ...(result.metadata ?? {}),
+      ...patch
+    });
+  }
+
   toJSON(): DrawResultSnapshot[] {
     return this.list().map((result) => ({
       id: result.id,
@@ -417,8 +461,8 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     return this.load(snapshots, options);
   }
 
-  toGeoJSON(): DrawGeoJsonFeatureCollection {
-    return snapshotsToGeoJSON(this.toJSON());
+  toGeoJSON(options: DrawGeoJsonExportOptions = {}): DrawGeoJsonFeatureCollection {
+    return snapshotsToGeoJSON(this.toJSON(), options);
   }
 
   async loadGeoJSON(
@@ -454,6 +498,15 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     }
     applyDrawResultShow(result, result.show);
     return result;
+  }
+
+  setStyleMany(ids: string[], style: ResultSymbolStyle): DrawResult[] {
+    const results = ids.map((id) => this.getRequired(id));
+    return results.map((result) => this.setStyle(result.id, style));
+  }
+
+  setStyleWhere(options: DrawQueryOptions, style: ResultSymbolStyle): DrawResult[] {
+    return this.list(options).map((result) => this.setStyle(result.id, style));
   }
 
   update(
@@ -755,6 +808,15 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       throw new Error(`Draw result "${id}" does not exist.`);
     }
     return result;
+  }
+
+  private emitProgrammaticChange(result: DrawResult): void {
+    this.emit("edit-change", {
+      result,
+      previousPositions: clonePositions(result.positions),
+      positions: clonePositions(result.positions),
+      reason: "programmatic"
+    });
   }
 }
 

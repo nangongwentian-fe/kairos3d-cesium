@@ -160,6 +160,92 @@ describe("OverlayManager", () => {
     expect(manager.get("second")).toBe(second);
   });
 
+  it("manages overlay properties and metadata through cloned records", () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    const listener = vi.fn();
+    const overlay = manager.addPoint({
+      id: "first",
+      position: position(114, 22),
+      properties: { name: "first" },
+      metadata: { source: "unit" }
+    });
+    manager.on("update", listener);
+
+    const properties = manager.getProperties("first");
+    properties!.name = "mutated";
+    expect(manager.getProperties("first")).toEqual({ name: "first" });
+
+    manager.mergeProperties("first", { status: "ready" });
+    manager.setMetadata("first", { source: "api" });
+    const metadata = manager.getMetadata("first");
+    metadata!.source = "mutated";
+    manager.mergeMetadata("first", { reviewer: "kairos" });
+
+    expect(overlay.properties).toEqual({ name: "first", status: "ready" });
+    expect(manager.getMetadata("first")).toEqual({
+      source: "api",
+      reviewer: "kairos"
+    });
+    expect(overlay.updatedAt).toBeInstanceOf(Date);
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ data: overlay }));
+  });
+
+  it("applies overlay styles by ids and query filters", () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    manager.addCircle({
+      id: "overlay-a",
+      center: position(114, 22),
+      radius: 100,
+      group: "draft"
+    });
+    manager.addCircle({
+      id: "overlay-b",
+      center: position(114.01, 22.01),
+      radius: 120,
+      group: "draft",
+      locked: true
+    });
+    manager.addLabel({
+      id: "overlay-c",
+      position: position(114.02, 22.02),
+      text: "Done",
+      group: "done"
+    });
+
+    const styledById = manager.setStyleMany(["overlay-a", "overlay-c"], {
+      line: { color: "#35d07f", width: 4 },
+      label: { color: "#ffffff" }
+    });
+    const styledByQuery = manager.setStyleWhere({ group: "draft", locked: true }, {
+      line: { color: "#ff3b30", width: 6 }
+    });
+
+    expect(styledById.map((overlay) => overlay.id)).toEqual(["overlay-a", "overlay-c"]);
+    expect(styledByQuery.map((overlay) => overlay.id)).toEqual(["overlay-b"]);
+    expect(manager.get("overlay-a")?.style?.line?.width).toBe(4);
+    expect(manager.get("overlay-b")?.style?.line?.width).toBe(6);
+    expect(manager.get("overlay-c")?.style?.label?.color).toBeDefined();
+  });
+
+  it("validates all overlay ids before applying batch styles", () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    const overlay = manager.addCircle({
+      id: "overlay-a",
+      center: position(114, 22),
+      radius: 100
+    });
+
+    expect(() =>
+      manager.setStyleMany(["overlay-a", "missing"], {
+        line: { color: "#35d07f", width: 4 }
+      })
+    ).toThrow('Overlay "missing" does not exist.');
+    expect(overlay.style?.line?.width).not.toBe(4);
+  });
+
   it("updates overlay data by recreating managed entity", () => {
     const map = createMapMock();
     const manager = new OverlayManager(map);
@@ -257,6 +343,10 @@ describe("OverlayManager", () => {
 
     expect(geojson.type).toBe("FeatureCollection");
     expect(geojson.features[0].geometry.type).toBe("Polygon");
+    expect(geojson.features[0].properties.kairos).toMatchObject({
+      version: 1,
+      type: "polygon"
+    });
     expect(restoredFromGeoJson[0]).toMatchObject({
       id: "polygon",
       type: "polygon",
@@ -268,6 +358,33 @@ describe("OverlayManager", () => {
     const restoredFromKairos = await manager.loadKairosJSON(kairos);
     expect(restoredFromKairos[0].id).toBe("polygon");
     expect(restoredFromKairos[0].entity.polygon).toBeDefined();
+  });
+
+  it("exports plain overlay GeoJSON without full Kairos snapshots", async () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    manager.addModel({
+      id: "model",
+      position: position(114, 22),
+      uri: "/model.glb",
+      properties: { name: "business-model", kairos: "business-value" }
+    });
+
+    const geojson = manager.toGeoJSON({ includeSnapshot: false });
+    manager.clear();
+    const restored = await manager.loadGeoJSON(geojson);
+
+    expect(geojson.features[0].geometry.type).toBe("Point");
+    expect(geojson.features[0].properties).toEqual({
+      name: "business-model",
+      kairos: "business-value"
+    });
+    expect(restored[0]).toMatchObject({
+      id: "model",
+      type: "point",
+      properties: { name: "business-model" }
+    });
+    expect(restored[0].properties).not.toHaveProperty("kairos");
   });
 
   it("rejects invalid snapshots before clearing existing overlays", async () => {

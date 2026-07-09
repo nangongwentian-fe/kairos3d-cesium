@@ -203,6 +203,100 @@ describe("DrawManager", () => {
     expect(manager.get("draw-second")).toBe(second);
   });
 
+  it("manages draw result properties and metadata through cloned records", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const listener = vi.fn();
+    manager.circle({
+      id: "draw-first",
+      center: Cartesian3.fromDegrees(114, 22),
+      radius: 100,
+      properties: { name: "first" },
+      metadata: { source: "unit" }
+    });
+    manager.on("edit-change", listener);
+
+    const properties = manager.getProperties("draw-first");
+    properties!.name = "mutated";
+    expect(manager.getProperties("draw-first")).toEqual({ name: "first" });
+
+    const updated = manager.mergeProperties("draw-first", { status: "ready" });
+    manager.setMetadata("draw-first", { source: "api" });
+    const metadata = manager.getMetadata("draw-first");
+    metadata!.source = "mutated";
+    manager.mergeMetadata("draw-first", { reviewer: "kairos" });
+
+    expect(updated.properties).toEqual({ name: "first", status: "ready" });
+    expect(manager.getMetadata("draw-first")).toEqual({
+      source: "api",
+      reviewer: "kairos"
+    });
+    expect(updated.updatedAt).toBeInstanceOf(Date);
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reason: "programmatic",
+          result: updated
+        })
+      })
+    );
+  });
+
+  it("applies draw styles by ids and query filters", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    manager.circle({
+      id: "draw-a",
+      center: Cartesian3.fromDegrees(114, 22),
+      radius: 100,
+      group: "draft"
+    });
+    manager.circle({
+      id: "draw-b",
+      center: Cartesian3.fromDegrees(114.01, 22.01),
+      radius: 120,
+      group: "draft",
+      locked: true
+    });
+    manager.label({
+      id: "draw-c",
+      position: Cartesian3.fromDegrees(114.02, 22.02),
+      text: "Done",
+      group: "done"
+    });
+
+    const styledById = manager.setStyleMany(["draw-a", "draw-c"], {
+      line: { color: "#35d07f", width: 4 },
+      label: { color: "#ffffff" }
+    });
+    const styledByQuery = manager.setStyleWhere({ group: "draft", locked: true }, {
+      line: { color: "#ff3b30", width: 6 }
+    });
+
+    expect(styledById.map((result) => result.id)).toEqual(["draw-a", "draw-c"]);
+    expect(styledByQuery.map((result) => result.id)).toEqual(["draw-b"]);
+    expect(manager.get("draw-a")?.style?.line?.width).toBe(4);
+    expect(manager.get("draw-b")?.style?.line?.width).toBe(6);
+    expect(manager.get("draw-c")?.style?.label?.color).toBeDefined();
+  });
+
+  it("validates all draw ids before applying batch styles", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const result = manager.circle({
+      id: "draw-a",
+      center: Cartesian3.fromDegrees(114, 22),
+      radius: 100
+    });
+
+    expect(() =>
+      manager.setStyleMany(["draw-a", "missing"], {
+        line: { color: "#35d07f", width: 4 }
+      })
+    ).toThrow('Draw result "missing" does not exist.');
+    expect(result.style?.line?.width).not.toBe(4);
+  });
+
   it("keeps completed results when tools stop elsewhere", () => {
     const map = createMapMock();
     const manager = new DrawManager(map);
@@ -469,6 +563,10 @@ describe("DrawManager", () => {
 
     expect(geojson.type).toBe("FeatureCollection");
     expect(geojson.features[0].geometry.type).toBe("Polygon");
+    expect(geojson.features[0].properties.kairos).toMatchObject({
+      version: 1,
+      type: "polygon"
+    });
     expect(restoredFromGeoJson[0]).toMatchObject({
       id: polygon.id,
       type: "polygon",
@@ -480,6 +578,33 @@ describe("DrawManager", () => {
     const restoredFromKairos = await manager.loadKairosJSON(kairos);
     expect(restoredFromKairos[0].id).toBe("draw-polygon");
     expect(restoredFromKairos[0].entity.polygon).toBeDefined();
+  });
+
+  it("exports plain GeoJSON without full Kairos snapshots", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    manager.model({
+      id: "draw-model",
+      position: Cartesian3.fromDegrees(114, 22),
+      uri: "/model.glb",
+      properties: { name: "business-model", kairos: "business-value" }
+    });
+
+    const geojson = manager.toGeoJSON({ includeSnapshot: false });
+    manager.clear();
+    const restored = await manager.loadGeoJSON(geojson);
+
+    expect(geojson.features[0].geometry.type).toBe("Point");
+    expect(geojson.features[0].properties).toEqual({
+      name: "business-model",
+      kairos: "business-value"
+    });
+    expect(restored[0]).toMatchObject({
+      id: "draw-model",
+      type: "point",
+      properties: { name: "business-model" }
+    });
+    expect(restored[0].properties).not.toHaveProperty("kairos");
   });
 
   it("validates draw snapshots before clearing existing results", async () => {

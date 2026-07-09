@@ -257,4 +257,8 @@ export interface KairosGeoJsonFeatureCollection {
   features: KairosGeoJsonFeature[];
 }
 
+export interface GeoJsonExportOptions {
+  includeSnapshot?: boolean;
+}
+
 export type OverlayLoadOptions = RuntimeResultLoadOptions;

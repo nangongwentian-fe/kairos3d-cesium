@@ -10,6 +10,7 @@ import type {
   CorridorOverlayOptions,
   CylinderOverlayOptions,
   EllipseOverlayOptions,
+  GeoJsonExportOptions,
   KairosGeoJsonFeatureCollection,
   OverlayData,
   OverlayQueryOptions,
@@ -38,6 +39,7 @@ export type DrawEditReason = "drag" | "insert" | "delete" | "programmatic";
 export type DrawResultData = OverlayData;
 export type DrawQueryOptions = OverlayQueryOptions;
 export type DrawGeoJsonFeatureCollection = KairosGeoJsonFeatureCollection;
+export type DrawGeoJsonExportOptions = GeoJsonExportOptions;
 
 export interface DrawStyle {
   pointColor?: Color;

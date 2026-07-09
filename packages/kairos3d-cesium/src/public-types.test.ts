@@ -28,6 +28,8 @@ import type {
   DrawBoxToolOptions,
   DrawCorridorToolOptions,
   DrawCylinderToolOptions,
+  DrawGeoJsonExportOptions,
+  DrawGeoJsonFeatureCollection,
   DrawResultData,
   DrawResult,
   DrawResultSnapshot,
@@ -115,7 +117,8 @@ import type {
   SerializableBillboardSymbolStyle,
   SerializableColor,
   SerializableModelSymbolStyle,
-  SerializableResultSymbolStyle
+  SerializableResultSymbolStyle,
+  StyleManager
 } from "./style";
 import type {
   AreaMeasureMode,
@@ -157,6 +160,7 @@ import type {
   CorridorOverlayOptions,
   CylinderOverlayOptions,
   EllipseOverlayOptions,
+  GeoJsonExportOptions,
   KairosGeoJsonFeatureCollection,
   LabelOverlayOptions,
   ModelOverlayOptions,
@@ -249,6 +253,37 @@ describe("public SDK types", () => {
     expectTypeOf<DrawBoxToolOptions>().toMatchTypeOf<{
       dimensions?: [number, number, number];
     }>();
+    expectTypeOf<DrawGeoJsonExportOptions>().toEqualTypeOf<GeoJsonExportOptions>();
+    expectTypeOf<DrawGeoJsonFeatureCollection>().toEqualTypeOf<
+      KairosGeoJsonFeatureCollection
+    >();
+    expectTypeOf<KairosMap["draw"]["getProperties"]>().toMatchTypeOf<
+      (id: string) => Record<string, unknown> | undefined
+    >();
+    expectTypeOf<KairosMap["draw"]["setProperties"]>().toMatchTypeOf<
+      (id: string, properties: Record<string, unknown> | undefined) => DrawResult
+    >();
+    expectTypeOf<KairosMap["draw"]["mergeProperties"]>().toMatchTypeOf<
+      (id: string, patch: Record<string, unknown>) => DrawResult
+    >();
+    expectTypeOf<KairosMap["draw"]["getMetadata"]>().toMatchTypeOf<
+      (id: string) => Record<string, unknown> | undefined
+    >();
+    expectTypeOf<KairosMap["draw"]["setMetadata"]>().toMatchTypeOf<
+      (id: string, metadata: Record<string, unknown> | undefined) => DrawResult
+    >();
+    expectTypeOf<KairosMap["draw"]["mergeMetadata"]>().toMatchTypeOf<
+      (id: string, patch: Record<string, unknown>) => DrawResult
+    >();
+    expectTypeOf<KairosMap["draw"]["setStyleMany"]>().toMatchTypeOf<
+      (ids: string[], style: ResultSymbolStyle) => DrawResult[]
+    >();
+    expectTypeOf<KairosMap["draw"]["setStyleWhere"]>().toMatchTypeOf<
+      (options: import("./draw").DrawQueryOptions, style: ResultSymbolStyle) => DrawResult[]
+    >();
+    expectTypeOf<KairosMap["draw"]["toGeoJSON"]>().toMatchTypeOf<
+      (options?: DrawGeoJsonExportOptions) => DrawGeoJsonFeatureCollection
+    >();
     expectTypeOf<DrawCylinderToolOptions>().toMatchTypeOf<{
       length?: number;
       topRadius?: number;
@@ -717,6 +752,15 @@ describe("public SDK types", () => {
         excavation?: ResultSymbolStyle;
       };
     }>();
+    expectTypeOf<StyleManager["hasPreset"]>().toMatchTypeOf<
+      (id: string) => boolean
+    >();
+    expectTypeOf<StyleManager["listPresets"]>().toMatchTypeOf<
+      () => Array<{ id: string; style: ResultSymbolStyle }>
+    >();
+    expectTypeOf<StyleManager["removePreset"]>().toMatchTypeOf<
+      (id: string) => boolean
+    >();
   });
 
   it("exposes aggregate result manager types", () => {
@@ -1053,14 +1097,44 @@ describe("public SDK types", () => {
         properties: Record<string, unknown>;
       }>;
     }>();
+    expectTypeOf<GeoJsonExportOptions>().toEqualTypeOf<{
+      includeSnapshot?: boolean;
+    }>();
     expectTypeOf<KairosMap["overlays"]["add"]>().toMatchTypeOf<
       (config: OverlayConfig) => Overlay
     >();
     expectTypeOf<KairosMap["overlays"]["update"]>().toMatchTypeOf<
       (id: string, options: OverlayUpdateOptions) => Overlay
     >();
+    expectTypeOf<KairosMap["overlays"]["getProperties"]>().toMatchTypeOf<
+      (id: string) => Record<string, unknown> | undefined
+    >();
+    expectTypeOf<KairosMap["overlays"]["setProperties"]>().toMatchTypeOf<
+      (id: string, properties: Record<string, unknown> | undefined) => Overlay
+    >();
+    expectTypeOf<KairosMap["overlays"]["mergeProperties"]>().toMatchTypeOf<
+      (id: string, patch: Record<string, unknown>) => Overlay
+    >();
+    expectTypeOf<KairosMap["overlays"]["getMetadata"]>().toMatchTypeOf<
+      (id: string) => Record<string, unknown> | undefined
+    >();
+    expectTypeOf<KairosMap["overlays"]["setMetadata"]>().toMatchTypeOf<
+      (id: string, metadata: Record<string, unknown> | undefined) => Overlay
+    >();
+    expectTypeOf<KairosMap["overlays"]["mergeMetadata"]>().toMatchTypeOf<
+      (id: string, patch: Record<string, unknown>) => Overlay
+    >();
+    expectTypeOf<KairosMap["overlays"]["setStyleMany"]>().toMatchTypeOf<
+      (ids: string[], style: ResultSymbolStyle) => Overlay[]
+    >();
+    expectTypeOf<KairosMap["overlays"]["setStyleWhere"]>().toMatchTypeOf<
+      (options: OverlayQueryOptions, style: ResultSymbolStyle) => Overlay[]
+    >();
     expectTypeOf<KairosMap["overlays"]["toJSON"]>().toMatchTypeOf<
       () => OverlaySnapshot[]
+    >();
+    expectTypeOf<KairosMap["overlays"]["toGeoJSON"]>().toMatchTypeOf<
+      (options?: GeoJsonExportOptions) => KairosGeoJsonFeatureCollection
     >();
     expectTypeOf<import("./overlays").OverlayManager>().toMatchTypeOf<
       KairosMap["overlays"]

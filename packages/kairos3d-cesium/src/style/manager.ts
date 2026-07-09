@@ -43,8 +43,23 @@ export class StyleManager {
     this.presets.set(id, mergeSymbolStyles(style));
   }
 
+  hasPreset(id: string): boolean {
+    return this.presets.has(id);
+  }
+
   getPreset(id: string): ResultSymbolStyle | undefined {
     return cloneSymbolStyle(this.presets.get(id));
+  }
+
+  listPresets(): Array<{ id: string; style: ResultSymbolStyle }> {
+    return [...this.presets.entries()].map(([id, style]) => ({
+      id,
+      style: cloneSymbolStyle(style) ?? {}
+    }));
+  }
+
+  removePreset(id: string): boolean {
+    return this.presets.delete(id);
   }
 
   resolveDrawStyle(type: DrawType, override?: ResultSymbolStyle): ResultSymbolStyle {

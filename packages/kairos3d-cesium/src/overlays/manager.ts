@@ -24,6 +24,7 @@ import type {
   CorridorOverlayOptions,
   CylinderOverlayOptions,
   EllipseOverlayOptions,
+  GeoJsonExportOptions,
   KairosGeoJsonFeatureCollection,
   LabelOverlayOptions,
   ModelOverlayOptions,
@@ -332,6 +333,49 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     return [...this.overlays.values()].filter((overlay) => matchesOverlayQuery(overlay, options));
   }
 
+  getProperties(id: string): Record<string, unknown> | undefined {
+    return cloneRecord(this.getRequired(id).properties);
+  }
+
+  setProperties(
+    id: string,
+    properties: Record<string, unknown> | undefined
+  ): Overlay {
+    const overlay = this.getRequired(id);
+    overlay.properties = cloneRecord(properties);
+    overlay.updatedAt = new Date();
+    this.emit("update", overlay);
+    return overlay;
+  }
+
+  mergeProperties(id: string, patch: Record<string, unknown>): Overlay {
+    const overlay = this.getRequired(id);
+    return this.setProperties(id, {
+      ...(overlay.properties ?? {}),
+      ...patch
+    });
+  }
+
+  getMetadata(id: string): Record<string, unknown> | undefined {
+    return cloneMetadata(this.getRequired(id).metadata);
+  }
+
+  setMetadata(id: string, metadata: Record<string, unknown> | undefined): Overlay {
+    const overlay = this.getRequired(id);
+    overlay.metadata = cloneMetadata(metadata);
+    overlay.updatedAt = new Date();
+    this.emit("update", overlay);
+    return overlay;
+  }
+
+  mergeMetadata(id: string, patch: Record<string, unknown>): Overlay {
+    const overlay = this.getRequired(id);
+    return this.setMetadata(id, {
+      ...(overlay.metadata ?? {}),
+      ...patch
+    });
+  }
+
   findByEntity(entity: unknown): Overlay | undefined {
     return this.list().find((overlay) => overlay.entity === entity);
   }
@@ -366,8 +410,8 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     return this.load(snapshots, options);
   }
 
-  toGeoJSON(): KairosGeoJsonFeatureCollection {
-    return snapshotsToGeoJSON(this.toJSON());
+  toGeoJSON(options: GeoJsonExportOptions = {}): KairosGeoJsonFeatureCollection {
+    return snapshotsToGeoJSON(this.toJSON(), options);
   }
 
   async loadGeoJSON(
@@ -389,6 +433,15 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     const restored = prepared.map((snapshot) => this.restoreSnapshot(snapshot));
     this.emit("load", restored);
     return restored;
+  }
+
+  setStyleMany(ids: string[], style: ResultSymbolStyle): Overlay[] {
+    const overlays = ids.map((id) => this.getRequired(id));
+    return overlays.map((overlay) => this.setStyle(overlay.id, style));
+  }
+
+  setStyleWhere(options: OverlayQueryOptions, style: ResultSymbolStyle): Overlay[] {
+    return this.list(options).map((overlay) => this.setStyle(overlay.id, style));
   }
 
   validateSnapshots(snapshots: OverlaySnapshot[]): void {

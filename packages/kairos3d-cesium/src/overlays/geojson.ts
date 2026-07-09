@@ -1,5 +1,6 @@
 import type { SerializablePosition } from "../core";
 import type {
+  GeoJsonExportOptions,
   KairosGeoJsonFeature,
   KairosGeoJsonFeatureCollection,
   OverlaySnapshot,
@@ -15,7 +16,8 @@ export interface SnapshotLike {
 }
 
 export function snapshotsToGeoJSON<TSnapshot extends SnapshotLike>(
-  snapshots: TSnapshot[]
+  snapshots: TSnapshot[],
+  options: GeoJsonExportOptions = {}
 ): KairosGeoJsonFeatureCollection {
   return {
     type: "FeatureCollection",
@@ -23,13 +25,7 @@ export function snapshotsToGeoJSON<TSnapshot extends SnapshotLike>(
       type: "Feature",
       id: snapshot.id,
       geometry: snapshotToGeometry(snapshot),
-      properties: {
-        ...(snapshot.properties ?? {}),
-        kairos: {
-          type: snapshot.type,
-          snapshot
-        }
-      }
+      properties: createFeatureProperties(snapshot, options)
     }))
   };
 }
@@ -177,6 +173,25 @@ function coordinatesToPosition(coordinates: number[]): SerializablePosition {
 function stripKairosProperty(properties: Record<string, unknown> = {}): Record<string, unknown> {
   const { kairos: _kairos, ...rest } = properties;
   return rest;
+}
+
+function createFeatureProperties<TSnapshot extends SnapshotLike>(
+  snapshot: TSnapshot,
+  options: GeoJsonExportOptions
+): Record<string, unknown> {
+  const properties = { ...(snapshot.properties ?? {}) };
+  if (options.includeSnapshot === false) {
+    return properties;
+  }
+
+  return {
+    ...properties,
+    kairos: {
+      version: 1,
+      type: snapshot.type,
+      snapshot
+    }
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
