@@ -31,7 +31,11 @@ pnpm dev:docs
 | `pnpm typecheck` | Runs TypeScript checks across all workspaces. |
 | `pnpm test` | Runs SDK unit tests. |
 | `pnpm lint` | Runs the current lightweight lint check, backed by TypeScript. |
+| `pnpm verify` | Runs typecheck, tests, lint, and build in order. |
+| `pnpm verify:runtime` | Starts a short-lived examples dev server and runs the browser runtime smoke check. |
 | `pnpm release:check` | Runs the full non-publishing release verification and SDK pack dry run. |
+
+`pnpm verify:runtime` requires a local Chromium-based browser. Set `CHROME_PATH` if Chrome is not in a standard location. Pass `-- --require-token` when the check must fail unless `apps/examples/.env` provides `VITE_CESIUM_ION_TOKEN`.
 
 ## Project Layout
 

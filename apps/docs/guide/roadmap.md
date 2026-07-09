@@ -6,7 +6,7 @@ This page records the current development order after the first complete SDK ver
 
 | Priority | Work | Why |
 | --- | --- | --- |
-| P0 | CI and verification guardrails | Keep the pushed first version reproducible before deeper changes. |
+| P0 | CI and verification guardrails | Complete first pass: GitHub Actions and local verification scripts keep the pushed first version reproducible before deeper changes. |
 | P0 | Primitive renderer integration | First stage complete for draw polyline/polygon and distance/area measurement; continue expanding only where it pays off. |
 | P0 | Runtime snapshot expansion | Complete: Primitive overlays participate in scene snapshots when requested. |
 | P1 | Analysis precision upgrades | Complete first pass: terrain triangulation and scene-aware visibility are available. |
@@ -29,7 +29,7 @@ The next phase should prioritize SDK capability foundations over package release
 
 | Order | Milestone | Scope |
 | --- | --- | --- |
-| 1 | CI verification | Add GitHub Actions for `pnpm install`, `pnpm typecheck`, `pnpm test`, `pnpm lint`, and `pnpm build`. |
+| 1 | CI verification | Complete first pass: GitHub Actions runs `pnpm install`, `pnpm typecheck`, `pnpm test`, `pnpm lint`, `pnpm build`, and `git diff --check`; local browser smoke is available through `pnpm verify:runtime`. |
 | 2 | Primitive renderer backend | First stage complete: draw polyline/polygon and distance/area measurement support opt-in `renderMode: "primitive"`. |
 | 3 | Primitive scene snapshots | Complete: `includePrimitives` / `restorePrimitives` keep primitive overlays data-only. |
 | 4 | Terrain precision pass | Complete first pass: sampled-cell remains default and triangulated area/volume modes are available. |
