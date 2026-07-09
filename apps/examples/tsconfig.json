@@ -20,6 +20,9 @@
       ],
       "@kairos3d/cesium/primitives": [
         "../../packages/kairos3d-cesium/src/primitives/index.ts"
+      ],
+      "@kairos3d/cesium/persistence": [
+        "../../packages/kairos3d-cesium/src/persistence/index.ts"
       ]
     }
   },

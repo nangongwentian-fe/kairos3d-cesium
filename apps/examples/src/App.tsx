@@ -9,6 +9,10 @@ import type {
 import type { CameraBookmark, CameraView, SceneSnapshot } from "@kairos3d/cesium/scene";
 import type { PickResult } from "@kairos3d/cesium/picking";
 import type { PrimitiveOverlay, ResultRenderMode } from "@kairos3d/cesium/primitives";
+import {
+  createMemorySnapshotStorage,
+  type SnapshotStorageAdapter
+} from "@kairos3d/cesium/persistence";
 import type { ResultRecord } from "@kairos3d/cesium/results";
 import type { ResultSymbolStyle, SDKStyleDefaults } from "@kairos3d/cesium/style";
 import type { Tool } from "@kairos3d/cesium/tools";
@@ -25,6 +29,12 @@ import type {
   VisibilityPickOptions,
   VisibilityResult
 } from "@kairos3d/cesium/analysis";
+import {
+  createPickPropertyRows,
+  createProfileChartData,
+  formatPickCoordinate,
+  summarizeSceneSnapshot
+} from "./ui-adapters";
 
 type ExampleMode =
   | "layers"
@@ -220,6 +230,7 @@ export function App() {
   const activeToolRef = useRef<ExampleTool | null>(null);
   const savedLayerConfigsRef = useRef<LayerConfig[]>([]);
   const savedSnapshotRef = useRef<SceneSnapshot | null>(null);
+  const snapshotStorageRef = useRef<SnapshotStorageAdapter>(createMemorySnapshotStorage());
   const [mode, setMode] = useState<ExampleMode>("layers");
   const [status, setStatus] = useState("初始化 Viewer");
   const [layerStates, setLayerStates] = useState<LayerState[]>([]);
@@ -539,23 +550,33 @@ export function App() {
       return;
     }
 
-    savedSnapshotRef.current = map.sceneState.toJSON({ includeResults: true });
+    savedSnapshotRef.current = map.sceneState.toJSON({
+      includeResults: true,
+      includePrimitives: true
+    });
     setHasSceneSnapshot(true);
-    setStatus(`已保存场景快照：${countSnapshotResults(savedSnapshotRef.current)} 个运行时结果`);
+    void snapshotStorageRef.current.save("latest", savedSnapshotRef.current, {
+      name: "Latest scene"
+    });
+    setStatus(`已保存场景快照：${summarizeSceneSnapshot(savedSnapshotRef.current)}`);
   }
 
   async function restoreSceneSnapshot() {
     const map = mapRef.current;
-    if (!map || !savedSnapshotRef.current) {
+    const snapshot = savedSnapshotRef.current ?? (await snapshotStorageRef.current.load("latest"));
+    if (!map || !snapshot) {
       setStatus("请先保存场景快照");
       return;
     }
 
-    await map.sceneState.load(savedSnapshotRef.current, {
+    savedSnapshotRef.current = snapshot;
+    await map.sceneState.load(snapshot, {
       clearLayers: true,
       flyToCamera: true,
       restoreResults: true,
-      clearResults: true
+      clearResults: true,
+      restorePrimitives: true,
+      clearPrimitives: true
     });
     refreshLayerStates(map);
     refreshBookmarks(map);
@@ -563,7 +584,7 @@ export function App() {
     refreshTerrainResults(map);
     refreshManagedResults(map);
     setLastDrawId(map.draw.list().at(-1)?.id ?? null);
-    setSavedCameraView(savedSnapshotRef.current.camera ?? null);
+    setSavedCameraView(snapshot.camera ?? null);
     setStatus("场景快照和运行时结果已恢复");
   }
 
@@ -1230,10 +1251,10 @@ export function App() {
                       <span>
                         {pickTypeLabel(pickResult.type)} · {pickResult.layerId ?? "unmanaged"}
                       </span>
-                      <span>{formatPickPosition(pickResult)}</span>
+                      <span>{formatPickCoordinate(pickResult)}</span>
                     </div>
                     <div className="property-list">
-                      {formatPickProperties(pickResult.properties).map(([key, value]) => (
+                      {createPickPropertyRows(pickResult).map(({ key, value }) => (
                         <div className="property-row" key={key}>
                           <span>{key}</span>
                           <strong>{value}</strong>
@@ -1543,7 +1564,7 @@ function formatResultStatus(result: SDKResult): string {
   }
 
   if (result.type === "profile") {
-    return `剖面完成：${result.samples.length} 个采样点，总长 ${formatMeters(result.totalDistance)}，高程 ${result.minHeight.toFixed(2)}-${result.maxHeight.toFixed(2)} m`;
+    return `剖面完成：${createProfileChartData(result).length} 个采样点，总长 ${formatMeters(result.totalDistance)}，高程 ${result.minHeight.toFixed(2)}-${result.maxHeight.toFixed(2)} m`;
   }
 
   if (isMeasureResult(result)) {
@@ -1555,22 +1576,6 @@ function formatResultStatus(result: SDKResult): string {
 
 function formatManagedResult(record: ResultRecord): string {
   return `${record.source} · ${record.type} · ${record.createdAt.toLocaleTimeString()}`;
-}
-
-function countSnapshotResults(snapshot: SceneSnapshot): number {
-  const results = snapshot.results;
-  if (!results) {
-    return 0;
-  }
-
-  return (
-    results.draw.length +
-    results.measure.length +
-    results.visibility.length +
-    results.profile.length +
-    results.clipping.length +
-    results.terrain.length
-  );
 }
 
 function countRuntimeResults(map: KairosMap): number {

@@ -54,6 +54,12 @@ export default defineConfig({
         )
       },
       {
+        find: "@kairos3d/cesium/persistence",
+        replacement: fileURLToPath(
+          new URL("../../packages/kairos3d-cesium/src/persistence/index.ts", import.meta.url)
+        )
+      },
+      {
         find: "@kairos3d/cesium",
         replacement: fileURLToPath(
           new URL("../../packages/kairos3d-cesium/src/index.ts", import.meta.url)
