@@ -1,6 +1,7 @@
 import type { Cartesian3, Entity } from "cesium";
 import type { RuntimeResultLoadOptions, SerializablePosition } from "../core";
 import type { HeightOptions } from "../height";
+import type { PlotAlgorithmOptions, PlotType } from "../plotting";
 import type {
   ResultSymbolStyle,
   SerializableResultSymbolStyle
@@ -19,7 +20,8 @@ export type OverlayType =
   | "wall"
   | "corridor"
   | "box"
-  | "cylinder";
+  | "cylinder"
+  | PlotType;
 
 export interface OverlayData {
   radius?: number;
@@ -41,6 +43,7 @@ export interface OverlayData {
   heading?: number;
   pitch?: number;
   roll?: number;
+  plot?: PlotAlgorithmOptions;
 }
 
 export interface ManagedOverlayState {
@@ -91,6 +94,7 @@ export interface OverlayUpdateOptions {
   heading?: number;
   pitch?: number;
   roll?: number;
+  plot?: PlotAlgorithmOptions;
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   show?: boolean;
@@ -197,6 +201,13 @@ export interface CylinderOverlayOptions
   topRadius: number;
   bottomRadius: number;
   data?: Omit<OverlayData, "length" | "topRadius" | "bottomRadius">;
+}
+
+export interface PlotOverlayOptions extends Omit<OverlayConfig, "data"> {
+  type: PlotType;
+  positions: Cartesian3[];
+  plot?: PlotAlgorithmOptions;
+  data?: Omit<OverlayData, "plot">;
 }
 
 export interface OverlayQueryOptions {

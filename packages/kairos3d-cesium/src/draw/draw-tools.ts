@@ -26,6 +26,11 @@ import {
   type ResultPrimitiveRuntime,
   type ResultRenderMode
 } from "../primitives";
+import {
+  computePlotGeometry,
+  minPlotPositionCount,
+  plotGeometryKind
+} from "../plotting";
 import { InteractiveTool } from "../tools/interactive-tool";
 import { registerTool } from "../tools/registry";
 import { renderDrawPrimitives } from "./manager";
@@ -33,6 +38,7 @@ import type {
   DrawBoxToolOptions,
   DrawCorridorToolOptions,
   DrawCylinderToolOptions,
+  DrawPlotToolOptions,
   DrawResult,
   DrawStyle,
   DrawToolOptions,
@@ -1205,6 +1211,161 @@ export class DrawCylinderTool extends InteractiveTool<DrawCylinderToolOptions> {
   }
 }
 
+export class DrawPlotTool extends InteractiveTool<DrawPlotToolOptions> {
+  private positions: Cartesian3[] = [];
+  private previewPosition?: Cartesian3;
+  private entity?: Entity;
+  private options?: DrawPlotToolOptions;
+  private resolvedStyle?: ResultSymbolStyle;
+  private completed = false;
+
+  constructor(map: KairosMap) {
+    super(map, "draw.plot");
+  }
+
+  override start(options: DrawPlotToolOptions): void {
+    super.start(options);
+    this.options = options;
+    this.resetDraft();
+
+    this.handler?.setInputAction((movement: { position: Cartesian2 }) => {
+      const position = this.pickPosition(movement.position);
+      if (!position) {
+        return;
+      }
+
+      this.positions.push(Cartesian3.clone(position));
+      this.previewPosition = undefined;
+      this.ensureEntity();
+      this.notifyPointAdd(clonePositions(this.positions));
+    }, ScreenSpaceEventType.LEFT_CLICK);
+
+    this.handler?.setInputAction((movement: { endPosition: Cartesian2 }) => {
+      if (this.positions.length === 0) {
+        return;
+      }
+
+      const position = this.pickPosition(movement.endPosition);
+      if (!position) {
+        return;
+      }
+
+      this.previewPosition = Cartesian3.clone(position);
+      this.ensureEntity();
+    }, ScreenSpaceEventType.MOUSE_MOVE);
+
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.RIGHT_CLICK);
+    this.handler?.setInputAction(() => void this.finish(), ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+  }
+
+  override stop(): void {
+    this.discardDraft();
+    super.stop();
+  }
+
+  private ensureEntity(): void {
+    const options = this.options;
+    if (!options || this.entity || this.renderControlPositions().length < minPlotPositionCount(options.type)) {
+      return;
+    }
+
+    const style = resolveDrawToolStyle(this.map, options.type, options.style);
+    this.resolvedStyle = style;
+    const id = createDrawId(`plot-${options.type}-preview`);
+    if (plotGeometryKind(options.type) === "polyline") {
+      this.entity = this.viewer.entities.add({
+        id,
+        polyline: createLineGraphics(
+          new CallbackProperty(() => this.renderGeometryPositions(), false),
+          lineStyleWithHeight(style.line, options.height)
+        )
+      });
+    } else {
+      this.entity = this.viewer.entities.add({
+        id,
+        polygon: createPolygonGraphics(
+          new CallbackProperty(() => this.renderGeometryPositions(), false),
+          style.polygon
+        )
+      });
+    }
+    applyHeightOptionsToEntity(this.entity, options.height);
+  }
+
+  private async finish(): Promise<void> {
+    const options = this.options;
+    if (
+      !options ||
+      this.positions.length < minPlotPositionCount(options.type) ||
+      this.completed
+    ) {
+      return;
+    }
+
+    this.completed = true;
+    const height = serializeHeightOptions(options.height);
+    const positions = await resolveDrawPositions(this.map, this.positions, height);
+    const style = this.resolvedStyle ?? resolveDrawToolStyle(this.map, options.type, options.style);
+    const result = this.map.draw.plot({
+      id: createDrawId(`plot-${options.type}`),
+      type: options.type,
+      positions,
+      plot: options.plot,
+      style,
+      height,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
+    });
+    this.emit("draw-created", result);
+    this.notifyComplete(result);
+
+    if (options.once ?? true) {
+      this.map.tools.stop();
+      return;
+    }
+
+    this.discardDraft();
+  }
+
+  private renderControlPositions(): Cartesian3[] {
+    return this.previewPosition
+      ? [...this.positions, this.previewPosition]
+      : this.positions;
+  }
+
+  private renderGeometryPositions(): Cartesian3[] {
+    const options = this.options;
+    if (!options) {
+      return [];
+    }
+
+    const positions = this.renderControlPositions();
+    if (positions.length < minPlotPositionCount(options.type)) {
+      return positions;
+    }
+    return computePlotGeometry(options.type, positions, options.plot).positions;
+  }
+
+  private discardDraft(): void {
+    if (this.entity) {
+      this.viewer.entities.remove(this.entity);
+    }
+    this.resetDraft();
+  }
+
+  private resetDraft(): void {
+    this.positions = [];
+    this.previewPosition = undefined;
+    this.entity = undefined;
+    this.resolvedStyle = undefined;
+    this.completed = false;
+  }
+}
+
 export function registerDefaultDrawTools(): void {
   registerTool("draw.point", (map) => new DrawPointTool(map));
   registerTool("draw.polyline", (map) => new DrawPolylineTool(map));
@@ -1216,6 +1377,7 @@ export function registerDefaultDrawTools(): void {
   registerTool("draw.corridor", (map) => new DrawCorridorTool(map));
   registerTool("draw.box", (map) => new DrawBoxTool(map));
   registerTool("draw.cylinder", (map) => new DrawCylinderTool(map));
+  registerTool("draw.plot", (map) => new DrawPlotTool(map));
 }
 
 function createDrawResult(

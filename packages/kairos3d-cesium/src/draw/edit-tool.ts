@@ -9,6 +9,10 @@ import {
   ScreenSpaceEventType
 } from "cesium";
 import type { KairosMap } from "../core";
+import {
+  isPlotType,
+  plotGeometryKind
+} from "../plotting";
 import { InteractiveTool } from "../tools/interactive-tool";
 import { registerTool } from "../tools/registry";
 import {
@@ -281,8 +285,10 @@ export class DrawEditTool extends InteractiveTool<DrawEditStartOptions> {
       return;
     }
 
-    const lastSegmentIndex =
-      this.result.type === "polygon" ? this.positions.length : this.positions.length - 1;
+    const closesShape =
+      this.result.type === "polygon" ||
+      (isPlotType(this.result.type) && plotGeometryKind(this.result.type) === "polygon");
+    const lastSegmentIndex = closesShape ? this.positions.length : this.positions.length - 1;
     for (let index = 0; index < lastSegmentIndex; index += 1) {
       const nextIndex = (index + 1) % this.positions.length;
       this.handles.push(

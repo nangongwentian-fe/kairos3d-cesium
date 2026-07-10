@@ -14,6 +14,7 @@ describe("default draw tools", () => {
     const corridor = toolRegistry.create("draw.corridor", {} as KairosMap);
     const box = toolRegistry.create("draw.box", {} as KairosMap);
     const cylinder = toolRegistry.create("draw.cylinder", {} as KairosMap);
+    const plot = toolRegistry.create("draw.plot", {} as KairosMap);
 
     expect(circle.id).toBe("draw.circle");
     expect(rectangle.id).toBe("draw.rectangle");
@@ -22,5 +23,6 @@ describe("default draw tools", () => {
     expect(corridor.id).toBe("draw.corridor");
     expect(box.id).toBe("draw.box");
     expect(cylinder.id).toBe("draw.cylinder");
+    expect(plot.id).toBe("draw.plot");
   });
 });

@@ -82,6 +82,11 @@
       "types": "./dist/persistence/index.d.ts",
       "import": "./dist/persistence/index.js",
       "require": "./dist/persistence/index.cjs"
+    },
+    "./plotting": {
+      "types": "./dist/plotting/index.d.ts",
+      "import": "./dist/plotting/index.js",
+      "require": "./dist/plotting/index.cjs"
     }
   },
   "files": ["dist", "README.md"],

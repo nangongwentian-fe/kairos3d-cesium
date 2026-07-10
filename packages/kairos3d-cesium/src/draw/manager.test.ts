@@ -133,6 +133,15 @@ describe("DrawManager", () => {
       topRadius: 8,
       bottomRadius: 12
     });
+    const plot = manager.plot({
+      id: "draw-plot",
+      type: "fine-arrow",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.02, 22.02)
+      ],
+      plot: { steps: 16 }
+    });
 
     expect(circle.entity.ellipse?.semiMajorAxis?.getValue()).toBe(80);
     expect(rectangle.entity.rectangle).toBeDefined();
@@ -147,6 +156,8 @@ describe("DrawManager", () => {
     expect(corridor.entity.corridor?.width?.getValue()).toBe(30);
     expect(box.entity.box?.dimensions?.getValue()).toEqual(new Cartesian3(10, 20, 30));
     expect(cylinder.entity.cylinder?.length?.getValue()).toBe(40);
+    expect(plot.entity.polygon).toBeDefined();
+    expect(plot.data?.plot).toEqual({ steps: 16 });
     expect(manager.list()).toEqual([
       circle,
       rectangle,
@@ -157,7 +168,8 @@ describe("DrawManager", () => {
       wall,
       corridor,
       box,
-      cylinder
+      cylinder,
+      plot
     ]);
   });
 
@@ -436,6 +448,39 @@ describe("DrawManager", () => {
     expect(cylinder.entity.cylinder?.length?.getValue()).toBe(80);
   });
 
+  it("updates plot draw control points and algorithm data", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const plot = manager.plot({
+      id: "draw-plot",
+      type: "attack-arrow",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.01),
+        Cartesian3.fromDegrees(114.03, 22.015)
+      ],
+      plot: { steps: 12 }
+    });
+    const firstEntity = plot.entity;
+
+    const updated = manager.update("draw-plot", {
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.02, 22.015),
+        Cartesian3.fromDegrees(114.04, 22.01)
+      ],
+      plot: { steps: 20 },
+      style: { polygon: { fillColor: "#35d07f" } }
+    });
+
+    expect(updated).toBe(plot);
+    expect(updated.entity).not.toBe(firstEntity);
+    expect(updated.positions[1]).toEqual(Cartesian3.fromDegrees(114.02, 22.015));
+    expect(updated.data?.plot).toEqual({ steps: 20 });
+    expect(updated.entity.polygon).toBeDefined();
+    expect(map.viewer.entities.remove).toHaveBeenCalledWith(firstEntity);
+  });
+
   it("starts and stops edit through the shared tool manager", async () => {
     const map = createMapMock();
     const manager = new DrawManager(map);
@@ -536,6 +581,43 @@ describe("DrawManager", () => {
     expect(restored[0].entity.orientation).toBeDefined();
   });
 
+  it("serializes and restores plot draw result data", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    manager.plot({
+      id: "draw-plot",
+      type: "double-arrow",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.012),
+        Cartesian3.fromDegrees(114.025, 22.002)
+      ],
+      plot: { steps: 18 },
+      group: "plot",
+      properties: { label: "double-arrow" },
+      style: { polygon: { fillColor: "#35d07f" } }
+    });
+
+    const snapshot = manager.toJSON();
+    manager.clear();
+    const restored = await manager.load(snapshot);
+
+    expect(snapshot[0]).toMatchObject({
+      id: "draw-plot",
+      type: "double-arrow",
+      data: { plot: { steps: 18 } },
+      group: "plot",
+      properties: { label: "double-arrow" }
+    });
+    expect(restored[0]).toMatchObject({
+      id: "draw-plot",
+      type: "double-arrow",
+      group: "plot",
+      properties: { label: "double-arrow" }
+    });
+    expect(restored[0].entity.polygon).toBeDefined();
+  });
+
   it("roundtrips draw results through Kairos JSON and GeoJSON", async () => {
     const map = createMapMock();
     const manager = new DrawManager(map);
@@ -605,6 +687,39 @@ describe("DrawManager", () => {
       properties: { name: "business-model" }
     });
     expect(restored[0].properties).not.toHaveProperty("kairos");
+  });
+
+  it("exports visible plot draw geometry to GeoJSON and restores plot semantics from snapshots", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    manager.plot({
+      id: "draw-plot",
+      type: "curve",
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.012),
+        Cartesian3.fromDegrees(114.03, 22.01)
+      ],
+      plot: { steps: 12 },
+      properties: { label: "curve" }
+    });
+
+    const geojson = manager.toGeoJSON();
+    const plain = manager.toGeoJSON({ includeSnapshot: false });
+    manager.clear();
+    const restoredFromSnapshot = await manager.loadGeoJSON(geojson);
+    manager.clear();
+    const restoredPlain = await manager.loadGeoJSON(plain);
+
+    expect(geojson.features[0].geometry.type).toBe("LineString");
+    expect(geojson.features[0].properties.kairos).toMatchObject({
+      version: 1,
+      type: "curve"
+    });
+    expect(restoredFromSnapshot[0].type).toBe("curve");
+    expect(restoredFromSnapshot[0].data?.plot).toEqual({ steps: 12 });
+    expect(restoredPlain[0].type).toBe("polyline");
+    expect(restoredPlain[0].properties).toEqual({ label: "curve" });
   });
 
   it("validates draw snapshots before clearing existing results", async () => {

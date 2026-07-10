@@ -32,6 +32,7 @@ import type {
   OverlayConfig,
   OverlayData,
   OverlayLoadOptions,
+  PlotOverlayOptions,
   OverlayQueryOptions,
   OverlaySnapshot,
   OverlayType,
@@ -211,6 +212,17 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
         topRadius: options.topRadius,
         bottomRadius: options.bottomRadius
       }
+    });
+  }
+
+  addPlot(options: PlotOverlayOptions): Overlay {
+    const data: OverlayData = { ...options.data };
+    if (options.plot) {
+      data.plot = { ...options.plot };
+    }
+    return this.add({
+      ...options,
+      data
     });
   }
 
@@ -710,6 +722,9 @@ function mergeOverlayData(
   }
   if (options.roll !== undefined) {
     data.roll = options.roll;
+  }
+  if (options.plot !== undefined) {
+    data.plot = { ...options.plot };
   }
 
   return Object.keys(data).length ? data : undefined;

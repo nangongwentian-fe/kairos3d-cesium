@@ -1,6 +1,7 @@
 import { Color } from "cesium";
 import type { DrawType } from "../draw/types";
 import type { MeasureType, TerrainAnalysisType } from "../analysis/types";
+import { plotTypes } from "../plotting";
 import type {
   ResultSymbolStyle,
   SDKStyleDefaults,
@@ -24,7 +25,8 @@ const drawTypes: DrawType[] = [
   "wall",
   "corridor",
   "box",
-  "cylinder"
+  "cylinder",
+  ...plotTypes
 ];
 
 export class StyleManager {
@@ -154,7 +156,18 @@ function createDefaultStyles(): SDKStyleDefaults {
       cylinder: {
         line: { color: Color.CYAN, width: 2, clampToGround: false },
         polygon: { fillColor: Color.CYAN.withAlpha(0.2), outlineColor: Color.CYAN }
-      }
+      },
+      "fine-arrow": plotPolygonStyle(),
+      "straight-arrow": plotPolygonStyle(),
+      "attack-arrow": plotPolygonStyle(),
+      "double-arrow": plotPolygonStyle(),
+      curve: {
+        line: { color: Color.CYAN, width: 3, clampToGround: false }
+      },
+      "closed-curve": plotPolygonStyle(),
+      sector: plotPolygonStyle(),
+      lune: plotPolygonStyle(),
+      "gathering-place": plotPolygonStyle()
     },
     measure: {
       distance: {
@@ -281,4 +294,11 @@ function mergeDefaults(
 
 function cloneDefaults(defaults: SDKStyleDefaults): SDKStyleDefaults {
   return mergeDefaults({}, defaults);
+}
+
+function plotPolygonStyle(): ResultSymbolStyle {
+  return {
+    line: { color: Color.CYAN, width: 2, clampToGround: false },
+    polygon: { fillColor: Color.CYAN.withAlpha(0.22), outlineColor: Color.CYAN }
+  };
 }

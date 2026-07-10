@@ -1,6 +1,7 @@
 import type { Cartesian3, Color, Entity } from "cesium";
 import type { RuntimeResultLoadOptions, SerializablePosition } from "../core";
 import type { HeightOptions } from "../height";
+import type { PlotAlgorithmOptions, PlotType } from "../plotting";
 import type {
   ResultPrimitiveRuntime,
   ResultRenderMode
@@ -13,6 +14,7 @@ import type {
   GeoJsonExportOptions,
   KairosGeoJsonFeatureCollection,
   OverlayData,
+  PlotOverlayOptions,
   OverlayQueryOptions,
   WallOverlayOptions
 } from "../overlays/types";
@@ -34,7 +36,8 @@ export type DrawType =
   | "wall"
   | "corridor"
   | "box"
-  | "cylinder";
+  | "cylinder"
+  | PlotType;
 export type DrawEditReason = "drag" | "insert" | "delete" | "programmatic";
 export type DrawResultData = OverlayData;
 export type DrawQueryOptions = OverlayQueryOptions;
@@ -121,6 +124,11 @@ export interface DrawCylinderToolOptions extends DrawToolOptions {
   bottomRadius?: number;
 }
 
+export interface DrawPlotToolOptions extends DrawToolOptions {
+  type: PlotType;
+  plot?: PlotAlgorithmOptions;
+}
+
 export interface DrawCreateOptions {
   id?: string;
   style?: ResultSymbolStyle;
@@ -189,6 +197,8 @@ export interface DrawBoxOptions extends DrawCreateOptions, BoxOverlayOptions {}
 
 export interface DrawCylinderOptions extends DrawCreateOptions, CylinderOverlayOptions {}
 
+export interface DrawPlotOptions extends DrawCreateOptions, PlotOverlayOptions {}
+
 export interface DrawResultUpdateOptions {
   positions?: Cartesian3[];
   position?: Cartesian3;
@@ -213,6 +223,7 @@ export interface DrawResultUpdateOptions {
   heading?: number;
   pitch?: number;
   roll?: number;
+  plot?: PlotAlgorithmOptions;
   style?: ResultSymbolStyle;
   height?: HeightOptions;
   renderMode?: ResultRenderMode;

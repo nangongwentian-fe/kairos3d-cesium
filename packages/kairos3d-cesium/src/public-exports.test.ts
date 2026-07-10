@@ -14,6 +14,7 @@ const expectedExports = [
   "./performance",
   "./persistence",
   "./picking",
+  "./plotting",
   "./primitives",
   "./results",
   "./scene",

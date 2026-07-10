@@ -49,6 +49,7 @@ import type {
   DrawGeoJsonFeatureCollection,
   DrawLabelOptions,
   DrawModelOptions,
+  DrawPlotOptions,
   DrawQueryOptions,
   DrawRectangleOptions,
   DrawResult,
@@ -311,6 +312,28 @@ export class DrawManager extends Evented<DrawManagerEvents> {
         topRadius: options.topRadius,
         bottomRadius: options.bottomRadius
       },
+      style: options.style,
+      height: options.height,
+      renderMode: options.renderMode,
+      properties: options.properties,
+      metadata: options.metadata,
+      group: options.group,
+      show: options.show,
+      locked: options.locked,
+      editable: options.editable
+    });
+  }
+
+  plot(options: DrawPlotOptions): DrawResult {
+    const data: OverlayData = { ...options.data };
+    if (options.plot) {
+      data.plot = { ...options.plot };
+    }
+    return this.addProgrammaticResult({
+      id: options.id,
+      type: options.type,
+      positions: options.positions,
+      data,
       style: options.style,
       height: options.height,
       renderMode: options.renderMode,
@@ -982,6 +1005,9 @@ function mergeDrawData(
   }
   if (options.roll !== undefined) {
     data.roll = options.roll;
+  }
+  if (options.plot !== undefined) {
+    data.plot = { ...options.plot };
   }
 
   return Object.keys(data).length ? data : undefined;

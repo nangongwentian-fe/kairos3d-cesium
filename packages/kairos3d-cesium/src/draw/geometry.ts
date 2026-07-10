@@ -5,6 +5,10 @@ import {
   ConstantProperty
 } from "cesium";
 import { applyHeightOptionsToEntity } from "../height";
+import {
+  isPlotType,
+  minPlotPositionCount
+} from "../plotting";
 import type { DrawResult, DrawType } from "./types";
 
 export function clonePositions(positions: Cartesian3[]): Cartesian3[] {
@@ -12,6 +16,10 @@ export function clonePositions(positions: Cartesian3[]): Cartesian3[] {
 }
 
 export function minPositionCount(type: DrawType): number {
+  if (isPlotType(type)) {
+    return minPlotPositionCount(type);
+  }
+
   if (type === "polygon") {
     return 3;
   }

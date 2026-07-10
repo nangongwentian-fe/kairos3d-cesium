@@ -19,7 +19,8 @@ export default defineConfig({
         "performance/index": fileURLToPath(new URL("./src/performance/index.ts", import.meta.url)),
         "primitives/index": fileURLToPath(new URL("./src/primitives/index.ts", import.meta.url)),
         "overlays/index": fileURLToPath(new URL("./src/overlays/index.ts", import.meta.url)),
-        "persistence/index": fileURLToPath(new URL("./src/persistence/index.ts", import.meta.url))
+        "persistence/index": fileURLToPath(new URL("./src/persistence/index.ts", import.meta.url)),
+        "plotting/index": fileURLToPath(new URL("./src/plotting/index.ts", import.meta.url))
       },
       name: "Kairos3DCesium",
       formats: ["es", "cjs"],

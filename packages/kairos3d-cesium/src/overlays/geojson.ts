@@ -1,4 +1,14 @@
+import {
+  Cartesian3,
+  Cartographic,
+  Math as CesiumMath
+} from "cesium";
 import type { SerializablePosition } from "../core";
+import {
+  computePlotGeometry,
+  isPlotType
+} from "../plotting";
+import type { PlotAlgorithmOptions } from "../plotting";
 import type {
   GeoJsonExportOptions,
   KairosGeoJsonFeature,
@@ -104,6 +114,26 @@ function featureToBasicSnapshot(
 }
 
 function snapshotToGeometry(snapshot: SnapshotLike): KairosGeoJsonFeature["geometry"] {
+  if (isPlotType(snapshot.type)) {
+    const geometry = computePlotGeometry(
+      snapshot.type,
+      snapshot.positions.map(positionToCartesian),
+      readSnapshotPlotOptions(snapshot)
+    );
+    const positions = geometry.positions.map(cartesianToPosition);
+    if (geometry.kind === "polyline") {
+      return {
+        type: "LineString",
+        coordinates: positions.map(positionToCoordinates)
+      };
+    }
+
+    return {
+      type: "Polygon",
+      coordinates: [positionsToClosedCoordinates(positions)]
+    };
+  }
+
   if (snapshot.type === "polyline" || snapshot.type === "wall" || snapshot.type === "corridor") {
     return {
       type: "LineString",
@@ -168,6 +198,27 @@ function coordinatesToPosition(coordinates: number[]): SerializablePosition {
     latitude: coordinates[1] ?? 0,
     height: coordinates[2] ?? 0
   };
+}
+
+function positionToCartesian(position: SerializablePosition): Cartesian3 {
+  return Cartesian3.fromDegrees(position.longitude, position.latitude, position.height);
+}
+
+function cartesianToPosition(position: Cartesian3): SerializablePosition {
+  const cartographic = Cartographic.fromCartesian(position);
+  return {
+    longitude: CesiumMath.toDegrees(cartographic.longitude),
+    latitude: CesiumMath.toDegrees(cartographic.latitude),
+    height: cartographic.height
+  };
+}
+
+function readSnapshotPlotOptions(snapshot: SnapshotLike): PlotAlgorithmOptions | undefined {
+  const data = (snapshot as SnapshotLike & { data?: { plot?: unknown } }).data;
+  const plot = data?.plot;
+  return typeof plot === "object" && plot !== null && !Array.isArray(plot)
+    ? (plot as PlotAlgorithmOptions)
+    : undefined;
 }
 
 function stripKairosProperty(properties: Record<string, unknown> = {}): Record<string, unknown> {

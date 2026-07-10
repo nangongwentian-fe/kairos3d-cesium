@@ -12,6 +12,7 @@ export * from "./performance";
 export * from "./primitives";
 export * from "./overlays";
 export * from "./persistence";
+export * from "./plotting";
 export {
   createViewer,
   destroyViewer,

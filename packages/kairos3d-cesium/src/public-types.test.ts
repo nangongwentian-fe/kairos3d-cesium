@@ -30,6 +30,8 @@ import type {
   DrawCylinderToolOptions,
   DrawGeoJsonExportOptions,
   DrawGeoJsonFeatureCollection,
+  DrawPlotOptions,
+  DrawPlotToolOptions,
   DrawResultData,
   DrawResult,
   DrawResultSnapshot,
@@ -171,6 +173,7 @@ import type {
   OverlaySnapshot,
   OverlayType,
   OverlayUpdateOptions,
+  PlotOverlayOptions,
   PointOverlayOptions,
   PolygonOverlayOptions,
   PolylineOverlayOptions,
@@ -178,6 +181,12 @@ import type {
   WallOverlayOptions
 } from "./overlays";
 import type { SnapshotStorageAdapter, SnapshotStorageRecord } from "./persistence";
+import type {
+  PlotAlgorithmOptions,
+  PlotGeometry,
+  PlotGeometryKind,
+  PlotType
+} from "./plotting";
 
 describe("public SDK types", () => {
   it("exposes stable draw and measure result contracts", () => {
@@ -195,7 +204,34 @@ describe("public SDK types", () => {
       | "corridor"
       | "box"
       | "cylinder"
+      | PlotType
     >();
+    expectTypeOf<PlotType>().toEqualTypeOf<
+      | "fine-arrow"
+      | "straight-arrow"
+      | "attack-arrow"
+      | "double-arrow"
+      | "curve"
+      | "closed-curve"
+      | "sector"
+      | "lune"
+      | "gathering-place"
+    >();
+    expectTypeOf<PlotGeometryKind>().toEqualTypeOf<"polygon" | "polyline">();
+    expectTypeOf<PlotAlgorithmOptions>().toEqualTypeOf<{
+      steps?: number;
+      headWidthFactor?: number;
+      headHeightFactor?: number;
+      neckWidthFactor?: number;
+      neckHeightFactor?: number;
+      tailWidthFactor?: number;
+    }>();
+    expectTypeOf<PlotGeometry>().toMatchTypeOf<{
+      type: PlotType;
+      kind: PlotGeometryKind;
+      controlPositions: Cartesian3[];
+      positions: Cartesian3[];
+    }>();
     expectTypeOf<MeasureType>().toEqualTypeOf<"distance" | "area" | "height">();
     expectTypeOf<MeasureUnit>().toEqualTypeOf<"m" | "km" | "m2" | "km2">();
     expectTypeOf<DistanceMeasureMode>().toEqualTypeOf<"space" | "surface">();
@@ -253,6 +289,10 @@ describe("public SDK types", () => {
     expectTypeOf<DrawBoxToolOptions>().toMatchTypeOf<{
       dimensions?: [number, number, number];
     }>();
+    expectTypeOf<DrawPlotToolOptions>().toMatchTypeOf<{
+      type: PlotType;
+      plot?: PlotAlgorithmOptions;
+    }>();
     expectTypeOf<DrawGeoJsonExportOptions>().toEqualTypeOf<GeoJsonExportOptions>();
     expectTypeOf<DrawGeoJsonFeatureCollection>().toEqualTypeOf<
       KairosGeoJsonFeatureCollection
@@ -283,6 +323,9 @@ describe("public SDK types", () => {
     >();
     expectTypeOf<KairosMap["draw"]["toGeoJSON"]>().toMatchTypeOf<
       (options?: DrawGeoJsonExportOptions) => DrawGeoJsonFeatureCollection
+    >();
+    expectTypeOf<KairosMap["draw"]["plot"]>().toMatchTypeOf<
+      (options: DrawPlotOptions) => DrawResult
     >();
     expectTypeOf<DrawCylinderToolOptions>().toMatchTypeOf<{
       length?: number;
@@ -742,6 +785,15 @@ describe("public SDK types", () => {
         corridor?: ResultSymbolStyle;
         box?: ResultSymbolStyle;
         cylinder?: ResultSymbolStyle;
+        "fine-arrow"?: ResultSymbolStyle;
+        "straight-arrow"?: ResultSymbolStyle;
+        "attack-arrow"?: ResultSymbolStyle;
+        "double-arrow"?: ResultSymbolStyle;
+        curve?: ResultSymbolStyle;
+        "closed-curve"?: ResultSymbolStyle;
+        sector?: ResultSymbolStyle;
+        lune?: ResultSymbolStyle;
+        "gathering-place"?: ResultSymbolStyle;
       };
       selection?: SelectionSymbolStyle;
       terrain?: {
@@ -960,6 +1012,7 @@ describe("public SDK types", () => {
       heading?: number;
       pitch?: number;
       roll?: number;
+      plot?: PlotAlgorithmOptions;
     }>();
     expectTypeOf<OverlayConfig>().toMatchTypeOf<{
       id?: string;
@@ -989,6 +1042,7 @@ describe("public SDK types", () => {
       length?: number;
       topRadius?: number;
       bottomRadius?: number;
+      plot?: PlotAlgorithmOptions;
       text?: string;
       image?: string;
       uri?: string;
@@ -1052,6 +1106,11 @@ describe("public SDK types", () => {
       topRadius: number;
       bottomRadius: number;
     }>();
+    expectTypeOf<PlotOverlayOptions>().toMatchTypeOf<{
+      type: PlotType;
+      positions: Cartesian3[];
+      plot?: PlotAlgorithmOptions;
+    }>();
     expectTypeOf<OverlayQueryOptions>().toEqualTypeOf<{
       type?: OverlayType | OverlayType[];
       group?: string;
@@ -1102,6 +1161,9 @@ describe("public SDK types", () => {
     }>();
     expectTypeOf<KairosMap["overlays"]["add"]>().toMatchTypeOf<
       (config: OverlayConfig) => Overlay
+    >();
+    expectTypeOf<KairosMap["overlays"]["addPlot"]>().toMatchTypeOf<
+      (options: PlotOverlayOptions) => Overlay
     >();
     expectTypeOf<KairosMap["overlays"]["update"]>().toMatchTypeOf<
       (id: string, options: OverlayUpdateOptions) => Overlay

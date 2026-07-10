@@ -16,6 +16,11 @@ import {
 } from "../height";
 import type { HeightOptions } from "../height";
 import {
+  computePlotGeometry,
+  isPlotType,
+  minPlotPositionCount
+} from "../plotting";
+import {
   createBillboardGraphics,
   createLabelGraphics,
   createLineGraphics,
@@ -56,6 +61,11 @@ export function validateOverlayShape(
 ): void {
   if (!Array.isArray(positions)) {
     throw new Error(`Overlay "${id}" positions must be an array.`);
+  }
+
+  if (isPlotType(type)) {
+    validatePlotShape(id, type, positions, data);
+    return;
   }
 
   const min = minOverlayPositionCount(type);
@@ -111,6 +121,10 @@ export function validateOverlayShape(
 }
 
 export function minOverlayPositionCount(type: OverlayType): number {
+  if (isPlotType(type)) {
+    return minPlotPositionCount(type);
+  }
+
   if (type === "polygon") {
     return 3;
   }
@@ -132,7 +146,11 @@ export function cloneOverlayData(data?: OverlayData): OverlayData | undefined {
     return undefined;
   }
 
-  return { ...data };
+  const cloned = { ...data };
+  if (data.plot) {
+    cloned.plot = { ...data.plot };
+  }
+  return cloned;
 }
 
 export function serializeOverlayData(data?: OverlayData): OverlayData | undefined {
@@ -152,6 +170,26 @@ export function normalizeOverlayHeight(
 
 function createEntityOptions(options: OverlayRenderOptions) {
   const { id, type, positions, data, style = {}, height, show = true } = options;
+
+  if (isPlotType(type)) {
+    const geometry = computePlotGeometry(type, positions, data?.plot);
+    if (geometry.kind === "polyline") {
+      return {
+        id,
+        show,
+        polyline: createLineGraphics(
+          new ConstantProperty(geometry.positions),
+          lineStyleWithHeight(style.line, height)
+        )
+      };
+    }
+
+    return {
+      id,
+      show,
+      polygon: createPolygonGraphics(new ConstantProperty(geometry.positions), style.polygon)
+    };
+  }
 
   if (type === "point") {
     return {
@@ -381,4 +419,33 @@ function assertHeightArray(value: unknown, length: number, label: string): void 
       throw new Error(`${label} must contain finite numbers.`);
     }
   }
+}
+
+function validatePlotShape(
+  id: string,
+  type: OverlayType,
+  positions: Cartesian3[],
+  data?: OverlayData
+): void {
+  if (!isPlotType(type)) {
+    return;
+  }
+
+  const min = minOverlayPositionCount(type);
+  if (positions.length < min) {
+    throw new Error(`Overlay "${id}" requires at least ${min} positions.`);
+  }
+
+  for (const [index, position] of positions.entries()) {
+    if (
+      !(position instanceof Cartesian3) ||
+      !Number.isFinite(position.x) ||
+      !Number.isFinite(position.y) ||
+      !Number.isFinite(position.z)
+    ) {
+      throw new Error(`Overlay "${id}" position ${index} must be a finite Cartesian3.`);
+    }
+  }
+
+  computePlotGeometry(type, positions, data?.plot);
 }
