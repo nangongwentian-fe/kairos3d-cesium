@@ -50,6 +50,7 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | `@kairos3d/cesium/picking` | Object picking, normalized properties, selection state, and first-stage highlight. |
 | `@kairos3d/cesium/materials` | Target-aware material registry and factories built on public Cesium material APIs. |
 | `@kairos3d/cesium/effects` | Long-running geometry, particle, and weather effect lifecycle. |
+| `@kairos3d/cesium/operations` | Shared runtime status, progress, cancellation, and failure lifecycle for async managers. |
 | `@kairos3d/cesium/style` | Shared symbol styles, style defaults, presets, and JSON-safe color serialization. |
 | `@kairos3d/cesium/height` | Height modes, terrain sampling, clamp-to-ground helpers, and surface distance helpers. |
 | `@kairos3d/cesium/results` | Aggregated SDK-managed result index, query, cleanup, and events. |
@@ -113,6 +114,17 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Persistence | The SDK provides optional adapters, but apps still decide whether to use memory, localStorage, files, or a backend. |
 | Roaming | Route flight, keyboard roam, first-person roam, tracking mode, and Mars3D-style camera systems are out of scope for this milestone. |
 
+## Operation Boundaries
+
+| Feature | Current boundary |
+| --- | --- |
+| Tracking | Layers, Effects, scene recovery, visibility, profile, and terrain compute expose one shared runtime operation contract. |
+| Cancellation | Uses `AbortSignal`; work that Cesium cannot abort is prevented from committing after it resolves. |
+| Progress | Progress is monotonic from `0` to `1`; composite scene loads reuse one parent operation instead of creating duplicate records. |
+| Retention | At most 100 finished records are retained. Operation records are runtime diagnostics and are not serialized. |
+| Scene recovery | Cancellation stops later phases but does not roll back phases already committed. Transactional recovery is deferred to M10. |
+| UI | M9 does not add an Operations or Effects Widget. Applications may subscribe to `map.operations` directly. |
+
 ## Picking Boundaries
 
 | Feature | Current boundary |
@@ -160,7 +172,7 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 
 | Feature | Current boundary |
 | --- | --- |
-| Runtime stats | Counts viewer entities, SDK-managed result entities, layer runtime objects, result records, effects, effect runtime objects, and animated effects. |
+| Runtime stats | Counts viewer entities, SDK-managed result entities, layer runtime objects, result records, effects, effect runtime objects, animated effects, active operations, and failed operations. |
 | Budgets | Budgets produce warnings only; they do not mutate layers, results, or viewer settings. |
 | Primitive candidates | Candidate hints identify entity-heavy Entity results. Results already using `renderMode: "primitive"` are skipped. |
 | Renderer ownership | Entity cleanup remains owned by draw and analysis managers; performance stats do not own runtime objects. |

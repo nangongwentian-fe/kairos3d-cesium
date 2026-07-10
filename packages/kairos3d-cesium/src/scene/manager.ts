@@ -1,4 +1,10 @@
 import type { KairosMap } from "../core";
+import {
+  createOperationScope,
+  runOrReuseOperation,
+  withOperationContext,
+  type OperationContext
+} from "../operations/manager";
 import { cameraViewFromCartographic, cameraViewToCartesian, cloneCameraView } from "./camera";
 import type {
   CameraBookmark,
@@ -70,78 +76,181 @@ export class SceneStateManager {
   }
 
   async load(snapshot: SceneSnapshot, options: SceneStateLoadOptions = {}): Promise<void> {
+    return runOrReuseOperation(
+      this.map.operations,
+      { kind: "scene.load", label: "Load scene" },
+      options,
+      (context) => this.loadSnapshot(snapshot, options, context)
+    );
+  }
+
+  private async loadSnapshot(
+    snapshot: SceneSnapshot,
+    options: SceneStateLoadOptions,
+    context: OperationContext
+  ): Promise<void> {
     const restoreOverlays = options.restoreOverlays ?? false;
     const restoreEffects = options.restoreEffects ?? false;
+    context.throwIfAborted();
+    context.reportProgress(0, "validate");
     if (restoreOverlays && snapshot.overlays) {
       this.map.overlays.validateSnapshots(snapshot.overlays);
     }
     if (restoreEffects) {
       this.map.effects.validateSnapshots(snapshot.effects ?? []);
     }
-
-    await this.map.layers.load(snapshot.layers, {
-      clear: options.clearLayers ?? true,
-      flyTo: false
-    });
-
-    this.bookmarks.replace(snapshot.bookmarks);
+    context.throwIfAborted();
 
     const restoreResults = options.restoreResults ?? false;
     const clearResults = options.clearResults ?? restoreResults;
-    if (clearResults) {
-      this.map.draw.clear();
-      this.map.analysis.measure.clear();
-      this.map.analysis.visibility.clear();
-      this.map.analysis.profile.clear();
-      this.map.analysis.clipping.clear();
-      this.map.analysis.terrain.clear();
-    }
-    if (restoreResults && snapshot.results) {
-      await this.map.draw.load(snapshot.results.draw, { clear: false });
-      await this.map.analysis.load(
-        {
-          measure: snapshot.results.measure,
-          visibility: snapshot.results.visibility,
-          profile: snapshot.results.profile,
-          clipping: snapshot.results.clipping,
-          terrain: snapshot.results.terrain ?? []
-        },
-        { clear: false }
-      );
-    }
-
     const restorePrimitives = options.restorePrimitives ?? false;
     const clearPrimitives = options.clearPrimitives ?? restorePrimitives;
-    if (clearPrimitives) {
-      this.map.primitives.clear();
-    }
-    if (restorePrimitives && snapshot.primitives) {
-      this.map.primitives.load(snapshot.primitives, { clear: false });
-    }
-
     const clearOverlays = options.clearOverlays ?? restoreOverlays;
-    if (clearOverlays) {
-      this.map.overlays.clear();
-    }
-    if (restoreOverlays && snapshot.overlays) {
-      await this.map.overlays.load(snapshot.overlays, { clear: false });
+    const clearEffects = options.clearEffects ?? restoreEffects;
+
+    const stages: SceneLoadStage[] = [
+      {
+        phase: "layers",
+        run: (scope) =>
+          this.map.layers.load(
+            snapshot.layers,
+            withOperationContext(
+              {
+                clear: options.clearLayers ?? true,
+                flyTo: false
+              },
+              scope
+            )
+          )
+      },
+      {
+        phase: "bookmarks",
+        run: () => this.bookmarks.replace(snapshot.bookmarks)
+      }
+    ];
+
+    if (clearResults || restoreResults) {
+      stages.push({
+        phase: "results",
+        run: async (scope) => {
+          if (clearResults) {
+            this.map.draw.clear();
+            this.map.analysis.measure.clear();
+            this.map.analysis.visibility.clear();
+            this.map.analysis.profile.clear();
+            this.map.analysis.clipping.clear();
+            this.map.analysis.terrain.clear();
+          }
+          if (restoreResults && snapshot.results) {
+            await this.map.draw.load(snapshot.results.draw, { clear: false });
+            scope.throwIfAborted();
+            await this.map.analysis.load(
+              {
+                measure: snapshot.results.measure,
+                visibility: snapshot.results.visibility,
+                profile: snapshot.results.profile,
+                clipping: snapshot.results.clipping,
+                terrain: snapshot.results.terrain ?? []
+              },
+              { clear: false }
+            );
+            scope.throwIfAborted();
+          }
+        }
+      });
     }
 
-    const clearEffects = options.clearEffects ?? restoreEffects;
-    if (restoreEffects) {
-      await this.map.effects.load(snapshot.effects ?? [], { clear: clearEffects });
-    } else if (clearEffects) {
-      this.map.effects.clear();
+    if (clearPrimitives || restorePrimitives) {
+      stages.push({
+        phase: "primitives",
+        run: () => {
+          if (clearPrimitives) {
+            this.map.primitives.clear();
+          }
+          if (restorePrimitives && snapshot.primitives) {
+            this.map.primitives.load(snapshot.primitives, { clear: false });
+          }
+        }
+      });
+    }
+
+    if (clearOverlays || restoreOverlays) {
+      stages.push({
+        phase: "overlays",
+        run: async (scope) => {
+          if (clearOverlays) {
+            this.map.overlays.clear();
+          }
+          if (restoreOverlays && snapshot.overlays) {
+            await this.map.overlays.load(snapshot.overlays, { clear: false });
+            scope.throwIfAborted();
+          }
+        }
+      });
+    }
+
+    if (clearEffects || restoreEffects) {
+      stages.push({
+        phase: "effects",
+        run: (scope) => {
+          if (restoreEffects) {
+            return this.map.effects.load(
+              snapshot.effects ?? [],
+              withOperationContext({ clear: clearEffects }, scope)
+            );
+          }
+          this.map.effects.clear();
+        }
+      });
     }
 
     if ((options.flyToCamera ?? true) && snapshot.camera) {
-      await this.flyToCamera(snapshot.camera);
+      stages.push({
+        phase: "camera",
+        run: (scope) => this.flyToCameraWithOperation(snapshot.camera!, scope)
+      });
+    }
+
+    for (let index = 0; index < stages.length; index += 1) {
+      const stage = stages[index];
+      const scope = createOperationScope(
+        context,
+        index / stages.length,
+        (index + 1) / stages.length,
+        stage.phase
+      );
+      scope.throwIfAborted();
+      await stage.run(scope);
+      scope.throwIfAborted();
+      scope.reportProgress(1);
+    }
+  }
+
+  private async flyToCameraWithOperation(
+    view: CameraView,
+    context: OperationContext
+  ): Promise<boolean> {
+    const camera = this.map.viewer.camera;
+    const cancelFlight = () => camera.cancelFlight();
+    context.signal.addEventListener("abort", cancelFlight, { once: true });
+    try {
+      context.throwIfAborted();
+      const completed = await this.flyToCamera(view);
+      context.throwIfAborted();
+      return completed;
+    } finally {
+      context.signal.removeEventListener("abort", cancelFlight);
     }
   }
 
   destroy(): void {
     this.bookmarks.clear();
   }
+}
+
+interface SceneLoadStage {
+  phase: string;
+  run(context: OperationContext): void | Promise<unknown>;
 }
 
 export class CameraBookmarkManager {

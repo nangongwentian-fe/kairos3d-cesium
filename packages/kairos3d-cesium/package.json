@@ -97,6 +97,11 @@
       "types": "./dist/effects/index.d.ts",
       "import": "./dist/effects/index.js",
       "require": "./dist/effects/index.cjs"
+    },
+    "./operations": {
+      "types": "./dist/operations/index.d.ts",
+      "import": "./dist/operations/index.js",
+      "require": "./dist/operations/index.cjs"
     }
   },
   "files": ["dist", "README.md"],

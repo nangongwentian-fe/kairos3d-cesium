@@ -1,9 +1,18 @@
 import { Cartesian3, Entity } from "cesium";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import {
+  OperationCanceledError,
+  OperationManager,
+  type AsyncOperationOptions
+} from "../operations";
 import { StyleManager } from "../style";
 import { MeasureManager, ProfileManager, VisibilityManager } from "./manager";
-import type { MeasureResult } from "./types";
+import type {
+  MeasureResult,
+  ProfileComputeOptions,
+  VisibilityComputeOptions
+} from "./types";
 
 beforeAll(() => {
   vi.stubGlobal("HTMLCanvasElement", class HTMLCanvasElementMock {});
@@ -40,6 +49,7 @@ function createMapMock() {
       stop: vi.fn(),
       emitClear: vi.fn()
     },
+    operations: new OperationManager(),
     styles: new StyleManager()
   } as unknown as KairosMap;
 }
@@ -257,6 +267,12 @@ describe("MeasureManager", () => {
 });
 
 describe("VisibilityManager", () => {
+  it("exposes optional operation options on compute", () => {
+    expectTypeOf<Parameters<VisibilityManager["compute"]>>().toEqualTypeOf<
+      [VisibilityComputeOptions, AsyncOperationOptions?]
+    >();
+  });
+
   it("starts visibility pick through the shared tool manager", async () => {
     const map = createMapMock();
     const manager = new VisibilityManager(map);
@@ -282,6 +298,68 @@ describe("VisibilityManager", () => {
     expect(result.positions).toHaveLength(2);
     expect(result.entities.length).toBeGreaterThan(0);
     expect(manager.get(result.id)).toBe(result);
+  });
+
+  it("tracks visibility operations and does not commit canceled results", async () => {
+    const map = createMapMock();
+    const manager = new VisibilityManager(map);
+    const controller = new AbortController();
+    let resolveHeight!: (positions: Cartesian3[]) => void;
+    vi.mocked(map.height.resolvePositions).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveHeight = resolve;
+      })
+    );
+
+    const promise = manager.compute(
+      {
+        start: Cartesian3.fromDegrees(114, 22, 100),
+        end: Cartesian3.fromDegrees(114.01, 22, 100),
+        height: { mode: "absolute" }
+      },
+      { signal: controller.signal, operationId: "visibility-canceled" }
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(promise).rejects.toBeInstanceOf(OperationCanceledError);
+    resolveHeight([
+      Cartesian3.fromDegrees(114, 22, 100),
+      Cartesian3.fromDegrees(114.01, 22, 100)
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(manager.list()).toEqual([]);
+    expect(map.viewer.entities.add).not.toHaveBeenCalled();
+    expect(map.operations.get("visibility-canceled")).toMatchObject({
+      kind: "analysis.visibility",
+      status: "canceled"
+    });
+  });
+
+  it("does not render when a progress listener cancels visibility", async () => {
+    const map = createMapMock();
+    const manager = new VisibilityManager(map);
+    map.operations.on("change", (event) => {
+      if (event.data.phase === "render" && event.data.status === "running") {
+        map.operations.cancel(event.data.id);
+      }
+    });
+
+    await expect(
+      manager.compute(
+        {
+          start: Cartesian3.fromDegrees(114, 22, 100),
+          end: Cartesian3.fromDegrees(114.01, 22, 100),
+          sampleCount: 8
+        },
+        { operationId: "visibility-render-canceled" }
+      )
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(manager.list()).toEqual([]);
+    expect(map.viewer.entities.add).not.toHaveBeenCalled();
   });
 
   it("removes visibility result entities", async () => {
@@ -381,6 +459,12 @@ describe("VisibilityManager", () => {
 });
 
 describe("ProfileManager", () => {
+  it("exposes optional operation options on compute", () => {
+    expectTypeOf<Parameters<ProfileManager["compute"]>>().toEqualTypeOf<
+      [ProfileComputeOptions, AsyncOperationOptions?]
+    >();
+  });
+
   it("starts profile draw through the shared tool manager", async () => {
     const map = createMapMock();
     const manager = new ProfileManager(map);
@@ -410,6 +494,37 @@ describe("ProfileManager", () => {
     expect(result.maxHeight).toBe(0);
     expect(result.entities.length).toBe(3);
     expect(manager.get(result.id)).toBe(result);
+    expect(map.operations.list({ kind: "analysis.profile" })[0]).toMatchObject({
+      status: "succeeded",
+      progress: 1,
+      phase: "render"
+    });
+  });
+
+  it("rolls back profile entities when cancellation races the add event", async () => {
+    const map = createMapMock();
+    const manager = new ProfileManager(map);
+    manager.on("add", () => {
+      queueMicrotask(() => map.operations.cancel("profile-add-canceled"));
+    });
+
+    await expect(
+      manager.compute(
+        {
+          positions: [
+            Cartesian3.fromDegrees(114, 22, 0),
+            Cartesian3.fromDegrees(114.01, 22, 0)
+          ],
+          sampleCount: 5
+        },
+        { operationId: "profile-add-canceled" }
+      )
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(manager.list()).toEqual([]);
+    expect(map.viewer.entities.remove).toHaveBeenCalledTimes(
+      vi.mocked(map.viewer.entities.add).mock.calls.length
+    );
   });
 
   it("clears profile result entities", async () => {

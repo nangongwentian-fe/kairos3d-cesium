@@ -1,8 +1,9 @@
 import type { KairosMap } from "@kairos3d/cesium/core";
 import type { EffectConfig, EffectType } from "@kairos3d/cesium/effects";
+import { isOperationCanceledError } from "@kairos3d/cesium/operations";
 import type { SceneSnapshot } from "@kairos3d/cesium/scene";
 import { createMemoryWidgetSnapshotStorage } from "@kairos3d/cesium-widget";
-import { Cartesian3, EllipsoidTerrainProvider } from "cesium";
+import { Cartesian3, EllipsoidTerrainProvider, Material } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -171,16 +172,17 @@ function BrowserSmoke() {
       </output>
       <aside
         className="effects-smoke"
+        role="status"
         data-k3d-effects-status={report.status}
         data-k3d-effects-pass={passed ? "true" : "false"}
         data-k3d-runtime-count={currentCounts?.runtimeObjects ?? 0}
         data-k3d-animated-count={currentCounts?.animatedEffects ?? 0}
         data-k3d-scene-primitive-count={currentCounts?.scenePrimitives ?? 0}
         data-k3d-stage-count={currentCounts?.postProcessStages ?? 0}
-        aria-label="M8 Effects Core smoke report"
+        aria-label={`M8 Effects and M9 Operations Core smoke report: ${report.status}; ${Object.values(report.checks).filter(Boolean).length}/${Object.keys(report.checks).length} checks`}
       >
         <header>
-          <strong>M8 Effects Core</strong>
+          <strong>M8 Effects / M9 Operations</strong>
           <span className={`effects-smoke__badge effects-smoke__badge--${report.status}`}>
             {report.status}
           </span>
@@ -196,7 +198,12 @@ function BrowserSmoke() {
           >
             Restore
           </button>
-          <button type="button" onClick={() => void rerun()} disabled={state.status !== "ready"}>
+          <button
+            type="button"
+            aria-label={`Rerun smoke verification: ${report.status}; ${Object.values(report.checks).filter(Boolean).length}/${Object.keys(report.checks).length} checks`}
+            onClick={() => void rerun()}
+            disabled={state.status !== "ready"}
+          >
             Rerun
           </button>
         </div>
@@ -218,6 +225,7 @@ async function runEffectsSmoke(map: KairosMap): Promise<{
   report: SmokeReport;
 }> {
   map.effects.clear();
+  map.operations.clearFinished();
   const baseline = captureCounts(map);
   setCamera(map);
 
@@ -285,6 +293,7 @@ async function runEffectsSmoke(map: KairosMap): Promise<{
     restoredEffects.filter((effect) => effect.group === "particle").length === 1;
   checks.restoreShow = map.effects.get("snow-1")?.show === false;
   checks.restoreRuntimeCount = restored.runtimeObjects === expectedTypes.length;
+  Object.assign(checks, await runOperationChecks(map, restored));
 
   return {
     snapshot,
@@ -297,6 +306,146 @@ async function runEffectsSmoke(map: KairosMap): Promise<{
       error: Object.values(checks).every(Boolean) ? undefined : "One or more smoke checks failed."
     }
   };
+}
+
+async function runOperationChecks(
+  map: KairosMap,
+  baseline: SmokeCounts
+): Promise<Record<string, boolean>> {
+  const effectsLoadId = "browser-effects-load";
+  let runningProgressObserved = false;
+  const offEffectsLoad = map.operations.on("change", (event) => {
+    const operation = event.data;
+    if (
+      operation.id === effectsLoadId &&
+      operation.status === "running" &&
+      (operation.progress ?? 0) > 0 &&
+      (operation.progress ?? 0) < 1 &&
+      Boolean(operation.phase)
+    ) {
+      runningProgressObserved = true;
+    }
+  });
+  try {
+    await map.effects.load(map.effects.toJSON(), {
+      clear: true,
+      operationId: effectsLoadId
+    });
+  } finally {
+    offEffectsLoad();
+  }
+  const afterEffectsLoad = captureCounts(map);
+
+  const delayedType = "browser-delayed-material";
+  let markStarted!: () => void;
+  let resolveMaterial!: (material: Material) => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const delayedMaterial = new Promise<Material>((resolve) => {
+    resolveMaterial = resolve;
+  });
+  map.materials.register({
+    type: delayedType,
+    targets: ["primitive"],
+    createMaterial: async () => {
+      markStarted();
+      return delayedMaterial;
+    }
+  });
+
+  const canceledId = "browser-effect-cancel";
+  const canceledEffect = "browser-canceled-effect";
+  const canceledPromise = map.effects.add(
+    {
+      id: canceledEffect,
+      type: "pulse-circle",
+      position: Cartesian3.fromDegrees(114.17, 22.3),
+      radius: 100,
+      material: { type: delayedType, options: {} }
+    },
+    { operationId: canceledId }
+  );
+  await started;
+  const cancelAccepted = map.operations.cancel(canceledId);
+  let canceledRejected = false;
+  try {
+    await canceledPromise;
+  } catch (error) {
+    canceledRejected = isOperationCanceledError(error);
+  }
+
+  const lateMaterial = Material.fromType(Material.ColorType);
+  resolveMaterial(lateMaterial);
+  await waitForFrames(2);
+  map.materials.unregister(delayedType);
+
+  const failureType = "browser-failing-material";
+  map.materials.register({
+    type: failureType,
+    targets: ["primitive"],
+    createMaterial: async () => {
+      throw new Error("browser operation failure");
+    }
+  });
+  const failedId = "browser-effect-failure";
+  let failureRejected = false;
+  try {
+    await map.effects.add(
+      {
+        id: "browser-failed-effect",
+        type: "pulse-circle",
+        position: Cartesian3.fromDegrees(114.17, 22.3),
+        radius: 100,
+        material: { type: failureType, options: {} }
+      },
+      { operationId: failedId }
+    );
+  } catch (error) {
+    failureRejected = error instanceof Error && error.message === "browser operation failure";
+  }
+  map.materials.unregister(failureType);
+
+  const successful = map.operations.list({ status: "succeeded" });
+  const operationCounts = map.performance.getStats();
+  const after = captureCounts(map);
+  return {
+    operationsTracked:
+      successful.some((operation) => operation.kind === "effects.add") &&
+      successful.some((operation) => operation.kind === "effects.update") &&
+      successful.some((operation) => operation.kind === "effects.load") &&
+      successful.some((operation) => operation.kind === "scene.load"),
+    independentEffectsLoadSucceeded:
+      map.operations.get(effectsLoadId)?.status === "succeeded" &&
+      afterEffectsLoad.effects === baseline.effects &&
+      afterEffectsLoad.runtimeObjects === baseline.runtimeObjects,
+    runningProgressObserved,
+    operationProgressComplete: successful.every((operation) => operation.progress === 1),
+    sceneLoadUsesOneParent:
+      map.operations.list({ kind: "scene.load" }).length === 1 &&
+      map.operations.list({ kind: "effects.load" }).length === 1 &&
+      map.operations.get(effectsLoadId)?.kind === "effects.load",
+    cancelAccepted,
+    canceledRejected,
+    canceledState: map.operations.get(canceledId)?.status === "canceled",
+    canceledRuntimeCleaned:
+      map.effects.get(canceledEffect) === undefined &&
+      after.effects === baseline.effects &&
+      after.runtimeObjects === baseline.runtimeObjects &&
+      lateMaterial.isDestroyed(),
+    failureRejected,
+    failedState:
+      map.operations.get(failedId)?.status === "failed" &&
+      map.operations.get(failedId)?.error?.message === "browser operation failure",
+    operationPerformanceCounts:
+      operationCounts.activeOperationCount === 0 && operationCounts.failedOperationCount === 1
+  };
+}
+
+async function waitForFrames(count: number): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  }
 }
 
 async function restoreSnapshot(map: KairosMap, snapshot: SceneSnapshot): Promise<void> {

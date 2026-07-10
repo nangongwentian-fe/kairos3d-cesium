@@ -73,6 +73,17 @@ function createMapMock(records: ResultRecord[] = [], overlayCount = 0) {
       ],
       getRuntimeObjectCount: () => 3,
       getAnimatedCount: () => 2
+    },
+    operations: {
+      list: (query?: { status?: string }) => {
+        if (query?.status === "running") {
+          return [{ id: "running-1" }];
+        }
+        if (query?.status === "failed") {
+          return [{ id: "failed-1" }, { id: "failed-2" }];
+        }
+        return [];
+      }
     }
   } as unknown as KairosMap;
 }
@@ -100,6 +111,8 @@ describe("PerformanceManager", () => {
     expect(stats.effectCount).toBe(2);
     expect(stats.effectRuntimeObjectCount).toBe(3);
     expect(stats.animatedEffectCount).toBe(2);
+    expect(stats.activeOperationCount).toBe(1);
+    expect(stats.failedOperationCount).toBe(2);
     expect(stats.resultBySource.draw).toMatchObject({
       count: 1,
       entityCount: 1,

@@ -1,5 +1,6 @@
 import type { KairosMap } from "../core";
 import { Evented } from "../core";
+import { runOrReuseOperation } from "../operations/manager";
 import { registerDefaultLayerFactories } from "./defaults";
 import { layerRegistry, type LayerRegistry } from "./registry";
 import type { LayerAdapter, LayerConfig, LayerLoadOptions, LayerState } from "./types";
@@ -29,10 +30,16 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   async add(config: LayerConfig): Promise<LayerAdapter> {
     const layer = await this.registry.create(config);
     if (this.layers.has(layer.id)) {
+      layer.destroy();
       throw new Error(`Layer id "${layer.id}" already exists.`);
     }
 
-    await layer.addTo(this.map);
+    try {
+      await layer.addTo(this.map);
+    } catch (error) {
+      layer.destroy();
+      throw error;
+    }
     this.layers.set(layer.id, layer);
     if (!layer.getState) {
       this.orderOverrides.set(layer.id, getConfigOrder(config));
@@ -123,27 +130,49 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   }
 
   async load(configs: LayerConfig[], options: LayerLoadOptions = {}): Promise<LayerAdapter[]> {
-    if (options.clear) {
-      this.clear();
-    }
+    return runOrReuseOperation(
+      this.map.operations,
+      { kind: "layers.load", label: "Load layers" },
+      options,
+      async (context) => {
+        context.throwIfAborted();
+        if (options.clear) {
+          this.clear();
+        }
 
-    const layers: LayerAdapter[] = [];
-    try {
-      for (const config of configs) {
-        const nextConfig = options.flyTo === undefined
-          ? config
-          : { ...config, flyTo: options.flyTo };
-        layers.push(await this.add(nextConfig));
-      }
-    } catch (error) {
-      for (const layer of [...layers].reverse()) {
-        this.remove(layer.id);
-      }
-      throw error;
-    }
+        const layers: LayerAdapter[] = [];
+        try {
+          if (configs.length === 0) {
+            context.reportProgress(1, "layers");
+            context.throwIfAborted();
+          }
+          for (let index = 0; index < configs.length; index += 1) {
+            context.throwIfAborted();
+            const config = configs[index];
+            const nextConfig = options.flyTo === undefined
+              ? config
+              : { ...config, flyTo: options.flyTo };
+            const layer = await this.add(nextConfig);
+            layers.push(layer);
+            context.throwIfAborted();
+            context.reportProgress((index + 1) / configs.length, "layers");
+            context.throwIfAborted();
+          }
 
-    this.emit("load", layers);
-    return layers;
+          context.throwIfAborted();
+          this.emit("load", layers);
+          context.throwIfAborted();
+          return layers;
+        } catch (error) {
+          for (const layer of [...layers].reverse()) {
+            if (this.layers.get(layer.id) === layer) {
+              this.remove(layer.id);
+            }
+          }
+          throw error;
+        }
+      }
+    );
   }
 
   remove(id: string): boolean {

@@ -56,6 +56,12 @@ export default defineConfig({
         replacement: fileURLToPath(
           new URL("../../kairos3d-cesium/src/scene/index.ts", import.meta.url)
         )
+      },
+      {
+        find: "@kairos3d/cesium/operations",
+        replacement: fileURLToPath(
+          new URL("../../kairos3d-cesium/src/operations/index.ts", import.meta.url)
+        )
       }
     ]
   },

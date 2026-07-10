@@ -72,6 +72,7 @@ The SDK is organized as small TypeScript modules instead of a global platform ob
 | `@kairos3d/cesium/picking` | Entity, 3D Tiles, imagery, and primitive picking with selection state. |
 | `@kairos3d/cesium/materials` | Public-API material registry and factories for Entity properties and Primitive fabric materials. |
 | `@kairos3d/cesium/effects` | SDK-managed geometry, particle, and weather effects with lifecycle and snapshot support. |
+| `@kairos3d/cesium/operations` | Runtime operation status, progress, cancellation, and structured failure diagnostics. |
 | `@kairos3d/cesium/style` | Shared symbol styles, style defaults, presets, and JSON-safe color serialization. |
 | `@kairos3d/cesium/height` | Height modes, terrain sampling, clamp-to-ground helpers, and surface distance helpers. |
 | `@kairos3d/cesium/results` | Aggregated SDK-managed result listing, lookup, removal, clearing, and result events. |
@@ -280,6 +281,34 @@ map.effects.setGroupShow("traffic", false);
 
 Built-in Entity materials cover color, image, grid, stripe, checkerboard, polyline dash, and polyline glow. Primitive materials cover color, image, water, flow, radial wave, and radar scan. Effects cover flow line/wall, pulse circle, radar scan, water surface, particles, rain, snow, and fog.
 
+## Operations And Loading
+
+Long-running layer, effect, scene, visibility, profile, and terrain work is exposed through `map.operations` without changing the existing API return values.
+
+```ts
+import { isOperationCanceledError } from "@kairos3d/cesium/operations";
+
+const controller = new AbortController();
+const loading = map.layers.load(configs, {
+  clear: true,
+  signal: controller.signal,
+  operationId: "load-city"
+});
+
+map.operations.on("change", (event) => {
+  console.log(event.data.status, event.data.progress, event.data.phase);
+});
+
+map.operations.cancel("load-city");
+try {
+  await loading;
+} catch (error) {
+  if (!isOperationCanceledError(error)) throw error;
+}
+```
+
+Cancellation prevents late scene commits where the underlying Cesium promise cannot be aborted. Composite scene recovery is not transactional in M9; completed phases are not rolled back. See [Operations And Loading](apps/docs/guide/operations.md).
+
 ## Scene State
 
 Scene state stores `camera + layers + bookmarks` by default. It can also include SDK-managed results, primitive overlays, and effects when a business app needs to save a complete working scene.
@@ -343,7 +372,7 @@ map.results.clear({ source: ["measure", "visibility"] });
 
 ## Performance And Primitive Planning
 
-`map.performance` provides runtime stats for SDK-managed results, viewer entities, result Primitive runtimes, layer runtime objects, effects, effect runtime objects, animated effects, and simple budget warnings. It does not replace renderers by itself; it identifies where a Primitive renderer is likely to matter.
+`map.performance` provides runtime stats for SDK-managed results, viewer entities, result Primitive runtimes, layer runtime objects, effects, effect runtime objects, animated effects, active operations, failed operations, and simple budget warnings. The operation fields are exposed as `activeOperationCount` and `failedOperationCount`. It does not replace renderers by itself; it identifies where a Primitive renderer is likely to matter.
 
 ```ts
 map.performance.setBudget({

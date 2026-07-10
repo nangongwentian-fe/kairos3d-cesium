@@ -1,6 +1,7 @@
 import type { Cartesian3 } from "cesium";
 import type { SerializablePosition } from "../core/serialization";
 import type { MaterialColor, PrimitiveMaterialDescriptor } from "../materials";
+import type { AsyncOperationOptions } from "../operations";
 import type { ColorLike } from "../style";
 
 export type EffectType =
@@ -148,7 +149,7 @@ export interface EffectSnapshot {
   updatedAt?: string;
 }
 
-export interface EffectLoadOptions {
+export interface EffectLoadOptions extends AsyncOperationOptions {
   clear?: boolean;
 }
 

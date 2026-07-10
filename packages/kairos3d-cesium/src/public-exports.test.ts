@@ -12,6 +12,7 @@ const expectedExports = [
   "./layers",
   "./materials",
   "./effects",
+  "./operations",
   "./overlays",
   "./performance",
   "./persistence",

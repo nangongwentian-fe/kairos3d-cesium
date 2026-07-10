@@ -10,7 +10,8 @@ This page records the current development order after the first complete SDK ver
 | P0 | Primitive renderer integration | First stage complete for draw polyline/polygon and distance/area measurement; continue expanding only where it pays off. |
 | P0 | Runtime snapshot expansion | Complete: Primitive overlays participate in scene snapshots when requested. |
 | P0 | Materials and effects core | M8 complete: public-API materials and nine managed geometry, particle, and weather effects are available. |
-| P0 | Operations and loading core | M9 next: unify cancellation, progress, errors, and late-commit protection across async SDK work. |
+| P0 | Operations and loading core | M9 complete: cancellation, progress, errors, retention, and late-commit protection share one runtime contract. |
+| P0 | Transactional scene recovery | M10 next: add prepare/commit/rollback and snapshot-version migration. |
 | P1 | Analysis precision upgrades | Complete first pass: terrain triangulation and scene-aware visibility are available. |
 | P1 | Interactive clipping and editing polish | Complete first pass: clipping results have programmatic edit/update/cancel lifecycle. |
 | P2 | UI and persistence adapters | Complete first pass: examples helper adapters and optional snapshot storage adapters exist. |
@@ -18,7 +19,7 @@ This page records the current development order after the first complete SDK ver
 
 ## Current Decision
 
-The next milestone is M9 Operations / Loading Core. It should add one operation lifecycle for async layers, effects, scene recovery, and analysis without changing existing result shapes or moving effects into result ownership.
+The next milestone is M10 Transactional Scene Recovery. It should build prepare/commit/rollback and snapshot-version migration on the M9 operation lifecycle without serializing runtime operation records.
 
 | Lowered item | Current priority | Notes |
 | --- | --- | --- |
@@ -40,8 +41,8 @@ The next milestone is M9 Operations / Loading Core. It should add one operation 
 | 7 | Optional UI adapters | Complete first pass: examples consume pick/profile/snapshot helper adapters outside SDK core. |
 | 8 | Persistence adapters | Complete first pass: memory and localStorage-compatible snapshot storage adapters are available. |
 | 9 | Materials and effects core | M8 complete: Entity/Primitive material factories, nine effect types, data-only effect snapshots, and effect performance counters are available. |
-| 10 | Operations and loading core | M9 next: add cancellation, progress, errors, retention, and destroy-time late-commit guards to async SDK APIs. |
-| 11 | Transactional scene recovery | M10 planned: prepare/commit/rollback and snapshot-version migration after operation contracts are stable. |
+| 10 | Operations and loading core | M9 complete: async layers, effects, scene recovery, visibility, profile, and terrain work share cancellation and progress contracts. |
+| 11 | Transactional scene recovery | M10 next: prepare/commit/rollback and snapshot-version migration after operation contracts are stable. |
 | 12 | Release/npm/deploy hardening | Remaining: only do full publish/deploy work when release priority is raised. |
 
 ## Guardrails

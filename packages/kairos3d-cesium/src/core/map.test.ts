@@ -15,6 +15,7 @@ describe("KairosMap", () => {
     const map = new KairosMap(viewer);
     const destroyListener = vi.fn();
     const managerDestroySpies = [
+      vi.spyOn(map.operations, "destroy").mockImplementation(() => undefined),
       vi.spyOn(map.effects, "destroy").mockImplementation(() => undefined),
       vi.spyOn(map.materials, "destroy").mockImplementation(() => undefined),
       vi.spyOn(map.primitives, "destroy").mockImplementation(() => undefined),
@@ -41,7 +42,11 @@ describe("KairosMap", () => {
     expect(destroyListener).toHaveBeenCalledOnce();
     expect(map.isDestroyed()).toBe(true);
 
-    const [effectsDestroy, materialsDestroy, primitivesDestroy] = managerDestroySpies;
+    const [operationsDestroy, effectsDestroy, materialsDestroy, primitivesDestroy] =
+      managerDestroySpies;
+    expect(operationsDestroy.mock.invocationCallOrder[0]).toBeLessThan(
+      effectsDestroy.mock.invocationCallOrder[0]
+    );
     expect(effectsDestroy.mock.invocationCallOrder[0]).toBeLessThan(
       materialsDestroy.mock.invocationCallOrder[0]
     );

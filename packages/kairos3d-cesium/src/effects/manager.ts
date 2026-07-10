@@ -8,6 +8,11 @@ import {
   serializePositions
 } from "../core/serialization";
 import { Evented } from "../core/events";
+import {
+  runOrReuseOperation,
+  type OperationContext
+} from "../operations/manager";
+import type { AsyncOperationOptions } from "../operations/types";
 import { parseColorLike, serializeColor } from "../style";
 import type { ColorLike } from "../style";
 import {
@@ -39,6 +44,11 @@ interface PreparedEffect {
   updatedAt?: Date;
 }
 
+interface PreparedLoadResult {
+  loaded: EffectInstance[];
+  removed: EffectInstance[];
+}
+
 export class EffectManager extends Evented<EffectManagerEvents> {
   private readonly effects = new Map<string, ManagedEffect>();
   private readonly pendingIds = new Set<string>();
@@ -54,7 +64,10 @@ export class EffectManager extends Evented<EffectManagerEvents> {
     super();
   }
 
-  async add(config: EffectConfig): Promise<EffectInstance> {
+  async add(
+    config: EffectConfig,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<EffectInstance> {
     this.assertActive();
     if (this.effects.has(config.id)) {
       throw new Error(`Effect "${config.id}" already exists.`);
@@ -62,24 +75,69 @@ export class EffectManager extends Evented<EffectManagerEvents> {
     const normalized = this.normalizeConfig(config);
     this.validateConfig(normalized);
     const operation = this.beginIdOperation(normalized.id);
+    let taskStarted = false;
+    const promise = runOrReuseOperation(
+      this.map.operations,
+      { kind: "effects.add", label: `Add effect ${config.id}` },
+      operationOptions,
+      async (context) => {
+        taskStarted = true;
+        try {
+          return await this.addWithOperation(normalized, operation, context);
+        } finally {
+          this.pendingIds.delete(normalized.id);
+        }
+      }
+    );
+    void promise.catch(() => {
+      if (!taskStarted) {
+        this.pendingIds.delete(normalized.id);
+      }
+    });
+    const result = await promise;
+    this.emit("add", result);
+    return result;
+  }
+
+  private async addWithOperation(
+    normalized: EffectConfig,
+    operation: { id: string; version: number; epoch: number },
+    context: OperationContext
+  ): Promise<EffectInstance> {
+    context.reportProgress(0.1, "validate");
+    context.throwIfAborted();
+    let runtime: EffectRuntime | undefined;
+    let committed = false;
     try {
-      const runtime = await this.prepareRuntime(normalized);
-      this.assertIdOperationCurrent(operation, runtime);
+      runtime = await this.prepareRuntime(normalized);
+      context.throwIfAborted();
+      context.reportProgress(0.8, "prepare");
+      context.throwIfAborted();
+      context.reportProgress(0.95, "commit");
+      context.throwIfAborted();
+      this.assertIdOperationCurrent(operation);
       const managed = this.commitPrepared({
         config: normalized,
         runtime,
         createdAt: new Date()
       });
+      committed = true;
       this.markMutation(normalized.id);
       const result = this.cloneInstance(managed.instance);
-      this.emit("add", result);
       return result;
-    } finally {
-      this.pendingIds.delete(normalized.id);
+    } catch (error) {
+      if (runtime && !committed) {
+        runtime.destroy();
+      }
+      throw error;
     }
   }
 
-  async update(id: string, patch: EffectUpdateOptions): Promise<EffectInstance> {
+  async update(
+    id: string,
+    patch: EffectUpdateOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<EffectInstance> {
     this.assertActive();
     const current = this.requireEffect(id);
     const config = this.normalizeConfig({
@@ -90,16 +148,51 @@ export class EffectManager extends Evented<EffectManagerEvents> {
     } as EffectConfig);
     this.validateConfig(config);
     const operation = this.beginIdOperation(id);
-    try {
-      const runtime = await this.prepareRuntime(config);
-      this.assertIdOperationCurrent(operation, runtime, current);
-      try {
-        runtime.setShow(config.show ?? true);
-        runtime.attach();
-      } catch (error) {
-        runtime.destroy();
-        throw error;
+    let taskStarted = false;
+    const promise = runOrReuseOperation(
+      this.map.operations,
+      { kind: "effects.update", label: `Update effect ${id}` },
+      operationOptions,
+      async (context) => {
+        taskStarted = true;
+        try {
+          return await this.updateWithOperation(current, config, operation, context);
+        } finally {
+          this.pendingIds.delete(id);
+        }
       }
+    );
+    void promise.catch(() => {
+      if (!taskStarted) {
+        this.pendingIds.delete(id);
+      }
+    });
+    const result = await promise;
+    this.emit("update", result);
+    return result;
+  }
+
+  private async updateWithOperation(
+    current: ManagedEffect,
+    config: EffectConfig,
+    operation: { id: string; version: number; epoch: number },
+    context: OperationContext
+  ): Promise<EffectInstance> {
+    const id = current.instance.id;
+    context.reportProgress(0.1, "validate");
+    context.throwIfAborted();
+    let runtime: EffectRuntime | undefined;
+    let committed = false;
+    try {
+      runtime = await this.prepareRuntime(config);
+      context.throwIfAborted();
+      context.reportProgress(0.8, "prepare");
+      context.throwIfAborted();
+      context.reportProgress(0.95, "commit");
+      context.throwIfAborted();
+      this.assertIdOperationCurrent(operation, current);
+      runtime.setShow(config.show ?? true);
+      runtime.attach();
 
       current.runtime.destroy();
       const instance = this.createInstance(
@@ -109,14 +202,17 @@ export class EffectManager extends Evented<EffectManagerEvents> {
         new Date()
       );
       this.effects.set(id, { instance, runtime });
+      committed = true;
       this.markMutation(id);
       this.syncTicker();
       this.requestRender();
       const result = this.cloneInstance(instance);
-      this.emit("update", result);
       return result;
-    } finally {
-      this.pendingIds.delete(id);
+    } catch (error) {
+      if (runtime && !committed) {
+        runtime.destroy();
+      }
+      throw error;
     }
   }
 
@@ -185,6 +281,11 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   clear(): void {
+    const removed = this.clearManagedEffects();
+    this.emit("clear", removed);
+  }
+
+  private clearManagedEffects(): EffectInstance[] {
     this.clearEpoch += 1;
     this.stateRevision += 1;
     const removed = this.list();
@@ -194,7 +295,7 @@ export class EffectManager extends Evented<EffectManagerEvents> {
     this.effects.clear();
     this.syncTicker();
     this.requestRender();
-    this.emit("clear", removed);
+    return removed;
   }
 
   toJSON(): EffectSnapshot[] {
@@ -248,59 +349,108 @@ export class EffectManager extends Evented<EffectManagerEvents> {
       }
     }
 
-    const prepared: PreparedEffect[] = [];
     const revision = this.stateRevision;
     const epoch = this.clearEpoch;
     this.loadPending = true;
-    try {
-      try {
-        for (const snapshot of snapshots) {
-          const config = this.normalizeConfig(deserializeSnapshotConfig(snapshot));
-          prepared.push({
-            config,
-            runtime: await this.prepareRuntime(config),
-            createdAt: parseSnapshotDate(snapshot.createdAt, "Effect createdAt"),
-            updatedAt: snapshot.updatedAt
-              ? parseSnapshotDate(snapshot.updatedAt, "Effect updatedAt")
-              : undefined
-          });
-          this.assertLoadCurrent(revision, epoch, prepared);
+    let taskStarted = false;
+    const promise = runOrReuseOperation(
+      this.map.operations,
+      { kind: "effects.load", label: "Load effects" },
+      options,
+      async (context) => {
+        taskStarted = true;
+        try {
+          return await this.loadWithOperation(
+            snapshots,
+            options,
+            revision,
+            epoch,
+            context
+          );
+        } finally {
+          this.loadPending = false;
         }
-        this.assertLoadCurrent(revision, epoch, prepared);
-        for (const item of prepared) {
-          item.runtime.setShow(item.config.show ?? true);
-          item.runtime.attach();
-        }
-      } catch (error) {
-        for (const item of prepared) {
-          item.runtime.destroy();
-        }
-        throw error;
       }
-
-      if (options.clear) {
-        this.clear();
+    );
+    void promise.catch(() => {
+      if (!taskStarted) {
+        this.loadPending = false;
       }
-      const loaded = prepared.map((item) => {
-        const instance = this.createInstance(
-          item.config,
-          item.runtime,
-          item.createdAt,
-          item.updatedAt
-        );
-        this.effects.set(instance.id, { instance, runtime: item.runtime });
-        this.invalidateId(instance.id);
-        return instance;
-      });
-      this.stateRevision += 1;
-      this.syncTicker();
-      this.requestRender();
-      const result = loaded.map((instance) => this.cloneInstance(instance));
-      this.emit("load", result);
-      return result;
-    } finally {
-      this.loadPending = false;
+    });
+    const result = await promise;
+    if (options.clear) {
+      this.emit("clear", result.removed);
     }
+    this.emit("load", result.loaded);
+    return result.loaded;
+  }
+
+  private async loadWithOperation(
+    snapshots: EffectSnapshot[],
+    options: EffectLoadOptions,
+    revision: number,
+    epoch: number,
+    context: OperationContext
+  ): Promise<PreparedLoadResult> {
+    context.reportProgress(0.1, "validate");
+    context.throwIfAborted();
+
+    const prepared: PreparedEffect[] = [];
+    try {
+      for (const [index, snapshot] of snapshots.entries()) {
+        const config = this.normalizeConfig(deserializeSnapshotConfig(snapshot));
+        prepared.push({
+          config,
+          runtime: await this.prepareRuntime(config),
+          createdAt: parseSnapshotDate(snapshot.createdAt, "Effect createdAt"),
+          updatedAt: snapshot.updatedAt
+            ? parseSnapshotDate(snapshot.updatedAt, "Effect updatedAt")
+            : undefined
+        });
+        context.throwIfAborted();
+        context.reportProgress(
+          0.1 + (0.75 * (index + 1)) / Math.max(snapshots.length, 1),
+          "prepare"
+        );
+        context.throwIfAborted();
+        this.assertLoadCurrent(revision, epoch, prepared);
+      }
+      context.throwIfAborted();
+      context.reportProgress(0.9, "attach");
+      context.throwIfAborted();
+      this.assertLoadCurrent(revision, epoch, prepared);
+      for (const item of prepared) {
+        item.runtime.setShow(item.config.show ?? true);
+        item.runtime.attach();
+      }
+      context.throwIfAborted();
+      context.reportProgress(0.95, "commit");
+      context.throwIfAborted();
+      this.assertLoadCurrent(revision, epoch, prepared);
+    } catch (error) {
+      for (const item of prepared) {
+        item.runtime.destroy();
+      }
+      throw error;
+    }
+
+    const removed = options.clear ? this.clearManagedEffects() : [];
+    const loaded = prepared.map((item) => {
+      const instance = this.createInstance(
+        item.config,
+        item.runtime,
+        item.createdAt,
+        item.updatedAt
+      );
+      this.effects.set(instance.id, { instance, runtime: item.runtime });
+      this.invalidateId(instance.id);
+      return instance;
+    });
+    this.stateRevision += 1;
+    this.syncTicker();
+    this.requestRender();
+    const result = loaded.map((instance) => this.cloneInstance(instance));
+    return { loaded: result, removed };
   }
 
   destroy(): void {
@@ -326,13 +476,8 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   private commitPrepared(item: PreparedEffect): ManagedEffect {
-    try {
-      item.runtime.setShow(item.config.show ?? true);
-      item.runtime.attach();
-    } catch (error) {
-      item.runtime.destroy();
-      throw error;
-    }
+    item.runtime.setShow(item.config.show ?? true);
+    item.runtime.attach();
     const instance = this.createInstance(
       item.config,
       item.runtime,
@@ -557,7 +702,6 @@ export class EffectManager extends Evented<EffectManagerEvents> {
 
   private assertIdOperationCurrent(
     operation: { id: string; version: number; epoch: number },
-    runtime: EffectRuntime,
     expected?: ManagedEffect
   ): void {
     const current = this.effects.get(operation.id);
@@ -568,7 +712,6 @@ export class EffectManager extends Evented<EffectManagerEvents> {
       (expected !== undefined && current !== expected) ||
       (expected === undefined && current !== undefined)
     ) {
-      runtime.destroy();
       throw new Error(`Effect operation for "${operation.id}" was superseded.`);
     }
   }

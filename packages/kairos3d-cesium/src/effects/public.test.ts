@@ -1,5 +1,6 @@
 import { expectTypeOf, test } from "vitest";
 import type { MaterialDefinition } from "../materials";
+import type { AsyncOperationOptions } from "../operations";
 import {
   EffectManager,
   type EffectConfig,
@@ -22,6 +23,12 @@ test("exports stable effects public types", () => {
     | "fog"
   >();
   expectTypeOf<EffectManager["add"]>().parameter(0).toEqualTypeOf<EffectConfig>();
+  expectTypeOf<EffectManager["add"]>()
+    .parameter(1)
+    .toEqualTypeOf<AsyncOperationOptions | undefined>();
+  expectTypeOf<EffectManager["update"]>()
+    .parameter(2)
+    .toEqualTypeOf<AsyncOperationOptions | undefined>();
   expectTypeOf<EffectManager["add"]>().returns.resolves.toEqualTypeOf<EffectInstance>();
   expectTypeOf<EffectManager["toJSON"]>().returns.toEqualTypeOf<EffectSnapshot[]>();
 

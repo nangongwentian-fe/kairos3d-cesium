@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { OperationCanceledError, OperationManager } from "../operations";
 import { LayerManager } from "./manager";
 import { LayerRegistry } from "./registry";
 import type { LayerAdapter, LayerConfig, LayerState, XyzLayerConfig } from "./types";
@@ -81,6 +82,7 @@ function createRegistry(created: MemoryLayer[]): LayerRegistry {
 
 function createMapMock() {
   return {
+    operations: new OperationManager(),
     viewer: {
       flyTo: vi.fn(async () => true)
     }
@@ -216,6 +218,152 @@ describe("LayerManager", () => {
 
     expect(created[0].destroyed).toBe(true);
     expect(manager.list()).toEqual([]);
+  });
+
+  it("reports batch progress through one layers operation", async () => {
+    const created: MemoryLayer[] = [];
+    const map = createMapMock();
+    const manager = new LayerManager(map, createRegistry(created));
+    const changes: Array<{ progress?: number; status: string }> = [];
+    map.operations.on("change", (event) => {
+      changes.push(event.data);
+    });
+
+    await manager.load(
+      [
+        {
+          id: "base",
+          type: "xyz",
+          url: "https://example.com/base/{z}/{x}/{y}.png"
+        },
+        {
+          id: "labels",
+          type: "xyz",
+          url: "https://example.com/labels/{z}/{x}/{y}.png"
+        }
+      ],
+      { operationId: "load-layers" }
+    );
+
+    expect(map.operations.get("load-layers")).toMatchObject({
+      kind: "layers.load",
+      status: "succeeded",
+      progress: 1
+    });
+    expect(changes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "running", progress: 0.5 }),
+        expect.objectContaining({ status: "running", progress: 1 })
+      ])
+    );
+  });
+
+  it("cancels a batch and removes only layers added by that load", async () => {
+    const created: MemoryLayer[] = [];
+    const map = createMapMock();
+    const registry = createRegistry(created);
+    let release!: () => void;
+    const pendingAdd = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    registry.unregister("xyz");
+    registry.register<XyzLayerConfig>("xyz", (config) => {
+      const layer = new MemoryLayer(config);
+      if (config.id === "new") {
+        layer.addTo.mockImplementation(() => pendingAdd);
+      }
+      created.push(layer);
+      return layer;
+    });
+    const manager = new LayerManager(map, registry);
+    await manager.add({
+      id: "old",
+      type: "xyz",
+      url: "https://example.com/old/{z}/{x}/{y}.png"
+    });
+
+    const loading = manager.load(
+      [
+        {
+          id: "new",
+          type: "xyz",
+          url: "https://example.com/new/{z}/{x}/{y}.png"
+        }
+      ],
+      { clear: true, operationId: "cancel-layers" }
+    );
+    await vi.waitFor(() => expect(created).toHaveLength(2));
+
+    expect(map.operations.cancel("cancel-layers")).toBe(true);
+    await expect(loading).rejects.toBeInstanceOf(OperationCanceledError);
+    release();
+    await vi.waitFor(() => expect(created[1].destroyed).toBe(true));
+
+    expect(manager.list()).toEqual([]);
+    expect(created[0].destroyed).toBe(true);
+    expect(created[1].destroyed).toBe(true);
+    expect(map.operations.get("cancel-layers")?.status).toBe("canceled");
+  });
+
+  it("cleans up when a final progress listener cancels the operation", async () => {
+    const created: MemoryLayer[] = [];
+    const map = createMapMock();
+    const manager = new LayerManager(map, createRegistry(created));
+    const loadListener = vi.fn();
+    manager.on("load", loadListener);
+    map.operations.on("change", (event) => {
+      if (
+        event.data.id === "cancel-final-progress" &&
+        event.data.status === "running" &&
+        event.data.progress === 1
+      ) {
+        map.operations.cancel(event.data.id);
+      }
+    });
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "base",
+            type: "xyz",
+            url: "https://example.com/base/{z}/{x}/{y}.png"
+          }
+        ],
+        { operationId: "cancel-final-progress" }
+      )
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(manager.list()).toEqual([]);
+    expect(created[0].destroyed).toBe(true);
+    expect(loadListener).not.toHaveBeenCalled();
+  });
+
+  it("cleans up when a load listener cancels the operation", async () => {
+    const created: MemoryLayer[] = [];
+    const map = createMapMock();
+    const manager = new LayerManager(map, createRegistry(created));
+    const loadListener = vi.fn(() => {
+      map.operations.cancel("cancel-load-event");
+    });
+    manager.on("load", loadListener);
+
+    await expect(
+      manager.load(
+        [
+          {
+            id: "base",
+            type: "xyz",
+            url: "https://example.com/base/{z}/{x}/{y}.png"
+          }
+        ],
+        { operationId: "cancel-load-event" }
+      )
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(loadListener).toHaveBeenCalledOnce();
+    expect(manager.list()).toEqual([]);
+    expect(created[0].destroyed).toBe(true);
   });
 
   it("flies to a managed layer and validates inputs", async () => {

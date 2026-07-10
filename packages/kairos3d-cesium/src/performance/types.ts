@@ -67,6 +67,8 @@ export interface PerformanceStats {
   effectCount: number;
   effectRuntimeObjectCount: number;
   animatedEffectCount: number;
+  activeOperationCount: number;
+  failedOperationCount: number;
   results: ResultPerformanceRecord[];
   resultBySource: Partial<Record<ResultSource, ResultPerformanceSummary>>;
   resultByType: Partial<Record<SDKManagedResult["type"], ResultPerformanceSummary>>;

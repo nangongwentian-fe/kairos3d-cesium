@@ -70,6 +70,8 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `EffectConfig` | Configuration union for the nine SDK-managed effect types. |
 | `EffectInstance` | Runtime effect state and owned Cesium runtime objects. |
 | `EffectSnapshot` | Data-only effect configuration used by effect and scene recovery. |
+| `OperationState` | Runtime status, progress, phase, and structured error for one async operation. |
+| `AsyncOperationOptions` | Optional abort signal and stable operation id accepted by tracked APIs. |
 | `ViewerContainer` | Container type accepted by `createViewer`. |
 | `ViewerOptions` | Options type accepted by `createViewer`. |
 
@@ -105,6 +107,7 @@ import type { CameraView, RuntimeResultsSnapshot, SceneSnapshot } from "@kairos3
 import type { PickResult, SelectionState } from "@kairos3d/cesium/picking";
 import type { MaterialDefinition, MaterialDescriptor } from "@kairos3d/cesium/materials";
 import type { EffectConfig, EffectInstance, EffectSnapshot } from "@kairos3d/cesium/effects";
+import type { AsyncOperationOptions, OperationState } from "@kairos3d/cesium/operations";
 import type { ResultSymbolStyle, SDKStyleDefaults } from "@kairos3d/cesium/style";
 import type { HeightMode, HeightOptions, HeightSample } from "@kairos3d/cesium/height";
 ```
@@ -338,6 +341,31 @@ map.effects.setGroupShow("traffic", true);
 
 Built-in material definitions cannot be replaced or unregistered. Custom definitions may be registered and removed through `map.materials`; register them before loading an effect snapshot that references them. `map.effects` owns its Cesium runtimes and does not add effects to `map.results`, picking, selection, or layer ownership.
 
+## Operations And Loading
+
+```ts
+import { isOperationCanceledError } from "@kairos3d/cesium/operations";
+
+const controller = new AbortController();
+const promise = map.analysis.profile.compute(
+  { positions, sampleCount: 128 },
+  { signal: controller.signal, operationId: "profile-main" }
+);
+
+map.operations.on("change", (event) => {
+  console.log(event.data);
+});
+
+map.operations.cancel("profile-main");
+try {
+  await promise;
+} catch (error) {
+  if (!isOperationCanceledError(error)) throw error;
+}
+```
+
+`map.operations` supports `get/list/cancel/cancelAll/clearFinished` and retains at most 100 finished records. Cancellation is cooperative: late Cesium results are discarded and temporary runtime objects are cleaned, but M9 does not roll back scene-load phases that already completed.
+
 ## Scene State
 
 ```ts
@@ -457,7 +485,7 @@ const candidates = map.performance.recommendPrimitiveCandidates({
 });
 ```
 
-`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, result Primitive runtime counts, layer runtime object counts, `effectCount`, `effectRuntimeObjectCount`, `animatedEffectCount`, and budget warnings. Primitive candidates are hints for renderer-specific work; results already using `renderMode: "primitive"` are skipped by candidate recommendations.
+`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, result Primitive runtime counts, layer runtime object counts, `effectCount`, `effectRuntimeObjectCount`, `animatedEffectCount`, `activeOperationCount`, `failedOperationCount`, and budget warnings. Primitive candidates are hints for renderer-specific work; results already using `renderMode: "primitive"` are skipped by candidate recommendations.
 
 ## Primitive Overlays
 
@@ -493,6 +521,7 @@ Draw polyline/polygon and distance/area measurement results can opt into Primiti
 | `picking` | Entity, GeoJSON, glTF, 3D Tiles, optional imagery feature picking, selection, and first-stage highlight. |
 | `materials` | Built-in and custom Entity/Primitive material definitions using public Cesium APIs. |
 | `effects` | Geometry, particle, and weather effects with transactional update, lifecycle cleanup, grouping, and data-only snapshots. |
+| `operations` | Runtime status, progress, cancellation, bounded history, and failure information for tracked async work. |
 | `style` | Shared color parsing, style defaults, presets, and SDK result symbol styles. |
 | `height` | Height mode normalization, terrain sampling, clamp helpers, and surface distance helpers. |
 | `results` | Aggregated SDK-managed result listing, lookup, cleanup, and events for business panels. |

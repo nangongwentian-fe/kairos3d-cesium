@@ -15,6 +15,11 @@ import {
 import type { Tool } from "../tools";
 import type { ResultSymbolStyle } from "../style";
 import {
+  runOrReuseOperation,
+  type OperationContext
+} from "../operations/manager";
+import type { AsyncOperationOptions } from "../operations/types";
+import {
   applyHeightOptionsToEntity,
   lineStyleWithHeight,
   serializeHeightOptions
@@ -341,37 +346,68 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
     return this.map.tools.start("analysis.visibility.pick", options);
   }
 
-  async compute(options: VisibilityComputeOptions): Promise<VisibilityResult> {
-    const [start, end] = options.height
-      ? await this.map.height.resolvePositions([options.start, options.end], options.height)
-      : [Cartesian3.clone(options.start), Cartesian3.clone(options.end)];
-    const mode = options.occlusionMode ?? "terrain";
-    let classification: VisibilityClassification = { visible: true };
+  compute(
+    options: VisibilityComputeOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<VisibilityResult> {
+    let renderedResult: VisibilityResult | undefined;
+    return runOrReuseOperation(
+      this.map.operations,
+      { kind: "analysis.visibility" },
+      operationOptions,
+      async (operation) => {
+        reportOperationProgress(operation, 0.05, "height");
+        const [start, end] = options.height
+          ? await this.map.height.resolvePositions([options.start, options.end], options.height)
+          : [Cartesian3.clone(options.start), Cartesian3.clone(options.end)];
+        operation.throwIfAborted();
+        const mode = options.occlusionMode ?? "terrain";
+        let classification: VisibilityClassification = { visible: true };
 
-    if (mode === "terrain" || mode === "terrain-and-scene") {
-      const samples = interpolateVisibilitySamples(start, end, options.sampleCount);
-      const ground = await sampleGroundCartographics(
-        this.map.viewer.terrainProvider,
-        samples.map((sample) => sample.cartographic)
-      );
-      classification = classifyVisibility(samples, ground, options.heightTolerance);
-    }
+        if (mode === "terrain" || mode === "terrain-and-scene") {
+          reportOperationProgress(operation, 0.25, "terrain-sampling");
+          const samples = interpolateVisibilitySamples(start, end, options.sampleCount);
+          const ground = await sampleGroundCartographics(
+            this.map.viewer.terrainProvider,
+            samples.map((sample) => sample.cartographic)
+          );
+          operation.throwIfAborted();
+          reportOperationProgress(operation, 0.6, "classify-terrain");
+          classification = classifyVisibility(samples, ground, options.heightTolerance);
+        }
 
-    if (mode === "scene" || mode === "terrain-and-scene") {
-      const sceneClassification = classifySceneVisibility(
-        this.map.viewer.scene,
-        start,
-        end,
-        options.exclude
-      );
-      classification =
-        mode === "terrain-and-scene"
-          ? chooseNearestVisibilityBlock(start, classification, sceneClassification)
-          : sceneClassification;
-    }
+        if (mode === "scene" || mode === "terrain-and-scene") {
+          reportOperationProgress(operation, 0.75, "classify-scene");
+          const sceneClassification = classifySceneVisibility(
+            this.map.viewer.scene,
+            start,
+            end,
+            options.exclude
+          );
+          classification =
+            mode === "terrain-and-scene"
+              ? chooseNearestVisibilityBlock(start, classification, sceneClassification)
+              : sceneClassification;
+        }
 
-    const result = this.createResult(options, classification, [start, end]);
-    return this.addResult(result);
+        reportOperationProgress(operation, 0.9, "render");
+        const result = this.createResult(options, classification, [start, end]);
+        renderedResult = result;
+        operation.throwIfAborted();
+        const added = this.addResult(result);
+        operation.throwIfAborted();
+        return added;
+      }
+    ).catch((error) => {
+      if (renderedResult) {
+        if (this.results.get(renderedResult.id) === renderedResult) {
+          this.remove(renderedResult.id);
+        } else {
+          removeEntities(this.map, renderedResult.entities);
+        }
+      }
+      throw error;
+    });
   }
 
   addResult(result: VisibilityResult): VisibilityResult {
@@ -589,34 +625,66 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
     return this.map.tools.start("analysis.profile.draw", options);
   }
 
-  async compute(options: ProfileComputeOptions): Promise<ProfileResult> {
-    const positions = options.height
-      ? await this.map.height.resolvePositions(options.positions, options.height)
-      : clonePositions(options.positions);
-    const interpolated = interpolateProfilePoints(positions, options.sampleCount);
-    const sampledCartographics = await sampleGroundCartographics(
-      this.map.viewer.terrainProvider,
-      interpolated.map((sample) => sample.cartographic)
-    );
-    const samples = createProfileSamples(interpolated, sampledCartographics);
-    const range = getProfileHeightRange(samples);
-    const style = this.map.styles.resolveProfileStyle(profileOptionsToStyle(options));
-    const entities = renderProfileEntities(this.map, samples, style, options.height);
-    const result: ProfileResult = {
-      id: createAnalysisId("profile"),
-      type: "profile",
-      positions,
-      samples,
-      totalDistance: samples[samples.length - 1]?.distance ?? 0,
-      minHeight: range.minHeight,
-      maxHeight: range.maxHeight,
-      entities,
-      createdAt: new Date(),
-      style,
-      height: serializeHeightOptions(options.height)
-    };
+  compute(
+    options: ProfileComputeOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<ProfileResult> {
+    let renderedResult: ProfileResult | undefined;
+    return runOrReuseOperation(
+      this.map.operations,
+      { kind: "analysis.profile" },
+      operationOptions,
+      async (operation) => {
+        reportOperationProgress(operation, 0.05, "height");
+        const positions = options.height
+          ? await this.map.height.resolvePositions(options.positions, options.height)
+          : clonePositions(options.positions);
+        operation.throwIfAborted();
+        reportOperationProgress(operation, 0.25, "interpolate");
+        const interpolated = interpolateProfilePoints(positions, options.sampleCount);
+        operation.throwIfAborted();
+        reportOperationProgress(operation, 0.4, "terrain-sampling");
+        const sampledCartographics = await sampleGroundCartographics(
+          this.map.viewer.terrainProvider,
+          interpolated.map((sample) => sample.cartographic)
+        );
+        operation.throwIfAborted();
+        reportOperationProgress(operation, 0.7, "calculate");
+        const samples = createProfileSamples(interpolated, sampledCartographics);
+        const range = getProfileHeightRange(samples);
+        const style = this.map.styles.resolveProfileStyle(profileOptionsToStyle(options));
+        reportOperationProgress(operation, 0.9, "render");
+        const entities = renderProfileEntities(this.map, samples, style, options.height);
+        const result: ProfileResult = {
+          id: createAnalysisId("profile"),
+          type: "profile",
+          positions,
+          samples,
+          totalDistance: samples[samples.length - 1]?.distance ?? 0,
+          minHeight: range.minHeight,
+          maxHeight: range.maxHeight,
+          entities,
+          createdAt: new Date(),
+          style,
+          height: serializeHeightOptions(options.height)
+        };
+        renderedResult = result;
 
-    return this.addResult(result);
+        operation.throwIfAborted();
+        const added = this.addResult(result);
+        operation.throwIfAborted();
+        return added;
+      }
+    ).catch((error) => {
+      if (renderedResult) {
+        if (this.results.get(renderedResult.id) === renderedResult) {
+          this.remove(renderedResult.id);
+        } else {
+          removeEntities(this.map, renderedResult.entities);
+        }
+      }
+      throw error;
+    });
   }
 
   addResult(result: ProfileResult): ProfileResult {
@@ -975,6 +1043,15 @@ function removeEntities(map: KairosMap, entities: Entity[]): void {
   for (const entity of entities) {
     map.viewer.entities.remove(entity);
   }
+}
+
+function reportOperationProgress(
+  operation: OperationContext,
+  progress: number,
+  phase: string
+): void {
+  operation.reportProgress(progress, phase);
+  operation.throwIfAborted();
 }
 
 function removeMeasureRuntime(map: KairosMap, result: MeasureResult): void {

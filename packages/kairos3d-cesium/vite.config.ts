@@ -22,7 +22,8 @@ export default defineConfig({
         "persistence/index": fileURLToPath(new URL("./src/persistence/index.ts", import.meta.url)),
         "plotting/index": fileURLToPath(new URL("./src/plotting/index.ts", import.meta.url)),
         "materials/index": fileURLToPath(new URL("./src/materials/index.ts", import.meta.url)),
-        "effects/index": fileURLToPath(new URL("./src/effects/index.ts", import.meta.url))
+        "effects/index": fileURLToPath(new URL("./src/effects/index.ts", import.meta.url)),
+        "operations/index": fileURLToPath(new URL("./src/operations/index.ts", import.meta.url))
       },
       name: "Kairos3DCesium",
       formats: ["es", "cjs"],

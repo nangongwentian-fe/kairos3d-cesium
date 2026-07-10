@@ -1,7 +1,10 @@
 import { Cartographic } from "cesium";
 import { describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
-import type { LayerConfig } from "../layers";
+import type { EffectLoadOptions, EffectSnapshot } from "../effects";
+import type { LayerConfig, LayerLoadOptions } from "../layers";
+import { OperationCanceledError, OperationManager } from "../operations";
+import { runOrReuseOperation } from "../operations/manager";
 import { CameraBookmarkManager, SceneStateManager } from "./manager";
 import type { CameraBookmark, CameraView, SceneSnapshot } from "./types";
 
@@ -20,7 +23,13 @@ const layerConfig: LayerConfig = {
   url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 };
 
+interface CameraFlightCallbacks {
+  complete?: () => void;
+  cancel?: () => void;
+}
+
 function createMapMock() {
+  const operations = new OperationManager();
   const camera = {
     positionCartographic: Cartographic.fromDegrees(
       cameraView.longitude,
@@ -30,18 +39,30 @@ function createMapMock() {
     heading: cameraView.heading,
     pitch: cameraView.pitch,
     roll: cameraView.roll,
-    flyTo: vi.fn((options: { complete?: () => void }) => {
+    flyTo: vi.fn((options: CameraFlightCallbacks) => {
       options.complete?.();
-    })
+    }),
+    cancelFlight: vi.fn()
   };
 
   return {
+    operations,
     viewer: {
       camera
     },
     layers: {
       toJSON: vi.fn(() => [layerConfig]),
-      load: vi.fn(async () => [])
+      load: vi.fn((_configs: LayerConfig[], options: LayerLoadOptions = {}) =>
+        runOrReuseOperation(
+          operations,
+          { kind: "layers.load" },
+          options,
+          async (context) => {
+            context.reportProgress(1, "layers");
+            return [];
+          }
+        )
+      )
     },
     draw: {
       toJSON: vi.fn(() => []),
@@ -76,7 +97,17 @@ function createMapMock() {
     },
     effects: {
       toJSON: vi.fn(() => []),
-      load: vi.fn(async () => []),
+      load: vi.fn((_snapshots: EffectSnapshot[], options: EffectLoadOptions = {}) =>
+        runOrReuseOperation(
+          operations,
+          { kind: "effects.load" },
+          options,
+          async (context) => {
+            context.reportProgress(1, "effects");
+            return [];
+          }
+        )
+      ),
       clear: vi.fn(),
       validateSnapshots: vi.fn()
     }
@@ -238,10 +269,10 @@ describe("SceneStateManager", () => {
 
     await manager.load(snapshot);
 
-    expect(map.layers.load).toHaveBeenCalledWith([layerConfig], {
-      clear: true,
-      flyTo: false
-    });
+    expect(map.layers.load).toHaveBeenCalledWith(
+      [layerConfig],
+      expect.objectContaining({ clear: true, flyTo: false })
+    );
     expect(map.viewer.camera.flyTo).toHaveBeenCalledOnce();
     expect(manager.bookmarks.list().map((bookmark) => bookmark.id)).toEqual(["home"]);
     expect(map.effects.validateSnapshots).not.toHaveBeenCalled();
@@ -261,10 +292,10 @@ describe("SceneStateManager", () => {
 
     await manager.load(snapshot, { clearLayers: false, flyToCamera: false });
 
-    expect(map.layers.load).toHaveBeenCalledWith([layerConfig], {
-      clear: false,
-      flyTo: false
-    });
+    expect(map.layers.load).toHaveBeenCalledWith(
+      [layerConfig],
+      expect.objectContaining({ clear: false, flyTo: false })
+    );
     expect(map.viewer.camera.flyTo).not.toHaveBeenCalled();
   });
 
@@ -374,7 +405,10 @@ describe("SceneStateManager", () => {
     await manager.load(snapshot, { restoreEffects: true, flyToCamera: false });
 
     expect(map.effects.validateSnapshots).toHaveBeenCalledWith([]);
-    expect(map.effects.load).toHaveBeenCalledWith([], { clear: true });
+    expect(map.effects.load).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ clear: true })
+    );
     expect(map.effects.clear).not.toHaveBeenCalled();
   });
 
@@ -416,5 +450,188 @@ describe("SceneStateManager", () => {
     expect(map.effects.clear).toHaveBeenCalledOnce();
     expect(map.effects.validateSnapshots).not.toHaveBeenCalled();
     expect(map.effects.load).not.toHaveBeenCalled();
+  });
+
+  it("tracks scene loading as one operation with scoped stage progress", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    const progress: Array<{ progress?: number; phase?: string }> = [];
+    map.operations.on("change", (event) => {
+      if (event.data.id === "scene-load") {
+        progress.push(event.data);
+      }
+    });
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [layerConfig],
+      bookmarks: [],
+      effects: [],
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    await manager.load(snapshot, {
+      restoreEffects: true,
+      flyToCamera: false,
+      operationId: "scene-load"
+    });
+
+    expect(map.operations.list().map((operation) => operation.kind)).toEqual(["scene.load"]);
+    expect(map.operations.get("scene-load")).toMatchObject({
+      status: "succeeded",
+      progress: 1
+    });
+    expect(progress.map((state) => state.phase)).toEqual(
+      expect.arrayContaining(["validate", "layers", "bookmarks", "effects"])
+    );
+    const values = progress
+      .map((state) => state.progress)
+      .filter((value): value is number => value !== undefined);
+    expect(values).toEqual([...values].sort((left, right) => left - right));
+  });
+
+  it("stops remaining scene stages after cancellation", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    let release!: () => void;
+    const pendingLayers = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markLayersSettled!: () => void;
+    const layersSettled = new Promise<void>((resolve) => {
+      markLayersSettled = resolve;
+    });
+    vi.mocked(map.layers.load).mockImplementation((_configs, options = {}) =>
+      runOrReuseOperation(
+        map.operations,
+        { kind: "layers.load" },
+        options,
+        async (context) => {
+          try {
+            await pendingLayers;
+            context.throwIfAborted();
+            return [];
+          } finally {
+            markLayersSettled();
+          }
+        }
+      )
+    );
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      camera: cameraView,
+      layers: [layerConfig],
+      bookmarks: [
+        {
+          id: "home",
+          view: cameraView,
+          createdAt: "2026-07-10T00:00:00.000Z"
+        }
+      ],
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    const loading = manager.load(snapshot, { operationId: "cancel-scene" });
+    await vi.waitFor(() => expect(map.layers.load).toHaveBeenCalledOnce());
+    expect(map.operations.cancel("cancel-scene")).toBe(true);
+    await expect(loading).rejects.toBeInstanceOf(OperationCanceledError);
+    release();
+    await layersSettled;
+
+    expect(manager.bookmarks.list()).toEqual([]);
+    expect(map.viewer.camera.flyTo).not.toHaveBeenCalled();
+    expect(map.operations.list().map((operation) => operation.kind)).toEqual(["scene.load"]);
+    expect(map.operations.get("cancel-scene")?.status).toBe("canceled");
+  });
+
+  it("does not restore analysis after draw loading cancels the scene operation", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    vi.mocked(map.draw.load).mockImplementation(async () => {
+      map.operations.cancel("cancel-results");
+      return [];
+    });
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [],
+      bookmarks: [],
+      results: {
+        draw: [],
+        measure: [],
+        visibility: [],
+        profile: [],
+        clipping: [],
+        terrain: []
+      },
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    await expect(
+      manager.load(snapshot, {
+        restoreResults: true,
+        flyToCamera: false,
+        operationId: "cancel-results"
+      })
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(map.draw.load).toHaveBeenCalledOnce();
+    expect(map.analysis.load).not.toHaveBeenCalled();
+  });
+
+  it("does not start effects after overlay loading cancels the scene operation", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    vi.mocked(map.overlays.load).mockImplementation(async () => {
+      map.operations.cancel("cancel-overlays");
+      return [];
+    });
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [],
+      bookmarks: [],
+      overlays: [],
+      effects: [],
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    await expect(
+      manager.load(snapshot, {
+        restoreOverlays: true,
+        restoreEffects: true,
+        flyToCamera: false,
+        operationId: "cancel-overlays"
+      })
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(map.overlays.load).toHaveBeenCalledOnce();
+    expect(map.effects.load).not.toHaveBeenCalled();
+  });
+
+  it("cancels an active camera flight with the scene operation", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    let cancelFlight: (() => void) | undefined;
+    vi.mocked(map.viewer.camera.flyTo).mockImplementation((options) => {
+      cancelFlight = options.cancel;
+    });
+    vi.mocked(map.viewer.camera.cancelFlight).mockImplementation(() => {
+      cancelFlight?.();
+    });
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      camera: cameraView,
+      layers: [],
+      bookmarks: [],
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    const loading = manager.load(snapshot, { operationId: "cancel-camera" });
+    await vi.waitFor(() => expect(map.viewer.camera.flyTo).toHaveBeenCalledOnce());
+    expect(map.operations.cancel("cancel-camera")).toBe(true);
+    await expect(loading).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(map.viewer.camera.cancelFlight).toHaveBeenCalledOnce();
+    expect(map.operations.get("cancel-camera")?.status).toBe("canceled");
   });
 });

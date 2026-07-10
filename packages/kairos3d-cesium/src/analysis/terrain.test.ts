@@ -1,9 +1,21 @@
 import { Cartesian3, Entity } from "cesium";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import {
+  OperationCanceledError,
+  OperationManager,
+  type AsyncOperationOptions
+} from "../operations";
 import { StyleManager } from "../style";
 import { TerrainAnalysisManager } from "./terrain";
-import type { ContourResultSnapshot } from "./types";
+import type {
+  ContourOptions,
+  ContourResultSnapshot,
+  ExcavationOptions,
+  FloodOptions,
+  SlopeAspectOptions,
+  VolumeOptions
+} from "./types";
 
 function createMapMock() {
   return {
@@ -20,6 +32,7 @@ function createMapMock() {
       start: vi.fn(),
       emitClear: vi.fn()
     },
+    operations: new OperationManager(),
     styles: new StyleManager()
   } as unknown as KairosMap;
 }
@@ -34,6 +47,24 @@ function createArea(): Cartesian3[] {
 }
 
 describe("TerrainAnalysisManager", () => {
+  it("exposes optional operation options on all compute methods", () => {
+    expectTypeOf<Parameters<TerrainAnalysisManager["slopeAspect"]>>().toEqualTypeOf<
+      [SlopeAspectOptions, AsyncOperationOptions?]
+    >();
+    expectTypeOf<Parameters<TerrainAnalysisManager["volume"]>>().toEqualTypeOf<
+      [VolumeOptions, AsyncOperationOptions?]
+    >();
+    expectTypeOf<Parameters<TerrainAnalysisManager["flood"]>>().toEqualTypeOf<
+      [FloodOptions, AsyncOperationOptions?]
+    >();
+    expectTypeOf<Parameters<TerrainAnalysisManager["excavation"]>>().toEqualTypeOf<
+      [ExcavationOptions, AsyncOperationOptions?]
+    >();
+    expectTypeOf<Parameters<TerrainAnalysisManager["contour"]>>().toEqualTypeOf<
+      [ContourOptions, AsyncOperationOptions?]
+    >();
+  });
+
   it("starts contour draw through the shared tool manager", async () => {
     const map = createMapMock();
     const manager = new TerrainAnalysisManager(map);
@@ -60,6 +91,10 @@ describe("TerrainAnalysisManager", () => {
     expect(result.grid.sampled).toBe(false);
     expect(result.entities.length).toBeGreaterThan(0);
     expect(manager.get(result.id)).toBe(result);
+    expect(map.operations.list({ kind: "analysis.terrain.slope-aspect" })[0]).toMatchObject({
+      status: "succeeded",
+      progress: 1
+    });
   });
 
   it("computes contour results and serializes them", async () => {
@@ -83,6 +118,7 @@ describe("TerrainAnalysisManager", () => {
       sampleStep: 80
     });
     expect(snapshot[0].style?.line?.width).toBe(4);
+    expect(map.operations.list({ kind: "analysis.terrain.contour" })).toHaveLength(1);
   });
 
   it("computes volume, flood, and excavation results", async () => {
@@ -119,6 +155,89 @@ describe("TerrainAnalysisManager", () => {
     expect(excavation.bottomHeight).toBe(-5);
     expect(excavation.cutVolume).toBeGreaterThan(0);
     expect(manager.list()).toHaveLength(3);
+    expect(map.operations.list().map((operation) => operation.kind)).toEqual(
+      expect.arrayContaining([
+        "analysis.terrain.volume",
+        "analysis.terrain.flood",
+        "analysis.terrain.excavation"
+      ])
+    );
+  });
+
+  it("does not sample, render, or store an already canceled terrain analysis", async () => {
+    const map = createMapMock();
+    const manager = new TerrainAnalysisManager(map);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      manager.volume(
+        {
+          area: createArea(),
+          baseHeight: 10,
+          sampleStep: 80,
+          maxSamples: 16
+        },
+        { signal: controller.signal, operationId: "terrain-canceled" }
+      )
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(manager.list()).toEqual([]);
+    expect(map.viewer.entities.add).not.toHaveBeenCalled();
+    expect(map.operations.get("terrain-canceled")).toMatchObject({
+      kind: "analysis.terrain.volume",
+      status: "canceled"
+    });
+  });
+
+  it("does not render when a progress listener cancels terrain analysis", async () => {
+    const map = createMapMock();
+    const manager = new TerrainAnalysisManager(map);
+    map.operations.on("change", (event) => {
+      if (event.data.phase === "render" && event.data.status === "running") {
+        map.operations.cancel(event.data.id);
+      }
+    });
+
+    await expect(
+      manager.contour(
+        {
+          area: createArea(),
+          interval: 5,
+          sampleStep: 80,
+          maxSamples: 16
+        },
+        { operationId: "terrain-render-canceled" }
+      )
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(manager.list()).toEqual([]);
+    expect(map.viewer.entities.add).not.toHaveBeenCalled();
+  });
+
+  it("rolls back terrain entities when cancellation races the add event", async () => {
+    const map = createMapMock();
+    const manager = new TerrainAnalysisManager(map);
+    manager.on("add", () => {
+      queueMicrotask(() => map.operations.cancel("terrain-add-canceled"));
+    });
+
+    await expect(
+      manager.volume(
+        {
+          area: createArea(),
+          baseHeight: 10,
+          sampleStep: 80,
+          maxSamples: 16
+        },
+        { operationId: "terrain-add-canceled" }
+      )
+    ).rejects.toBeInstanceOf(OperationCanceledError);
+
+    expect(manager.list()).toEqual([]);
+    expect(map.viewer.entities.remove).toHaveBeenCalledTimes(
+      vi.mocked(map.viewer.entities.add).mock.calls.length
+    );
   });
 
   it("serializes and restores data-first terrain volume results", async () => {

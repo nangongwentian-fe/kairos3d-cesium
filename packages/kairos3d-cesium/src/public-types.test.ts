@@ -203,8 +203,47 @@ import type {
   EffectType,
   EffectUpdateOptions
 } from "./effects";
+import type {
+  AsyncOperationOptions,
+  OperationErrorInfo,
+  OperationManagerEvents,
+  OperationQuery,
+  OperationState,
+  OperationStatus
+} from "./operations";
 
 describe("public SDK types", () => {
+  it("exposes operations contracts", () => {
+    expectTypeOf<OperationStatus>().toEqualTypeOf<
+      "running" | "succeeded" | "failed" | "canceled"
+    >();
+    expectTypeOf<AsyncOperationOptions>().toMatchTypeOf<{
+      signal?: AbortSignal;
+      operationId?: string;
+    }>();
+    expectTypeOf<OperationState>().toMatchTypeOf<{
+      id: string;
+      kind: string;
+      status: OperationStatus;
+      progress?: number;
+      phase?: string;
+      error?: OperationErrorInfo;
+      startedAt: Date;
+      finishedAt?: Date;
+    }>();
+    expectTypeOf<OperationQuery>().toMatchTypeOf<{
+      kind?: string;
+      status?: OperationStatus | OperationStatus[];
+    }>();
+    expectTypeOf<OperationManagerEvents["change"]>().toEqualTypeOf<OperationState>();
+    expectTypeOf<KairosMap["operations"]["get"]>().returns.toEqualTypeOf<
+      OperationState | undefined
+    >();
+    expectTypeOf<KairosMap["operations"]["list"]>().returns.toEqualTypeOf<
+      OperationState[]
+    >();
+  });
+
   it("exposes stable draw and measure result contracts", () => {
     expectTypeOf<DrawType>().toEqualTypeOf<
       | "point"
@@ -923,6 +962,8 @@ describe("public SDK types", () => {
       effectCount: number;
       effectRuntimeObjectCount: number;
       animatedEffectCount: number;
+      activeOperationCount: number;
+      failedOperationCount: number;
       warnings: PerformanceWarning[];
     }>();
     expectTypeOf<PrimitiveOptimizationCandidate>().toMatchTypeOf<{
@@ -1281,10 +1322,10 @@ describe("public SDK types", () => {
       updatedAt?: Date;
     }>();
     expectTypeOf<KairosMap["effects"]["add"]>().parameters.toEqualTypeOf<
-      [EffectConfig]
+      [EffectConfig, AsyncOperationOptions?]
     >();
     expectTypeOf<KairosMap["effects"]["update"]>().parameters.toEqualTypeOf<
-      [string, EffectUpdateOptions]
+      [string, EffectUpdateOptions, AsyncOperationOptions?]
     >();
     expectTypeOf<KairosMap["effects"]["load"]>().parameters.toEqualTypeOf<
       [EffectSnapshot[], EffectLoadOptions?]
@@ -1327,6 +1368,8 @@ describe("public SDK types", () => {
     expectTypeOf<LayerLoadOptions>().toEqualTypeOf<{
       clear?: boolean;
       flyTo?: boolean;
+      signal?: AbortSignal;
+      operationId?: string;
     }>();
 
     expectTypeOf<LayerAdapter>().toMatchTypeOf<{
@@ -1413,6 +1456,8 @@ describe("public SDK types", () => {
       clearOverlays?: boolean;
       restoreEffects?: boolean;
       clearEffects?: boolean;
+      signal?: AbortSignal;
+      operationId?: string;
     }>();
 
     expectTypeOf<RuntimeResultsSnapshot>().toEqualTypeOf<{

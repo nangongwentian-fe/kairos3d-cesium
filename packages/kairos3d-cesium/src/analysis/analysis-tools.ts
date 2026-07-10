@@ -7,6 +7,7 @@ import {
 } from "cesium";
 import type { KairosMap } from "../core";
 import { lineStyleWithHeight } from "../height";
+import { isOperationCanceledError } from "../operations/errors";
 import type { ResultSymbolStyle } from "../style";
 import { createLineGraphics, mergeSymbolStyles } from "../style";
 import { InteractiveTool } from "../tools/interactive-tool";
@@ -25,6 +26,7 @@ export class VisibilityPickTool extends InteractiveTool<VisibilityPickOptions> {
   private options: VisibilityPickOptions = {};
   private resolvedStyle?: ResultSymbolStyle;
   private completed = false;
+  private operationController?: AbortController;
 
   constructor(map: KairosMap) {
     super(map, "analysis.visibility.pick");
@@ -86,6 +88,8 @@ export class VisibilityPickTool extends InteractiveTool<VisibilityPickOptions> {
   }
 
   override stop(): void {
+    this.operationController?.abort();
+    this.operationController = undefined;
     this.removePreviewLine();
     this.resetDraft();
     super.stop();
@@ -99,13 +103,29 @@ export class VisibilityPickTool extends InteractiveTool<VisibilityPickOptions> {
     this.completed = true;
     const start = Cartesian3.clone(this.startPosition);
     this.removePreviewLine();
-    const result = await this.map.analysis.visibility.compute({
-      ...this.options,
-      start,
-      end
-    });
-    this.notifyComplete(result);
-    this.map.tools.stop();
+    const controller = new AbortController();
+    this.operationController = controller;
+    try {
+      const result = await this.map.analysis.visibility.compute(
+        {
+          ...this.options,
+          start,
+          end
+        },
+        { signal: controller.signal }
+      );
+      this.notifyComplete(result);
+      this.map.tools.stop();
+    } catch (error) {
+      if (!isOperationCanceledError(error)) {
+        this.completed = false;
+        throw error;
+      }
+    } finally {
+      if (this.operationController === controller) {
+        this.operationController = undefined;
+      }
+    }
   }
 
   private ensurePreviewLine(): void {
@@ -154,6 +174,7 @@ export class ProfileDrawTool extends InteractiveTool<ProfileDrawOptions> {
   private options: ProfileDrawOptions = {};
   private resolvedStyle?: ResultSymbolStyle;
   private completed = false;
+  private operationController?: AbortController;
 
   constructor(map: KairosMap) {
     super(map, "analysis.profile.draw");
@@ -212,6 +233,8 @@ export class ProfileDrawTool extends InteractiveTool<ProfileDrawOptions> {
   }
 
   override stop(): void {
+    this.operationController?.abort();
+    this.operationController = undefined;
     this.removePreviewLine();
     this.resetDraft();
     super.stop();
@@ -225,12 +248,28 @@ export class ProfileDrawTool extends InteractiveTool<ProfileDrawOptions> {
     this.completed = true;
     const positions = clonePositions(this.positions);
     this.removePreviewLine();
-    const result = await this.map.analysis.profile.compute({
-      ...this.options,
-      positions
-    });
-    this.notifyComplete(result);
-    this.map.tools.stop();
+    const controller = new AbortController();
+    this.operationController = controller;
+    try {
+      const result = await this.map.analysis.profile.compute(
+        {
+          ...this.options,
+          positions
+        },
+        { signal: controller.signal }
+      );
+      this.notifyComplete(result);
+      this.map.tools.stop();
+    } catch (error) {
+      if (!isOperationCanceledError(error)) {
+        this.completed = false;
+        throw error;
+      }
+    } finally {
+      if (this.operationController === controller) {
+        this.operationController = undefined;
+      }
+    }
   }
 
   private ensurePreviewLine(): void {
@@ -395,6 +434,7 @@ export class TerrainContourDrawTool extends InteractiveTool<ContourDrawOptions> 
   private options?: ContourDrawOptions;
   private resolvedStyle?: ResultSymbolStyle;
   private completed = false;
+  private operationController?: AbortController;
 
   constructor(map: KairosMap) {
     super(map, "analysis.terrain.drawContour");
@@ -445,6 +485,8 @@ export class TerrainContourDrawTool extends InteractiveTool<ContourDrawOptions> 
   }
 
   override stop(): void {
+    this.operationController?.abort();
+    this.operationController = undefined;
     this.removePreviewLine();
     this.resetDraft();
     super.stop();
@@ -458,12 +500,28 @@ export class TerrainContourDrawTool extends InteractiveTool<ContourDrawOptions> 
     this.completed = true;
     const area = clonePositions(this.positions);
     this.removePreviewLine();
-    const result = await this.map.analysis.terrain.contour({
-      ...this.options,
-      area
-    });
-    this.notifyComplete(result);
-    this.map.tools.stop();
+    const controller = new AbortController();
+    this.operationController = controller;
+    try {
+      const result = await this.map.analysis.terrain.contour(
+        {
+          ...this.options,
+          area
+        },
+        { signal: controller.signal }
+      );
+      this.notifyComplete(result);
+      this.map.tools.stop();
+    } catch (error) {
+      if (!isOperationCanceledError(error)) {
+        this.completed = false;
+        throw error;
+      }
+    } finally {
+      if (this.operationController === controller) {
+        this.operationController = undefined;
+      }
+    }
   }
 
   private ensurePreviewLine(): void {

@@ -16,6 +16,7 @@ export default defineConfig({
         text: "Guide",
         items: [
           { text: "Getting Started", link: "/guide/getting-started" },
+          { text: "Operations And Loading", link: "/guide/operations" },
           { text: "Architecture", link: "/guide/architecture" },
           { text: "First Version Status", link: "/guide/first-version-status" },
           { text: "Roadmap", link: "/guide/roadmap" },

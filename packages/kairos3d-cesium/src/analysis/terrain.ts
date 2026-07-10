@@ -22,6 +22,11 @@ import {
 } from "../style";
 import type { Tool } from "../tools";
 import {
+  runOrReuseOperation,
+  type OperationContext
+} from "../operations/manager";
+import type { AsyncOperationOptions } from "../operations/types";
+import {
   calculateCutFillVolume,
   calculateExcavationVolume,
   calculateFloodVolume,
@@ -76,165 +81,198 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
     super();
   }
 
-  async slopeAspect(options: SlopeAspectOptions): Promise<SlopeAspectResult> {
-    const grid = computeSlopeAspectGrid(
-      await createTerrainSampleGrid(this.map.viewer.terrainProvider, options.area, options)
-    );
-    const range = getSlopeRange(grid);
-    const style = this.map.styles.resolveTerrainStyle("slope-aspect", options.style);
-    const result: SlopeAspectResult = {
-      id: createTerrainAnalysisId("slope-aspect"),
-      type: "slope-aspect",
-      area: clonePositions(options.area),
-      grid,
-      minSlope: range.minSlope,
-      maxSlope: range.maxSlope,
-      averageSlope: range.averageSlope,
-      entities: renderAreaEntities(this.map, options.area, style, options.height),
-      createdAt: new Date(),
-      style,
-      height: serializeHeightOptions(options.height)
-    };
-
-    this.addResult(result);
-    return result;
+  slopeAspect(
+    options: SlopeAspectOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<SlopeAspectResult> {
+    return this.runCompute("slope-aspect", operationOptions, async (operation, commit) => {
+      reportOperationProgress(operation, 0.05, "terrain-sampling");
+      const sampledGrid = await createTerrainSampleGrid(
+        this.map.viewer.terrainProvider,
+        options.area,
+        options
+      );
+      operation.throwIfAborted();
+      reportOperationProgress(operation, 0.55, "calculate");
+      const grid = computeSlopeAspectGrid(sampledGrid);
+      const range = getSlopeRange(grid);
+      const style = this.map.styles.resolveTerrainStyle("slope-aspect", options.style);
+      reportOperationProgress(operation, 0.9, "render");
+      return commit({
+        id: createTerrainAnalysisId("slope-aspect"),
+        type: "slope-aspect",
+        area: clonePositions(options.area),
+        grid,
+        minSlope: range.minSlope,
+        maxSlope: range.maxSlope,
+        averageSlope: range.averageSlope,
+        entities: renderAreaEntities(this.map, options.area, style, options.height),
+        createdAt: new Date(),
+        style,
+        height: serializeHeightOptions(options.height)
+      });
+    });
   }
 
-  async volume(options: VolumeOptions): Promise<VolumeResult> {
-    const grid = await createTerrainSampleGrid(
-      this.map.viewer.terrainProvider,
-      options.area,
-      options
-    );
-    const range = getHeightRange(grid);
-    const volume = calculateCutFillVolume(
-      grid,
-      options.baseHeight,
-      resolveTerrainVolumeMode(options.precision)
-    );
-    const style = this.map.styles.resolveTerrainStyle("volume", options.style);
-    const result: VolumeResult = {
-      id: createTerrainAnalysisId("volume"),
-      type: "volume",
-      area: clonePositions(options.area),
-      grid,
-      baseHeight: options.baseHeight,
-      cutVolume: volume.cutVolume,
-      fillVolume: volume.fillVolume,
-      netVolume: volume.netVolume,
-      sampleArea: volume.sampleArea,
-      surfaceArea: volume.surfaceArea,
-      calculationMode: volume.calculationMode,
-      minHeight: range.minHeight,
-      maxHeight: range.maxHeight,
-      entities: renderAreaEntities(this.map, options.area, style, options.height),
-      createdAt: new Date(),
-      style,
-      height: serializeHeightOptions(options.height)
-    };
-
-    this.addResult(result);
-    return result;
+  volume(
+    options: VolumeOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<VolumeResult> {
+    return this.runCompute("volume", operationOptions, async (operation, commit) => {
+      reportOperationProgress(operation, 0.05, "terrain-sampling");
+      const grid = await createTerrainSampleGrid(
+        this.map.viewer.terrainProvider,
+        options.area,
+        options
+      );
+      operation.throwIfAborted();
+      reportOperationProgress(operation, 0.55, "calculate");
+      const range = getHeightRange(grid);
+      const volume = calculateCutFillVolume(
+        grid,
+        options.baseHeight,
+        resolveTerrainVolumeMode(options.precision)
+      );
+      const style = this.map.styles.resolveTerrainStyle("volume", options.style);
+      reportOperationProgress(operation, 0.9, "render");
+      return commit({
+        id: createTerrainAnalysisId("volume"),
+        type: "volume",
+        area: clonePositions(options.area),
+        grid,
+        baseHeight: options.baseHeight,
+        cutVolume: volume.cutVolume,
+        fillVolume: volume.fillVolume,
+        netVolume: volume.netVolume,
+        sampleArea: volume.sampleArea,
+        surfaceArea: volume.surfaceArea,
+        calculationMode: volume.calculationMode,
+        minHeight: range.minHeight,
+        maxHeight: range.maxHeight,
+        entities: renderAreaEntities(this.map, options.area, style, options.height),
+        createdAt: new Date(),
+        style,
+        height: serializeHeightOptions(options.height)
+      });
+    });
   }
 
-  async flood(options: FloodOptions): Promise<FloodResult> {
-    const grid = await createTerrainSampleGrid(
-      this.map.viewer.terrainProvider,
-      options.area,
-      options
-    );
-    const range = getHeightRange(grid);
-    const flood = calculateFloodVolume(
-      grid,
-      options.waterHeight,
-      resolveTerrainVolumeMode(options.precision)
-    );
-    const style = this.map.styles.resolveTerrainStyle("flood", options.style);
-    const result: FloodResult = {
-      id: createTerrainAnalysisId("flood"),
-      type: "flood",
-      area: clonePositions(options.area),
-      grid,
-      waterHeight: options.waterHeight,
-      floodedArea: flood.floodedArea,
-      waterVolume: flood.waterVolume,
-      sampleArea: flood.sampleArea,
-      surfaceArea: flood.surfaceArea,
-      calculationMode: flood.calculationMode,
-      minHeight: range.minHeight,
-      maxHeight: range.maxHeight,
-      entities: renderAreaEntities(this.map, options.area, style, options.height),
-      createdAt: new Date(),
-      style,
-      height: serializeHeightOptions(options.height)
-    };
-
-    this.addResult(result);
-    return result;
+  flood(
+    options: FloodOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<FloodResult> {
+    return this.runCompute("flood", operationOptions, async (operation, commit) => {
+      reportOperationProgress(operation, 0.05, "terrain-sampling");
+      const grid = await createTerrainSampleGrid(
+        this.map.viewer.terrainProvider,
+        options.area,
+        options
+      );
+      operation.throwIfAborted();
+      reportOperationProgress(operation, 0.55, "calculate");
+      const range = getHeightRange(grid);
+      const flood = calculateFloodVolume(
+        grid,
+        options.waterHeight,
+        resolveTerrainVolumeMode(options.precision)
+      );
+      const style = this.map.styles.resolveTerrainStyle("flood", options.style);
+      reportOperationProgress(operation, 0.9, "render");
+      return commit({
+        id: createTerrainAnalysisId("flood"),
+        type: "flood",
+        area: clonePositions(options.area),
+        grid,
+        waterHeight: options.waterHeight,
+        floodedArea: flood.floodedArea,
+        waterVolume: flood.waterVolume,
+        sampleArea: flood.sampleArea,
+        surfaceArea: flood.surfaceArea,
+        calculationMode: flood.calculationMode,
+        minHeight: range.minHeight,
+        maxHeight: range.maxHeight,
+        entities: renderAreaEntities(this.map, options.area, style, options.height),
+        createdAt: new Date(),
+        style,
+        height: serializeHeightOptions(options.height)
+      });
+    });
   }
 
-  async excavation(options: ExcavationOptions): Promise<ExcavationResult> {
-    const grid = await createTerrainSampleGrid(
-      this.map.viewer.terrainProvider,
-      options.area,
-      options
-    );
-    const range = getHeightRange(grid);
-    const plane = resolveExcavationBottomHeight(grid, options);
-    const excavation = calculateExcavationVolume(
-      grid,
-      plane.bottomHeight,
-      resolveTerrainVolumeMode(options.precision)
-    );
-    const style = this.map.styles.resolveTerrainStyle("excavation", options.style);
-    const result: ExcavationResult = {
-      id: createTerrainAnalysisId("excavation"),
-      type: "excavation",
-      area: clonePositions(options.area),
-      grid,
-      bottomHeight: plane.bottomHeight,
-      depth: plane.depth,
-      cutVolume: excavation.cutVolume,
-      sampleArea: excavation.sampleArea,
-      surfaceArea: excavation.surfaceArea,
-      calculationMode: excavation.calculationMode,
-      minHeight: range.minHeight,
-      maxHeight: range.maxHeight,
-      entities: renderAreaEntities(this.map, options.area, style, options.height),
-      createdAt: new Date(),
-      style,
-      height: serializeHeightOptions(options.height)
-    };
-
-    this.addResult(result);
-    return result;
+  excavation(
+    options: ExcavationOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<ExcavationResult> {
+    return this.runCompute("excavation", operationOptions, async (operation, commit) => {
+      reportOperationProgress(operation, 0.05, "terrain-sampling");
+      const grid = await createTerrainSampleGrid(
+        this.map.viewer.terrainProvider,
+        options.area,
+        options
+      );
+      operation.throwIfAborted();
+      reportOperationProgress(operation, 0.55, "calculate");
+      const range = getHeightRange(grid);
+      const plane = resolveExcavationBottomHeight(grid, options);
+      const excavation = calculateExcavationVolume(
+        grid,
+        plane.bottomHeight,
+        resolveTerrainVolumeMode(options.precision)
+      );
+      const style = this.map.styles.resolveTerrainStyle("excavation", options.style);
+      reportOperationProgress(operation, 0.9, "render");
+      return commit({
+        id: createTerrainAnalysisId("excavation"),
+        type: "excavation",
+        area: clonePositions(options.area),
+        grid,
+        bottomHeight: plane.bottomHeight,
+        depth: plane.depth,
+        cutVolume: excavation.cutVolume,
+        sampleArea: excavation.sampleArea,
+        surfaceArea: excavation.surfaceArea,
+        calculationMode: excavation.calculationMode,
+        minHeight: range.minHeight,
+        maxHeight: range.maxHeight,
+        entities: renderAreaEntities(this.map, options.area, style, options.height),
+        createdAt: new Date(),
+        style,
+        height: serializeHeightOptions(options.height)
+      });
+    });
   }
 
-  async contour(options: ContourOptions): Promise<ContourResult> {
-    const grid = await createTerrainSampleGrid(
-      this.map.viewer.terrainProvider,
-      options.area,
-      options
-    );
-    const contour = createContourLines(grid, options.interval);
-    const style = this.map.styles.resolveTerrainStyle("contour", options.style);
-    const result: ContourResult = {
-      id: createTerrainAnalysisId("contour"),
-      type: "contour",
-      area: clonePositions(options.area),
-      interval: options.interval,
-      sampleStep: grid.sampleStep,
-      lines: contour.lines,
-      minHeight: contour.minHeight,
-      maxHeight: contour.maxHeight,
-      entities: renderContourEntities(this.map, contour.lines, style, options.height),
-      createdAt: new Date(),
-      style,
-      height: serializeHeightOptions(options.height)
-    };
-
-    this.addResult(result);
-    return result;
+  contour(
+    options: ContourOptions,
+    operationOptions?: AsyncOperationOptions
+  ): Promise<ContourResult> {
+    return this.runCompute("contour", operationOptions, async (operation, commit) => {
+      reportOperationProgress(operation, 0.05, "terrain-sampling");
+      const grid = await createTerrainSampleGrid(
+        this.map.viewer.terrainProvider,
+        options.area,
+        options
+      );
+      operation.throwIfAborted();
+      reportOperationProgress(operation, 0.55, "calculate");
+      const contour = createContourLines(grid, options.interval);
+      const style = this.map.styles.resolveTerrainStyle("contour", options.style);
+      reportOperationProgress(operation, 0.9, "render");
+      return commit({
+        id: createTerrainAnalysisId("contour"),
+        type: "contour",
+        area: clonePositions(options.area),
+        interval: options.interval,
+        sampleStep: grid.sampleStep,
+        lines: contour.lines,
+        minHeight: contour.minHeight,
+        maxHeight: contour.maxHeight,
+        entities: renderContourEntities(this.map, contour.lines, style, options.height),
+        createdAt: new Date(),
+        style,
+        height: serializeHeightOptions(options.height)
+      });
+    });
   }
 
   drawContour(options?: ContourDrawOptions): Promise<Tool<ContourDrawOptions>> {
@@ -317,6 +355,33 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
   destroy(): void {
     this.clear();
     this.off();
+  }
+
+  private runCompute<T extends TerrainResult>(
+    type: TerrainResult["type"],
+    operationOptions: AsyncOperationOptions | undefined,
+    task: (
+      operation: OperationContext,
+      commit: (result: T) => T
+    ) => Promise<T>
+  ): Promise<T> {
+    let renderedResult: T | undefined;
+    return runOrReuseOperation(
+      this.map.operations,
+      { kind: `analysis.terrain.${type}` },
+      operationOptions,
+      (operation) =>
+        task(operation, (result) => {
+          renderedResult = result;
+          operation.throwIfAborted();
+          this.addResult(result);
+          operation.throwIfAborted();
+          return result;
+        })
+    ).catch((error) => {
+      rollbackTerrainResult(this, this.map, renderedResult);
+      throw error;
+    });
   }
 
   private restoreSnapshot(snapshot: TerrainResultSnapshot): TerrainResult {
@@ -812,6 +877,30 @@ function assertOptionalFiniteTerrainSnapshotNumber(
 function assertFiniteTerrainSnapshotNumber(value: number, label: string): void {
   if (!Number.isFinite(value)) {
     throw new Error(`${label} must be a finite number.`);
+  }
+}
+
+function reportOperationProgress(
+  operation: OperationContext,
+  progress: number,
+  phase: string
+): void {
+  operation.reportProgress(progress, phase);
+  operation.throwIfAborted();
+}
+
+function rollbackTerrainResult(
+  manager: TerrainAnalysisManager,
+  map: KairosMap,
+  result: TerrainResult | undefined
+): void {
+  if (!result) {
+    return;
+  }
+  if (manager.get(result.id) === result) {
+    manager.remove(result.id);
+  } else {
+    removeEntities(map, result.entities);
   }
 }
 

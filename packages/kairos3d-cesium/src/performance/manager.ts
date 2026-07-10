@@ -75,6 +75,8 @@ export class PerformanceManager {
       effectCount: this.map.effects.list().length,
       effectRuntimeObjectCount: this.map.effects.getRuntimeObjectCount(),
       animatedEffectCount: this.map.effects.getAnimatedCount(),
+      activeOperationCount: this.map.operations.list({ status: "running" }).length,
+      failedOperationCount: this.map.operations.list({ status: "failed" }).length,
       results,
       resultBySource: summarizeResultsBySource(results),
       resultByType: summarizeResultsByType(results),

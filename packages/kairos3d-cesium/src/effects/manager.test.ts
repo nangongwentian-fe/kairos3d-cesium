@@ -8,6 +8,7 @@ import {
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core/map";
 import { MaterialManager } from "../materials";
+import { OperationManager } from "../operations";
 import { EffectManager } from "./manager";
 import type { EffectConfig, EffectSnapshot } from "./types";
 
@@ -154,6 +155,269 @@ describe("EffectManager", () => {
     expect(manager.getRuntimeObjects("flow-line-1")[0]).not.toBe(original);
     expect(manager.get("flow-line-1")?.config).toMatchObject({ width: 7 });
     expect(fixture.primitives).toHaveLength(1);
+  });
+
+  it("cancels add and destroys the prepared runtime before commit", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    const deferred = deferredMaterial(fixture.materials, "slow-canceled-add");
+    const material = Material.fromType(Material.ColorType);
+    const destroy = vi.spyOn(material, "destroy");
+    const controller = new AbortController();
+    const config: EffectConfig = {
+      id: "canceled-add",
+      type: "pulse-circle",
+      position: Cartesian3.fromDegrees(114, 22),
+      radius: 100,
+      material: { type: "slow-canceled-add", options: {} }
+    };
+    const pending = manager.add(
+      config,
+      { signal: controller.signal, operationId: "effects-add-canceled" }
+    );
+
+    await deferred.started;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({
+      name: "OperationCanceledError",
+      operationId: "effects-add-canceled"
+    });
+    await expect(manager.add(config)).rejects.toThrow("operation in progress");
+    deferred.resolve(material);
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalledOnce());
+
+    expect(manager.get("canceled-add")).toBeUndefined();
+    expect(fixture.primitives).toHaveLength(0);
+    expect(fixture.operations.get("effects-add-canceled")?.status).toBe("canceled");
+  });
+
+  it("cancels update without replacing the old runtime", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    await manager.add({
+      id: "stable-pulse",
+      type: "pulse-circle",
+      position: Cartesian3.fromDegrees(114, 22),
+      radius: 100
+    });
+    const original = manager.getRuntimeObjects("stable-pulse")[0];
+    const deferred = deferredMaterial(fixture.materials, "slow-canceled-update");
+    const material = Material.fromType(Material.ColorType);
+    const destroy = vi.spyOn(material, "destroy");
+    const controller = new AbortController();
+    const pending = manager.update(
+      "stable-pulse",
+      { material: { type: "slow-canceled-update", options: {} } },
+      { signal: controller.signal, operationId: "effects-update-canceled" }
+    );
+
+    await deferred.started;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "OperationCanceledError" });
+    await expect(manager.update("stable-pulse", { radius: 200 })).rejects.toThrow(
+      "operation in progress"
+    );
+    deferred.resolve(material);
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalledOnce());
+
+    expect(manager.getRuntimeObjects("stable-pulse")[0]).toBe(original);
+    expect(fixture.primitives).toEqual([original]);
+  });
+
+  it("cancels load before clear and reports progress for successful loads", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    await manager.add({ id: "existing-fog", type: "fog", intensity: 0.2 });
+    const deferred = deferredMaterial(fixture.materials, "slow-canceled-load");
+    const material = Material.fromType(Material.ColorType);
+    const destroy = vi.spyOn(material, "destroy");
+    const controller = new AbortController();
+    const snapshot: EffectSnapshot = {
+      id: "loaded-pulse",
+      type: "pulse-circle",
+      show: true,
+      config: {
+        position: { longitude: 114, latitude: 22, height: 0 },
+        radius: 100,
+        material: { type: "slow-canceled-load", options: {} }
+      },
+      createdAt: new Date().toISOString()
+    };
+    const pending = manager.load([snapshot], {
+      clear: true,
+      signal: controller.signal,
+      operationId: "effects-load-canceled"
+    });
+
+    await deferred.started;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "OperationCanceledError" });
+    await expect(
+      manager.add({ id: "blocked-during-load", type: "fog", intensity: 0.2 })
+    ).rejects.toThrow("load is in progress");
+    deferred.resolve(material);
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalledOnce());
+    expect(manager.get("existing-fog")).toBeDefined();
+    expect(manager.get("loaded-pulse")).toBeUndefined();
+
+    const phases: Array<string | undefined> = [];
+    const off = fixture.operations.on("change", (event) => {
+      if (event.data.id === "effects-load-success") {
+        phases.push(event.data.phase);
+      }
+    });
+    await manager.load(manager.toJSON(), {
+      clear: true,
+      operationId: "effects-load-success"
+    });
+    off();
+    expect(phases).toEqual(expect.arrayContaining(["validate", "prepare", "attach", "commit"]));
+    expect(fixture.operations.get("effects-load-success")).toMatchObject({
+      kind: "effects.load",
+      status: "succeeded",
+      progress: 1
+    });
+  });
+
+  it("honors synchronous progress cancellation before add, update, and load commits", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    const added = vi.fn();
+    const updated = vi.fn();
+    const loaded = vi.fn();
+    manager.on("add", added);
+    manager.on("update", updated);
+    manager.on("load", loaded);
+
+    const cancelAtCommit = (operationId: string) =>
+      fixture.operations.on("change", (event) => {
+        if (
+          event.data.id === operationId &&
+          event.data.status === "running" &&
+          event.data.phase === "commit"
+        ) {
+          fixture.operations.cancel(operationId);
+        }
+      });
+
+    let off = cancelAtCommit("effects-add-progress-cancel");
+    await expect(
+      manager.add(
+        {
+          id: "progress-canceled-add",
+          type: "pulse-circle",
+          position: Cartesian3.fromDegrees(114, 22),
+          radius: 100
+        },
+        { operationId: "effects-add-progress-cancel" }
+      )
+    ).rejects.toMatchObject({ name: "OperationCanceledError" });
+    off();
+    expect(manager.get("progress-canceled-add")).toBeUndefined();
+    expect(fixture.primitives).toHaveLength(0);
+    expect(added).not.toHaveBeenCalled();
+
+    await manager.add({
+      id: "progress-stable",
+      type: "pulse-circle",
+      position: Cartesian3.fromDegrees(114, 22),
+      radius: 100
+    });
+    added.mockClear();
+    const original = manager.getRuntimeObjects("progress-stable")[0];
+    off = cancelAtCommit("effects-update-progress-cancel");
+    await expect(
+      manager.update(
+        "progress-stable",
+        { radius: 200 },
+        { operationId: "effects-update-progress-cancel" }
+      )
+    ).rejects.toMatchObject({ name: "OperationCanceledError" });
+    off();
+    expect(manager.getRuntimeObjects("progress-stable")[0]).toBe(original);
+    expect(fixture.primitives).toEqual([original]);
+    expect(updated).not.toHaveBeenCalled();
+
+    const snapshot: EffectSnapshot = {
+      id: "progress-loaded-fog",
+      type: "fog",
+      show: true,
+      config: { intensity: 0.3 },
+      createdAt: new Date().toISOString()
+    };
+    off = cancelAtCommit("effects-load-progress-cancel");
+    await expect(
+      manager.load([snapshot], {
+        clear: true,
+        operationId: "effects-load-progress-cancel"
+      })
+    ).rejects.toMatchObject({ name: "OperationCanceledError" });
+    off();
+    expect(manager.get("progress-stable")).toBeDefined();
+    expect(manager.get("progress-loaded-fog")).toBeUndefined();
+    expect(fixture.primitives).toEqual([original]);
+    expect(fixture.stages).toHaveLength(0);
+    expect(loaded).not.toHaveBeenCalled();
+  });
+
+  it("emits manager mutation events after direct operations succeed", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    const observations: Array<{
+      event: string;
+      status: string | undefined;
+      canceled: boolean;
+    }> = [];
+    let operationId = "effects-add-event-order";
+    const observe = (event: string) => {
+      observations.push({
+        event,
+        status: fixture.operations.get(operationId)?.status,
+        canceled: fixture.operations.cancel(operationId)
+      });
+    };
+    manager.on("add", () => observe("add"));
+    manager.on("update", () => observe("update"));
+    manager.on("clear", () => observe("clear"));
+    manager.on("load", () => observe("load"));
+
+    await manager.add(
+      {
+        id: "event-order-pulse",
+        type: "pulse-circle",
+        position: Cartesian3.fromDegrees(114, 22),
+        radius: 100
+      },
+      { operationId }
+    );
+    operationId = "effects-update-event-order";
+    await manager.update(
+      "event-order-pulse",
+      { radius: 200 },
+      { operationId }
+    );
+    operationId = "effects-load-event-order";
+    await manager.load(
+      [
+        {
+          id: "event-order-fog",
+          type: "fog",
+          show: true,
+          config: { intensity: 0.4 },
+          createdAt: new Date().toISOString()
+        }
+      ],
+      { clear: true, operationId }
+    );
+
+    expect(observations).toEqual([
+      { event: "add", status: "succeeded", canceled: false },
+      { event: "update", status: "succeeded", canceled: false },
+      { event: "clear", status: "succeeded", canceled: false },
+      { event: "load", status: "succeeded", canceled: false }
+    ]);
+    expect(manager.get("event-order-pulse")).toBeUndefined();
+    expect(manager.get("event-order-fog")).toBeDefined();
   });
 
   it("manages show, groups, runtime objects, and scoped post-process stage names", async () => {
@@ -357,6 +621,7 @@ function createMapFixture() {
     onTick
   } as Clock;
   const materials = new MaterialManager();
+  const operations = new OperationManager();
   const removePrimitive = vi.fn((object: unknown) => {
     const index = primitives.indexOf(object);
     if (index >= 0) primitives.splice(index, 1);
@@ -386,11 +651,13 @@ function createMapFixture() {
   };
   const map = {
     viewer: { scene, clock, isDestroyed: viewerIsDestroyed },
-    materials
+    materials,
+    operations
   } as unknown as KairosMap;
   return {
     map,
     materials,
+    operations,
     primitives,
     stages,
     requestRender,
@@ -404,15 +671,22 @@ function createMapFixture() {
 
 function deferredMaterial(materials: MaterialManager, type: string) {
   let resolve!: (material: Material) => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((next) => {
+    markStarted = next;
+  });
   const promise = new Promise<Material>((next) => {
     resolve = next;
   });
   materials.register({
     type,
     targets: ["primitive"],
-    createMaterial: () => promise
+    createMaterial: () => {
+      markStarted();
+      return promise;
+    }
   });
-  return { resolve };
+  return { resolve, started };
 }
 
 function slowFlowConfig(id: string, materialType: string): EffectConfig {

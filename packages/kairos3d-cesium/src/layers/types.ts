@@ -14,6 +14,7 @@ import type {
 import type { KairosMap } from "../core";
 import type { Disposable } from "../core/disposable";
 import type { HeightOptions } from "../height";
+import type { AsyncOperationOptions } from "../operations";
 import type { ColorLike } from "../style";
 
 export type LayerType = "xyz" | "wms" | "wmts" | "terrain" | "3dtiles" | "geojson" | "gltf";
@@ -188,7 +189,7 @@ export interface LayerState {
   config?: LayerConfig;
 }
 
-export interface LayerLoadOptions {
+export interface LayerLoadOptions extends AsyncOperationOptions {
   clear?: boolean;
   flyTo?: boolean;
 }

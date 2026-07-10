@@ -3,6 +3,7 @@ import type { DrawResultSnapshot } from "../draw";
 import type { EffectSnapshot } from "../effects";
 import type { LayerConfig } from "../layers";
 import type { OverlaySnapshot } from "../overlays";
+import type { AsyncOperationOptions } from "../operations";
 import type { PrimitiveOverlaySnapshot } from "../primitives";
 
 export interface CameraView {
@@ -62,7 +63,7 @@ export interface SceneStateSnapshotOptions {
   includeEffects?: boolean;
 }
 
-export interface SceneStateLoadOptions {
+export interface SceneStateLoadOptions extends AsyncOperationOptions {
   clearLayers?: boolean;
   flyToCamera?: boolean;
   restoreResults?: boolean;
