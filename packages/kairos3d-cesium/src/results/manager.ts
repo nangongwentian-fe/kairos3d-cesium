@@ -1,7 +1,9 @@
+import { BoundingSphere, Cartesian3, type Entity } from "cesium";
 import type { KairosMap } from "../core";
 import { Evented } from "../core/events";
 import type {
   ResultManagerEvents,
+  ResultFlyToOptions,
   ResultQueryOptions,
   ResultRecord,
   ResultSource,
@@ -92,6 +94,37 @@ export class ResultManager extends Evented<ResultManagerEvents> {
     return records;
   }
 
+  async flyTo(id: string, options: ResultFlyToOptions = {}): Promise<boolean> {
+    const record = this.get(id, options.source);
+    if (!record) {
+      return false;
+    }
+
+    const entities = resultEntities(record.result).filter((entity) =>
+      this.map.viewer.entities.contains(entity)
+    );
+    if (entities.length > 0) {
+      return this.map.viewer.flyTo(entities.length === 1 ? entities[0] : entities, {
+        duration: options.duration,
+        offset: options.offset
+      });
+    }
+
+    const positions = resultPositions(record.result);
+    if (positions.length === 0) {
+      return false;
+    }
+
+    return new Promise<boolean>((resolve) => {
+      this.map.viewer.camera.flyToBoundingSphere(BoundingSphere.fromPoints(positions), {
+        duration: options.duration,
+        offset: options.offset,
+        complete: () => resolve(true),
+        cancel: () => resolve(false)
+      });
+    });
+  }
+
   destroy(): void {
     for (const off of this.offListeners.splice(0)) {
       off();
@@ -131,6 +164,57 @@ export class ResultManager extends Evented<ResultManagerEvents> {
         return this.map.analysis.terrain as unknown as ResultStore<SDKManagedResult>;
     }
   }
+}
+
+function resultEntities(result: SDKManagedResult): Entity[] {
+  const candidate = result as SDKManagedResult & {
+    entity?: Entity;
+    entities?: Entity[];
+  };
+  return [
+    ...(Array.isArray(candidate.entities) ? candidate.entities : []),
+    ...(candidate.entity ? [candidate.entity] : [])
+  ];
+}
+
+function resultPositions(result: SDKManagedResult): Cartesian3[] {
+  const candidate = result as SDKManagedResult & {
+    positions?: unknown;
+    area?: unknown;
+    samples?: Array<{ position?: unknown }>;
+    grid?: { samples?: Array<{ position?: unknown }> };
+  };
+  const values = [
+    ...asCartesianArray(candidate.positions),
+    ...asCartesianArray(candidate.area),
+    ...(candidate.samples ?? []).flatMap((sample) => asCartesianArray([sample.position])),
+    ...(candidate.grid?.samples ?? []).flatMap((sample) =>
+      asCartesianArray([sample.position])
+    )
+  ];
+  return values.filter(
+    (position, index) =>
+      values.findIndex(
+        (candidate) =>
+          candidate.x === position.x &&
+          candidate.y === position.y &&
+          candidate.z === position.z
+      ) === index
+  );
+}
+
+function asCartesianArray(value: unknown): Cartesian3[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(
+    (item): item is Cartesian3 =>
+      typeof item === "object" &&
+      item !== null &&
+      Number.isFinite((item as Cartesian3).x) &&
+      Number.isFinite((item as Cartesian3).y) &&
+      Number.isFinite((item as Cartesian3).z)
+  );
 }
 
 const resultSources: ResultSource[] = [

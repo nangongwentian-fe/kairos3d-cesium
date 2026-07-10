@@ -1,56 +1,57 @@
 import { Color, type Entity } from "cesium";
 import type { KairosMap } from "../core";
+import { Evented } from "../core";
 import type { SelectionSymbolStyle } from "../style";
 import { createPointGraphics, parseColorLike } from "../style";
-import type { PickResult, SelectionState } from "./types";
+import type { PickResult, SelectionManagerEvents, SelectionState } from "./types";
 
-export class SelectionManager {
+export class SelectionManager extends Evented<SelectionManagerEvents> {
   private current?: PickResult;
   private marker?: Entity;
   private tileFeatureRestore?: () => void;
   private style?: SelectionSymbolStyle;
 
-  constructor(private readonly map: KairosMap) {}
+  constructor(private readonly map: KairosMap) {
+    super();
+  }
 
   select(result?: PickResult): SelectionState {
-    this.clear();
+    this.resetSelection();
 
     if (!result) {
-      return this.get();
+      return this.emitChange();
     }
 
     this.current = result;
     const markerHighlighted = this.highlightPosition(result);
     const tileHighlighted = this.highlightTileFeature(result);
 
-    return {
+    return this.emitChange({
       result,
       highlighted: markerHighlighted || tileHighlighted
-    };
+    });
   }
 
   clear(): SelectionState {
-    this.clearHighlight();
-    this.current = undefined;
-
-    return this.get();
+    this.resetSelection();
+    return this.emitChange();
   }
 
   setStyle(style: SelectionSymbolStyle): SelectionState {
     this.style = style;
     const current = this.current;
     if (!current) {
-      return this.get();
+      return this.emitChange();
     }
 
     this.clearHighlight();
     this.current = current;
     const markerHighlighted = this.highlightPosition(current);
     const tileHighlighted = this.highlightTileFeature(current);
-    return {
+    return this.emitChange({
       result: current,
       highlighted: markerHighlighted || tileHighlighted
-    };
+    });
   }
 
   private clearHighlight(): void {
@@ -72,6 +73,17 @@ export class SelectionManager {
 
   destroy(): void {
     this.clear();
+    this.off();
+  }
+
+  private resetSelection(): void {
+    this.clearHighlight();
+    this.current = undefined;
+  }
+
+  private emitChange(state: SelectionState = this.get()): SelectionState {
+    this.emit("change", state);
+    return state;
   }
 
   private highlightPosition(result: PickResult): boolean {

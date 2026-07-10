@@ -62,6 +62,7 @@ import type {
 
 export interface DrawManagerEvents {
   add: DrawResult;
+  update: DrawResult;
   remove: DrawResult;
   clear: DrawResult[];
   "edit-change": DrawEditEvent;
@@ -520,6 +521,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       }
     }
     applyDrawResultShow(result, result.show);
+    this.emit("update", result);
     return result;
   }
 
@@ -576,6 +578,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       positions: clonePositions(result.positions),
       reason
     };
+    this.emit("update", result);
     this.emit("edit-change", event);
     return result;
   }
@@ -585,6 +588,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     result.show = show;
     applyDrawResultShow(result, show);
     result.updatedAt = new Date();
+    this.emit("update", result);
     this.emit("edit-change", {
       result,
       previousPositions: clonePositions(result.positions),
@@ -598,6 +602,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     const result = this.getRequired(id);
     result.locked = locked;
     result.updatedAt = new Date();
+    this.emit("update", result);
     return result;
   }
 
@@ -605,6 +610,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     const result = this.getRequired(id);
     result.editable = editable;
     result.updatedAt = new Date();
+    this.emit("update", result);
     return result;
   }
 
@@ -612,6 +618,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     const result = this.getRequired(id);
     result.group = group;
     result.updatedAt = new Date();
+    this.emit("update", result);
     return result;
   }
 
@@ -834,6 +841,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   private emitProgrammaticChange(result: DrawResult): void {
+    this.emit("update", result);
     this.emit("edit-change", {
       result,
       previousPositions: clonePositions(result.positions),

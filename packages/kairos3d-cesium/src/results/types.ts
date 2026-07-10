@@ -7,6 +7,7 @@ import type {
   VisibilityResult
 } from "../analysis";
 import type { DrawResult } from "../draw";
+import type { HeadingPitchRange } from "cesium";
 
 export type ResultSource =
   | "draw"
@@ -35,6 +36,12 @@ export interface ResultRecord<R extends SDKManagedResult = SDKManagedResult> {
 export interface ResultQueryOptions {
   source?: ResultSource | ResultSource[];
   type?: SDKManagedResult["type"] | SDKManagedResult["type"][];
+}
+
+export interface ResultFlyToOptions {
+  source?: ResultSource;
+  duration?: number;
+  offset?: HeadingPitchRange;
 }
 
 export interface ResultManagerEvents {

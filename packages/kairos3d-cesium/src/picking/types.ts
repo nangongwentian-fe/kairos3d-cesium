@@ -54,3 +54,7 @@ export interface SelectionState {
   result?: PickResult;
   highlighted: boolean;
 }
+
+export interface SelectionManagerEvents {
+  change: SelectionState;
+}

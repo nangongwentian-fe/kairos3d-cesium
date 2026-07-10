@@ -1,3 +1,4 @@
+import { Cartesian3, Entity } from "cesium";
 import { describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
 import { Evented } from "../core/events";
@@ -63,6 +64,15 @@ function createMapMock() {
     terrain: new ResultStoreMock<SDKManagedResult>()
   };
   const map = {
+    viewer: {
+      entities: {
+        contains: vi.fn(() => false)
+      },
+      flyTo: vi.fn(async () => true),
+      camera: {
+        flyToBoundingSphere: vi.fn((_sphere, options) => options.complete?.())
+      }
+    },
     draw: stores.draw,
     analysis: {
       measure: stores.measure,
@@ -121,6 +131,45 @@ describe("ResultManager", () => {
     expect(removedDraw).toHaveLength(2);
     expect(removedDistance).toHaveLength(1);
     expect(manager.list().map((record) => record.id)).toEqual(["visibility-1"]);
+  });
+
+  it("flies to attached result entities before using coordinates", async () => {
+    const { map, stores } = createMapMock();
+    const manager = new ResultManager(map);
+    const entity = new Entity({ id: "draw-entity" });
+    vi.mocked(map.viewer.entities.contains).mockReturnValue(true);
+    stores.draw.add({
+      ...createResult("draw-entity", "point"),
+      entity,
+      positions: [Cartesian3.fromDegrees(114, 22)]
+    } as SDKManagedResult);
+
+    await expect(manager.flyTo("draw-entity", { source: "draw", duration: 1 })).resolves.toBe(
+      true
+    );
+    expect(map.viewer.flyTo).toHaveBeenCalledWith(entity, {
+      duration: 1,
+      offset: undefined
+    });
+    expect(map.viewer.camera.flyToBoundingSphere).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a position bounding sphere and returns false without a target", async () => {
+    const { map, stores } = createMapMock();
+    const manager = new ResultManager(map);
+    stores.measure.add({
+      ...createResult("distance-1", "distance"),
+      positions: [
+        Cartesian3.fromDegrees(114, 22),
+        Cartesian3.fromDegrees(114.01, 22.01)
+      ]
+    } as SDKManagedResult);
+    stores.clipping.add(createResult("plane-1", "plane"));
+
+    await expect(manager.flyTo("distance-1")).resolves.toBe(true);
+    await expect(manager.flyTo("plane-1")).resolves.toBe(false);
+    await expect(manager.flyTo("missing")).resolves.toBe(false);
+    expect(map.viewer.camera.flyToBoundingSphere).toHaveBeenCalledOnce();
   });
 
   it("emits aggregate add, remove, and clear events", () => {

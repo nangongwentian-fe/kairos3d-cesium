@@ -63,6 +63,27 @@ function createResult(id: string): DrawResult {
 }
 
 describe("DrawManager", () => {
+  it("emits update for every public result mutation", () => {
+    const manager = new DrawManager(createMapMock());
+    const result = manager.addResult(createResult("draw-events"));
+    const listener = vi.fn();
+    manager.on("update", listener);
+
+    manager.setProperties(result.id, { owner: "ops" });
+    manager.setMetadata(result.id, { source: "test" });
+    manager.setStyle(result.id, { line: { color: "#35d07f", width: 3 } });
+    manager.setShow(result.id, false);
+    manager.setLocked(result.id, true);
+    manager.setEditable(result.id, false);
+    manager.setGroup(result.id, "reviewed");
+    manager.update(result.id, result.positions);
+
+    expect(listener).toHaveBeenCalledTimes(8);
+    expect(listener).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ id: result.id }) })
+    );
+  });
+
   it("creates programmatic draw results for overlay-like types", () => {
     const map = createMapMock();
     const manager = new DrawManager(map);

@@ -82,9 +82,12 @@ describe("PickingManager", () => {
       .mockReturnValueOnce(secondHandler);
     const manager = new PickingManager(map, createHandler);
 
+    expect(manager.isClickEnabled()).toBe(false);
     manager.enableClick();
+    expect(manager.isClickEnabled()).toBe(true);
     manager.enableClick();
     manager.disableClick();
+    expect(manager.isClickEnabled()).toBe(false);
 
     expect(createHandler).toHaveBeenCalledTimes(2);
     expect(firstHandler.destroy).toHaveBeenCalledOnce();

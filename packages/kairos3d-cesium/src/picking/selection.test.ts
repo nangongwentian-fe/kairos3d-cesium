@@ -22,6 +22,34 @@ function createMapMock() {
 }
 
 describe("SelectionManager", () => {
+  it("emits one change event for each public selection mutation", () => {
+    const { map } = createMapMock();
+    const manager = new SelectionManager(map);
+    const listener = vi.fn();
+    const entity = new Entity({ id: "event-entity" });
+    const result: PickResult = {
+      id: "event-entity",
+      type: "entity",
+      object: entity,
+      entity,
+      position: Cartesian3.fromDegrees(114, 22, 10),
+      windowPosition: new Cartesian2(1, 2),
+      properties: {}
+    };
+    manager.on("change", listener);
+
+    manager.select(result);
+    manager.setStyle({ entity: { point: { color: "#35d07f" } } });
+    manager.clear();
+
+    expect(listener).toHaveBeenCalledTimes(3);
+    expect(listener.mock.calls.map(([event]) => event.data.result?.id)).toEqual([
+      "event-entity",
+      "event-entity",
+      undefined
+    ]);
+  });
+
   it("selects and clears Entity picks with a temporary marker", () => {
     const { map, marker } = createMapMock();
     const manager = new SelectionManager(map);

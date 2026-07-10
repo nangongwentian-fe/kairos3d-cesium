@@ -239,6 +239,7 @@ export class WidgetPlatform extends Evented<WidgetPlatformEvents> {
         createdAt: new Date().toISOString()
       };
       await storage.save(id, snapshot, { name: options.name });
+      this.emit("snapshot-save", { id });
     });
   }
 
@@ -256,18 +257,25 @@ export class WidgetPlatform extends Evented<WidgetPlatformEvents> {
       this.validateWorkspaceRegistrations(snapshot.workspace, options.workspace);
       await this.map.sceneState.load(snapshot.scene, options.scene);
       await this.loadWorkspaceNow(snapshot.workspace, options.workspace);
+      this.emit("snapshot-load", { id });
       return true;
     });
   }
 
   async removeSnapshot(id: string): Promise<boolean> {
     this.assertAlive();
-    return this.requireStorage().remove(id);
+    const removed = await this.requireStorage().remove(id);
+    this.emit("snapshot-remove", { id, removed });
+    return removed;
   }
 
   async listSnapshots(): Promise<WidgetSnapshotStorageRecord[]> {
     this.assertAlive();
     return this.requireStorage().list();
+  }
+
+  hasSnapshotStorage(): boolean {
+    return Boolean(this.snapshotStorage);
   }
 
   async destroy(): Promise<void> {

@@ -13,15 +13,20 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./widgets": {
+      "types": "./dist/widgets/index.d.ts",
+      "import": "./dist/widgets/index.js",
+      "require": "./dist/widgets/index.cjs"
+    },
     "./styles.css": "./dist/styles.css"
   },
   "files": ["dist"],
   "sideEffects": ["**/*.css"],
   "scripts": {
     "build": "vite build && tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p browser/tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "lint": "tsc -p tsconfig.json --noEmit && tsc -p browser/tsconfig.json --noEmit"
   },
   "peerDependencies": {
     "@kairos3d/cesium": "workspace:*",
@@ -48,6 +53,7 @@
     "react-dom": "^19.2.7",
     "typescript": "^6.0.3",
     "vite": "^8.1.3",
+    "vite-plugin-static-copy": "^4.1.1",
     "vitest": "^4.1.10"
   }
 }

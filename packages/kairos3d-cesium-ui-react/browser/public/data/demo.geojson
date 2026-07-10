@@ -1,0 +1,16 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Smoke Point",
+        "category": "browser-test"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [114.17, 22.3, 80]
+      }
+    }
+  ]
+}

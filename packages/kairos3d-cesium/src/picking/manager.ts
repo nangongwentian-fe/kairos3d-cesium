@@ -103,6 +103,10 @@ export class PickingManager extends Evented<PickingManagerEvents> {
     }, ScreenSpaceEventType.LEFT_CLICK);
   }
 
+  isClickEnabled(): boolean {
+    return Boolean(this.clickHandler);
+  }
+
   disableClick(): void {
     this.clickHandler?.destroy();
     this.clickHandler = undefined;

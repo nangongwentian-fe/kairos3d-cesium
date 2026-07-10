@@ -61,6 +61,10 @@ describe("public widget types", () => {
       operation: "create" | "activate" | "deactivate" | "destroy" | "load";
       error: Error;
     }>();
+    expectTypeOf<WidgetPlatformEvents["snapshot-remove"]>().toEqualTypeOf<{
+      id: string;
+      removed: boolean;
+    }>();
   });
 
   it("exposes data-only workspace and platform snapshots", () => {

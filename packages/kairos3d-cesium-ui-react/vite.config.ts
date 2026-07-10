@@ -4,12 +4,32 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: [
+      {
+        find: "@kairos3d/cesium-widget",
+        replacement: fileURLToPath(
+          new URL("../kairos3d-cesium-widget/src/index.ts", import.meta.url)
+        )
+      },
+      {
+        find: "@kairos3d/cesium/core",
+        replacement: fileURLToPath(
+          new URL("../kairos3d-cesium/src/core/index.ts", import.meta.url)
+        )
+      }
+    ]
+  },
   build: {
     lib: {
-      entry: fileURLToPath(new URL("./src/index.ts", import.meta.url)),
+      entry: {
+        index: fileURLToPath(new URL("./src/index.ts", import.meta.url)),
+        "widgets/index": fileURLToPath(new URL("./src/widgets/index.ts", import.meta.url))
+      },
       name: "Kairos3DCesiumUiReact",
       formats: ["es", "cjs"],
-      fileName: (format) => `index.${format === "es" ? "js" : "cjs"}`,
+      fileName: (format, entryName) =>
+        `${entryName}.${format === "es" ? "js" : "cjs"}`,
       cssFileName: "styles"
     },
     minify: false,

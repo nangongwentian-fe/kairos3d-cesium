@@ -93,6 +93,9 @@ export interface WidgetPlatformEvents {
   error: WidgetErrorEvent;
   "placement-change": { id: string; placement?: WidgetPlacement };
   load: { snapshot: WidgetWorkspaceSnapshot };
+  "snapshot-save": { id: string };
+  "snapshot-load": { id: string };
+  "snapshot-remove": { id: string; removed: boolean };
 }
 
 export interface WidgetWorkspaceSnapshot {

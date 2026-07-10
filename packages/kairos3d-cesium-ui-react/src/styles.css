@@ -336,3 +336,540 @@
     animation: none;
   }
 }
+
+.k3d-standard-widget {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  background: var(--k3d-bg-raised);
+}
+
+.k3d-standard-section {
+  border-bottom: 1px solid var(--k3d-border);
+}
+
+.k3d-standard-section:last-child {
+  border-bottom: 0;
+}
+
+.k3d-standard-section__header {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--k3d-bg) 72%, var(--k3d-bg-raised));
+}
+
+.k3d-standard-section__header h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.k3d-standard-section__actions,
+.k3d-standard-item__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.k3d-standard-section__body {
+  min-width: 0;
+  padding: 8px 10px 10px;
+}
+
+.k3d-standard-empty {
+  padding: 22px 12px;
+  color: var(--k3d-text-muted);
+  text-align: center;
+}
+
+.k3d-standard-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 8px 10px 0;
+  padding: 8px;
+  border-left: 3px solid var(--k3d-danger);
+  background: color-mix(in srgb, var(--k3d-danger) 9%, var(--k3d-bg-raised));
+  color: var(--k3d-text);
+  overflow-wrap: anywhere;
+}
+
+.k3d-standard-list {
+  display: grid;
+  gap: 1px;
+  margin: 0 -10px -10px;
+}
+
+.k3d-standard-item {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px 5px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--k3d-border) 55%, transparent);
+  background: var(--k3d-bg-raised);
+}
+
+.k3d-standard-item:first-child {
+  border-top: 0;
+}
+
+.k3d-standard-item:hover {
+  background: color-mix(in srgb, var(--k3d-bg-hover) 46%, var(--k3d-bg-raised));
+}
+
+.k3d-standard-item__main {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.k3d-standard-item__text {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.k3d-standard-item__text strong,
+.k3d-standard-item__text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k3d-standard-item__text strong {
+  color: var(--k3d-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.k3d-standard-item__text span,
+.k3d-select-row small {
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+}
+
+.k3d-select-row {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--k3d-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.k3d-select-row span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.k3d-select-row strong,
+.k3d-select-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k3d-select-row--active,
+.k3d-select-row:focus-visible {
+  border-color: color-mix(in srgb, var(--k3d-action) 62%, var(--k3d-border));
+  background: color-mix(in srgb, var(--k3d-action) 12%, var(--k3d-bg-raised));
+  outline: none;
+}
+
+.k3d-icon-button--accent {
+  border-color: color-mix(in srgb, var(--k3d-action) 65%, var(--k3d-border));
+  background: color-mix(in srgb, var(--k3d-action) 16%, var(--k3d-bg-raised));
+  color: var(--k3d-action-strong);
+}
+
+.k3d-icon-button--danger:hover:not(:disabled),
+.k3d-icon-button--danger:focus-visible {
+  border-color: var(--k3d-danger);
+  color: var(--k3d-danger);
+}
+
+.k3d-button {
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid var(--k3d-border);
+  border-radius: 4px;
+  background: var(--k3d-bg-raised);
+  color: var(--k3d-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.k3d-button:hover:not(:disabled),
+.k3d-button:focus-visible {
+  border-color: var(--k3d-action);
+  outline: none;
+}
+
+.k3d-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.k3d-button--primary {
+  border-color: var(--k3d-action);
+  background: color-mix(in srgb, var(--k3d-action) 16%, var(--k3d-bg-raised));
+  color: var(--k3d-action-strong);
+}
+
+.k3d-button--danger {
+  border-color: var(--k3d-danger);
+  color: var(--k3d-danger);
+}
+
+.k3d-confirm-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px;
+  background: color-mix(in srgb, var(--k3d-warning) 9%, var(--k3d-bg-raised));
+  color: var(--k3d-text);
+}
+
+.k3d-confirm-row > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.k3d-field {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+}
+
+.k3d-field--grow {
+  flex: 1;
+}
+
+.k3d-field--inline {
+  grid-template-columns: auto 58px;
+  align-items: center;
+}
+
+.k3d-field input,
+.k3d-field select,
+.k3d-field textarea {
+  min-width: 0;
+  border: 1px solid var(--k3d-border);
+  border-radius: 4px;
+  background: var(--k3d-bg);
+  color: var(--k3d-text);
+  font: inherit;
+}
+
+.k3d-field input,
+.k3d-field select {
+  height: 30px;
+  padding: 0 7px;
+}
+
+.k3d-field textarea {
+  width: 100%;
+  padding: 7px;
+  resize: vertical;
+  font-family: "Cascadia Code", Consolas, monospace;
+  line-height: 1.45;
+}
+
+.k3d-field input:focus,
+.k3d-field select:focus,
+.k3d-field textarea:focus {
+  border-color: var(--k3d-action);
+  outline: none;
+}
+
+.k3d-command-row,
+.k3d-filter-row {
+  display: flex;
+  min-width: 0;
+  align-items: end;
+  gap: 6px;
+}
+
+.k3d-command-row--compact {
+  align-items: center;
+  margin-top: 8px;
+}
+
+.k3d-tool-status {
+  min-width: 0;
+  flex: 1;
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k3d-command-row--compact .k3d-tool-status {
+  margin-top: 0;
+}
+
+.k3d-slider-row {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 42px 1fr 38px;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 4px 3px 34px;
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+}
+
+.k3d-slider-row input {
+  width: 100%;
+  accent-color: var(--k3d-action);
+}
+
+.k3d-slider-row output {
+  text-align: right;
+}
+
+.k3d-definition-list,
+.k3d-property-list {
+  display: grid;
+  margin: 0;
+}
+
+.k3d-definition-list > div,
+.k3d-property-list > div {
+  display: grid;
+  grid-template-columns: minmax(72px, 32%) 1fr;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--k3d-border) 52%, transparent);
+}
+
+.k3d-definition-list > div:last-child,
+.k3d-property-list > div:last-child {
+  border-bottom: 0;
+}
+
+.k3d-definition-list dt,
+.k3d-property-list dt {
+  color: var(--k3d-text-muted);
+}
+
+.k3d-definition-list dd,
+.k3d-property-list dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.k3d-property-list pre {
+  max-height: 160px;
+  margin: 0;
+  overflow: auto;
+  color: var(--k3d-text);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.k3d-coordinate-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.k3d-coordinate-row code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--k3d-action-strong);
+}
+
+.k3d-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+.k3d-toggle-button,
+.k3d-command-button {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid var(--k3d-border);
+  border-radius: 4px;
+  background: var(--k3d-bg);
+  color: var(--k3d-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.k3d-toggle-button[aria-pressed="true"],
+.k3d-toggle-button:hover:not(:disabled),
+.k3d-command-button:hover:not(:disabled) {
+  border-color: var(--k3d-action);
+  color: var(--k3d-action-strong);
+}
+
+.k3d-toggle-button:disabled,
+.k3d-command-button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.k3d-style-editor {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px 10px;
+  margin-bottom: 10px;
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+}
+
+.k3d-color-swatches {
+  display: flex;
+  gap: 5px;
+}
+
+.k3d-color-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.k3d-color-swatch[aria-pressed="true"],
+.k3d-color-swatch:focus-visible {
+  border-color: var(--k3d-text);
+  outline: 1px solid var(--k3d-action);
+}
+
+.k3d-segment-field {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+}
+
+.k3d-segmented {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  border: 1px solid var(--k3d-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.k3d-segmented button {
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 0;
+  border-right: 1px solid var(--k3d-border);
+  background: var(--k3d-bg);
+  color: var(--k3d-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.k3d-segmented button:last-child {
+  border-right: 0;
+}
+
+.k3d-segmented button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--k3d-action) 18%, var(--k3d-bg));
+  color: var(--k3d-action-strong);
+}
+
+.k3d-measure-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.k3d-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.k3d-profile-chart {
+  display: grid;
+  gap: 6px;
+}
+
+.k3d-profile-chart svg {
+  width: 100%;
+  aspect-ratio: 300 / 130;
+  border: 1px solid var(--k3d-border);
+  border-radius: 4px;
+  background: var(--k3d-bg);
+}
+
+.k3d-profile-chart line {
+  stroke: var(--k3d-border);
+  stroke-width: 1;
+}
+
+.k3d-profile-chart polyline {
+  fill: none;
+  stroke: var(--k3d-action);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.k3d-profile-chart > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--k3d-text-muted);
+  font-size: 10px;
+}
+
+.k3d-standard-note {
+  margin: 8px 0 0;
+  color: var(--k3d-text-muted);
+  font-size: 11px;
+}

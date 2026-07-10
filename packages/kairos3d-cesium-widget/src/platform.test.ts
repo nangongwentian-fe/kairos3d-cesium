@@ -253,6 +253,12 @@ describe("WidgetPlatform", () => {
     const storage = createMemoryWidgetSnapshotStorage();
     const { map } = createMapStub();
     const platform = createWidgetPlatform({ map, snapshotStorage: storage });
+    const onSave = vi.fn();
+    const onLoad = vi.fn();
+    const onRemove = vi.fn();
+    platform.on("snapshot-save", onSave);
+    platform.on("snapshot-load", onLoad);
+    platform.on("snapshot-remove", onRemove);
     platform.register(definition("layers", controller()));
     await platform.activate("layers");
 
@@ -266,11 +272,22 @@ describe("WidgetPlatform", () => {
     ]);
     expect(await platform.removeSnapshot("workspace-1")).toBe(true);
     expect(await platform.loadSnapshot("workspace-1")).toBe(false);
+    expect(platform.hasSnapshotStorage()).toBe(true);
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { id: "workspace-1" } })
+    );
+    expect(onLoad).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { id: "workspace-1" } })
+    );
+    expect(onRemove).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { id: "workspace-1", removed: true } })
+    );
   });
 
   it("reports missing snapshot storage clearly", async () => {
     const platform = createPlatform();
 
+    expect(platform.hasSnapshotStorage()).toBe(false);
     await expect(platform.saveSnapshot("missing")).rejects.toThrow("not configured");
     await expect(platform.loadSnapshot("missing")).rejects.toThrow("not configured");
   });
