@@ -20,6 +20,7 @@ function createMapMock() {
       viewer: {
         scene: {
           primitives: {
+            destroyPrimitives: true,
             add: vi.fn((collection: PolylineCollection) => {
               collections.push(collection);
               return collection;
@@ -191,5 +192,39 @@ describe("PrimitiveOverlayManager", () => {
       'Primitive overlay snapshot id "line" is duplicated.'
     );
     expect(manager.list()).toEqual([]);
+  });
+
+  it("stages primitive runtime and restores the original collection on rollback", async () => {
+    const { map, collections } = createMapMock();
+    const manager = new PrimitiveOverlayManager(map);
+    const original = manager.addPolyline({ id: "old", positions: createPositions() });
+    const originalCollection = original.collection;
+    const snapshot: PrimitivePolylineSnapshot = {
+      id: "new",
+      type: "polyline",
+      positions: [
+        { longitude: 114, latitude: 22, height: 10 },
+        { longitude: 114.01, latitude: 22.01, height: 20 }
+      ],
+      color: { red: 0, green: 1, blue: 1, alpha: 1 },
+      width: 3,
+      show: true,
+      loop: false,
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    const stage = await manager.prepareSceneLoad([snapshot], { clear: true });
+    expect(collections).toEqual([originalCollection]);
+
+    await stage.commit();
+    expect(manager.list().map((overlay) => overlay.id)).toEqual(["new"]);
+    expect(collections).toHaveLength(1);
+    expect(collections[0]).not.toBe(originalCollection);
+
+    await stage.rollback();
+    expect(manager.get("old")).toBe(original);
+    expect(manager.get("old")?.collection).toBe(originalCollection);
+    expect(collections).toEqual([originalCollection]);
+    await stage.dispose();
   });
 });

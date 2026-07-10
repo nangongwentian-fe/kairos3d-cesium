@@ -17,6 +17,7 @@ export default defineConfig({
         items: [
           { text: "Getting Started", link: "/guide/getting-started" },
           { text: "Operations And Loading", link: "/guide/operations" },
+          { text: "Scene Transactions", link: "/guide/scene-transactions" },
           { text: "Architecture", link: "/guide/architecture" },
           { text: "First Version Status", link: "/guide/first-version-status" },
           { text: "Roadmap", link: "/guide/roadmap" },

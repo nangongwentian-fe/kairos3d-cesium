@@ -33,6 +33,12 @@ export default defineConfig({
   },
   resolve: {
     alias: [
+      ...["layers", "operations", "scene", "effects"].map((subpath) => ({
+        find: `@kairos3d/cesium/${subpath}`,
+        replacement: fileURLToPath(
+          new URL(`../../kairos3d-cesium/src/${subpath}/index.ts`, import.meta.url)
+        )
+      })),
       {
         find: "@kairos3d/cesium-widget",
         replacement: fileURLToPath(

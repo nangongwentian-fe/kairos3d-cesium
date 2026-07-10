@@ -3,6 +3,10 @@ import {
   Entity
 } from "cesium";
 import type { KairosMap } from "../core/map";
+import {
+  removeEntityIfOwned,
+  removeEntityIfOwnedTracked
+} from "../core/entity-collection";
 import { Evented } from "../core/events";
 import {
   deserializePositions,
@@ -18,6 +22,7 @@ import {
 } from "../style";
 import {
   cloneOverlayData,
+  createOverlayEntity,
   normalizeOverlayHeight,
   renderOverlayEntity,
   validateOverlayShape
@@ -28,11 +33,18 @@ import {
 } from "../overlays/geojson";
 import type { OverlayData } from "../overlays/types";
 import {
+  attachResultPrimitiveRuntimes,
+  createDetachedResultPolygonPrimitives,
+  createDetachedResultPolylinePrimitive,
   createResultPolygonPrimitives,
   createResultPolylinePrimitive,
+  destroyResultPrimitiveRuntimes,
+  detachResultPrimitiveRuntimes,
   removeResultPrimitiveRuntimes,
-  resolveResultRenderMode
+  resolveResultRenderMode,
+  type ResultPrimitiveRuntime
 } from "../primitives";
+import type { PreparedSceneStage } from "../scene/transaction";
 import { clonePositions, minPositionCount } from "./geometry";
 import type {
   DrawEditEvent,
@@ -474,6 +486,163 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: DrawResultSnapshot[],
+    options: DrawResultLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    const prepared = this.prepareSnapshots(snapshots);
+    const clear = options.clear ?? false;
+    if (!clear) {
+      for (const item of prepared) {
+        if (this.results.has(item.snapshot.id)) {
+          throw new Error(
+            `Draw result "${item.snapshot.id}" already exists during transactional merge.`
+          );
+        }
+      }
+    }
+
+    const staged: DrawResult[] = [];
+    try {
+      for (const item of prepared) {
+        staged.push(this.createPreparedResult(item));
+      }
+    } catch (error) {
+      for (const result of staged) {
+        destroyResultPrimitiveRuntimes(result.primitives);
+      }
+      throw error;
+    }
+    const previous = clear ? this.list() : [];
+    let commitStarted = false;
+    let mapsSwapped = false;
+    let rolledBack = false;
+    let finalized = false;
+    let disposed = false;
+    let published = false;
+    const detachedPreviousEntities: Entity[] = [];
+    const detachedPreviousPrimitives: ResultPrimitiveRuntime[] = [];
+
+    return {
+      phase: "draw",
+      commit: () => {
+        assertResultMapUnchanged(this.results, previous, clear, "Draw");
+        commitStarted = true;
+        for (const result of previous) {
+          detachDrawRuntimeTracked(
+            this.map,
+            result,
+            detachedPreviousEntities,
+            detachedPreviousPrimitives
+          );
+        }
+        for (const result of staged) {
+          attachDrawRuntime(this.map, result);
+        }
+        if (clear) {
+          this.results.clear();
+        }
+        for (const result of staged) {
+          this.results.set(result.id, result);
+        }
+        mapsSwapped = true;
+      },
+      rollback: () => {
+        if (!commitStarted || rolledBack || finalized || disposed) {
+          return;
+        }
+        const errors: unknown[] = [];
+        for (const result of [...staged].reverse()) {
+          try {
+            detachDrawRuntime(this.map, result);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (mapsSwapped) {
+          for (const result of staged) {
+            this.results.delete(result.id);
+          }
+        }
+        for (const entity of detachedPreviousEntities) {
+          try {
+            this.map.viewer.entities.add(entity);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        for (const runtime of detachedPreviousPrimitives) {
+          try {
+            attachResultPrimitiveRuntimes(this.map, [runtime]);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        for (const result of previous) {
+          this.results.set(result.id, result);
+        }
+        detachedPreviousEntities.length = 0;
+        detachedPreviousPrimitives.length = 0;
+        mapsSwapped = false;
+        rolledBack = true;
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to roll back draw results.");
+        }
+      },
+      finalize: () => {
+        if (finalized) {
+          return;
+        }
+        for (const result of previous) {
+          destroyResultPrimitiveRuntimes(result.primitives);
+        }
+        finalized = true;
+      },
+      dispose: () => {
+        if (disposed || finalized) {
+          return;
+        }
+        const errors: unknown[] = [];
+        for (const result of [...staged].reverse()) {
+          try {
+            detachDrawRuntime(this.map, result);
+          } catch (error) {
+            errors.push(error);
+          }
+          try {
+            destroyResultPrimitiveRuntimes(result.primitives);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        disposed = true;
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to dispose prepared draw results.");
+        }
+      },
+      publish: () => {
+        if (published) {
+          return;
+        }
+        if (clear) {
+          for (const result of previous) {
+            this.emit("remove", result);
+          }
+          this.emit("clear", previous);
+          this.map.tools.emitClear({
+            source: "draw",
+            ids: previous.map((result) => result.id)
+          });
+        }
+        for (const result of staged) {
+          this.emit("add", result);
+        }
+        published = true;
+      }
+    };
+  }
+
   toKairosJSON(): DrawResultSnapshot[] {
     return this.toJSON();
   }
@@ -644,7 +813,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       this.cancelEdit();
     }
 
-    this.map.viewer.entities.remove(result.entity);
+    removeEntityIfOwned(this.map.viewer.entities, result.entity);
     removeResultPrimitiveRuntimes(this.map, result.primitives);
     this.results.delete(id);
     this.emit("remove", result);
@@ -659,7 +828,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
 
     const removed = [...this.results.values()];
     for (const result of removed) {
-      this.map.viewer.entities.remove(result.entity);
+      removeEntityIfOwned(this.map.viewer.entities, result.entity);
       removeResultPrimitiveRuntimes(this.map, result.primitives);
       this.emit("remove", result);
     }
@@ -791,24 +960,22 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   private restoreSnapshot(prepared: PreparedDrawSnapshot): DrawResult {
-    const { snapshot, positions, data, style, height, renderMode } = prepared;
-    if (positions.length < minPositionCount(snapshot.type)) {
-      throw new Error(
-        `Draw result "${snapshot.id}" requires at least ${minPositionCount(snapshot.type)} positions.`
-      );
+    const result = this.createPreparedResult(prepared);
+    if (this.results.has(result.id)) {
+      this.remove(result.id);
     }
-    if (this.results.has(snapshot.id)) {
-      this.remove(snapshot.id);
-    }
+    attachDrawRuntime(this.map, result);
+    return this.addResult(result);
+  }
 
-    const entity =
-      renderMode === "primitive"
-        ? new Entity({ id: snapshot.id })
-        : renderDrawEntity(this.map, snapshot.type, snapshot.id, positions, style, height, data);
-    const primitives =
-      renderMode === "primitive"
-        ? renderDrawPrimitives(this.map, snapshot.type, snapshot.id, positions, style)
-        : undefined;
+  private createPreparedResult(prepared: PreparedDrawSnapshot): DrawResult {
+    const { snapshot, positions, data, style, height, renderMode } = prepared;
+    const entity = renderMode === "primitive"
+      ? new Entity({ id: snapshot.id })
+      : createDrawEntity(snapshot.type, snapshot.id, positions, style, height, data);
+    const primitives = renderMode === "primitive"
+      ? createDrawPrimitives(snapshot.type, snapshot.id, positions, style)
+      : undefined;
     const result: DrawResult = {
       id: snapshot.id,
       type: snapshot.type,
@@ -828,8 +995,8 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       renderMode,
       primitives
     };
-
-    return this.addResult(result);
+    applyDrawResultShow(result, result.show);
+    return result;
   }
 
   private getRequired(id: string): DrawResult {
@@ -870,6 +1037,17 @@ function renderDrawEntity(
   });
 }
 
+function createDrawEntity(
+  type: DrawResult["type"],
+  id: string,
+  positions: Cartesian3[],
+  style: ResultSymbolStyle,
+  height?: DrawResult["height"],
+  data?: OverlayData
+): Entity {
+  return createOverlayEntity({ id, type, positions, data, style, height });
+}
+
 export function renderDrawPrimitives(
   map: KairosMap,
   type: DrawResult["type"],
@@ -898,6 +1076,33 @@ export function renderDrawPrimitives(
   return undefined;
 }
 
+function createDrawPrimitives(
+  type: DrawResult["type"],
+  id: string,
+  positions: Cartesian3[],
+  style: ResultSymbolStyle
+) {
+  if (type === "polyline") {
+    return [
+      createDetachedResultPolylinePrimitive({
+        id,
+        positions,
+        style: style.line
+      })
+    ];
+  }
+
+  if (type === "polygon") {
+    return createDetachedResultPolygonPrimitives({
+      id,
+      positions,
+      style: style.polygon
+    });
+  }
+
+  return undefined;
+}
+
 function resolveDrawRenderMode(
   type: DrawResult["type"],
   renderMode: DrawResultSnapshot["renderMode"]
@@ -909,7 +1114,7 @@ function resolveDrawRenderMode(
 }
 
 function rerenderDrawEntity(map: KairosMap, result: DrawResult): void {
-  map.viewer.entities.remove(result.entity);
+  removeEntityIfOwned(map.viewer.entities, result.entity);
   result.entity = renderDrawEntity(
     map,
     result.type,
@@ -1039,6 +1244,78 @@ function applyDrawResultShow(result: DrawResult, show: boolean): void {
       runtime.polyline.show = show;
     } else {
       runtime.primitive.show = show;
+    }
+  }
+}
+
+function attachDrawRuntime(map: KairosMap, result: DrawResult): void {
+  if (result.renderMode !== "primitive") {
+    map.viewer.entities.add(result.entity);
+  }
+  attachResultPrimitiveRuntimes(map, result.primitives);
+}
+
+function detachDrawRuntime(map: KairosMap, result: DrawResult): void {
+  if (result.renderMode !== "primitive") {
+    removeEntityIfOwned(map.viewer.entities, result.entity);
+  }
+  detachResultPrimitiveRuntimes(map, result.primitives);
+}
+
+function detachDrawRuntimeTracked(
+  map: KairosMap,
+  result: DrawResult,
+  detachedEntities: Entity[],
+  detachedPrimitives: ResultPrimitiveRuntime[]
+): void {
+  if (result.renderMode !== "primitive") {
+    removeEntityIfOwnedTracked(map.viewer.entities, result.entity, detachedEntities);
+  }
+  detachResultPrimitivesTracked(map, result.primitives, detachedPrimitives);
+}
+
+function detachResultPrimitivesTracked(
+  map: KairosMap,
+  runtimes: ResultPrimitiveRuntime[] | undefined,
+  detached: ResultPrimitiveRuntime[]
+): void {
+  const collection = map.viewer.scene.primitives;
+  const canInspect = typeof collection.contains === "function";
+  const attached = canInspect
+    ? (runtimes ?? []).filter((runtime) =>
+        collection.contains(getResultPrimitiveObject(runtime))
+      )
+    : [];
+  try {
+    detachResultPrimitiveRuntimes(map, runtimes);
+  } finally {
+    for (const runtime of attached) {
+      if (
+        !collection.contains(getResultPrimitiveObject(runtime)) &&
+        !detached.includes(runtime)
+      ) {
+        detached.push(runtime);
+      }
+    }
+  }
+}
+
+function getResultPrimitiveObject(runtime: ResultPrimitiveRuntime) {
+  return runtime.type === "polyline" ? runtime.collection : runtime.primitive;
+}
+
+function assertResultMapUnchanged<T extends { id: string }>(
+  results: Map<string, T>,
+  previous: T[],
+  clear: boolean,
+  label: string
+): void {
+  if (clear && results.size !== previous.length) {
+    throw new Error(`${label} results changed after transactional preparation.`);
+  }
+  for (const result of previous) {
+    if (results.get(result.id) !== result) {
+      throw new Error(`${label} result "${result.id}" changed after transactional preparation.`);
     }
   }
 }

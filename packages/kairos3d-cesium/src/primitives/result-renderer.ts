@@ -31,8 +31,18 @@ export function createResultPolylinePrimitive(
     loop?: boolean;
   }
 ): ResultPrimitiveRuntime {
+  const runtime = createDetachedResultPolylinePrimitive(options);
+  attachResultPrimitiveRuntimes(map, [runtime]);
+  return runtime;
+}
+
+export function createDetachedResultPolylinePrimitive(options: {
+  id: string;
+  positions: Cartesian3[];
+  style?: LineSymbolStyle;
+  loop?: boolean;
+}): ResultPrimitiveRuntime {
   const collection = new PolylineCollection();
-  map.viewer.scene.primitives.add(collection);
   const color = parseColorLike(options.style?.color ?? Color.WHITE, "primitive.line.color");
   const polyline = collection.add({
     id: options.id,
@@ -59,6 +69,16 @@ export function createResultPolygonPrimitives(
     style?: PolygonSymbolStyle;
   }
 ): ResultPrimitiveRuntime[] {
+  const runtimes = createDetachedResultPolygonPrimitives(options);
+  attachResultPrimitiveRuntimes(map, runtimes);
+  return runtimes;
+}
+
+export function createDetachedResultPolygonPrimitives(options: {
+  id: string;
+  positions: Cartesian3[];
+  style?: PolygonSymbolStyle;
+}): ResultPrimitiveRuntime[] {
   const fillColor = parseColorLike(
     options.style?.fillColor ?? Color.WHITE.withAlpha(0.25),
     "primitive.polygon.fillColor"
@@ -80,9 +100,8 @@ export function createResultPolygonPrimitives(
     }),
     asynchronous: false
   });
-  map.viewer.scene.primitives.add(primitive);
 
-  const outline = createResultPolylinePrimitive(map, {
+  const outline = createDetachedResultPolylinePrimitive({
     id: `${options.id}-outline`,
     positions: options.positions,
     style: {
@@ -107,17 +126,51 @@ export function removeResultPrimitiveRuntimes(
   map: KairosMap,
   runtimes: ResultPrimitiveRuntime[] | undefined
 ): void {
+  detachResultPrimitiveRuntimes(map, runtimes);
+  destroyResultPrimitiveRuntimes(runtimes);
+}
+
+export function attachResultPrimitiveRuntimes(
+  map: KairosMap,
+  runtimes: ResultPrimitiveRuntime[] | undefined
+): void {
   for (const runtime of runtimes ?? []) {
-    if (runtime.type === "polyline") {
-      runtime.collection.remove(runtime.polyline);
-      if (runtime.collection.length === 0) {
-        map.viewer.scene.primitives.remove(runtime.collection);
-        if (!runtime.collection.isDestroyed()) {
-          runtime.collection.destroy();
-        }
-      }
-    } else {
-      map.viewer.scene.primitives.remove(runtime.primitive);
+    map.viewer.scene.primitives.add(
+      runtime.type === "polyline" ? runtime.collection : runtime.primitive
+    );
+  }
+}
+
+export function detachResultPrimitiveRuntimes(
+  map: KairosMap,
+  runtimes: ResultPrimitiveRuntime[] | undefined
+): void {
+  const collection = map.viewer.scene.primitives;
+  const destroyPrimitives = collection.destroyPrimitives;
+  collection.destroyPrimitives = false;
+  try {
+    for (const runtime of [...(runtimes ?? [])].reverse()) {
+      collection.remove(
+        runtime.type === "polyline" ? runtime.collection : runtime.primitive
+      );
+    }
+  } finally {
+    collection.destroyPrimitives = destroyPrimitives;
+  }
+}
+
+export function destroyResultPrimitiveRuntimes(
+  runtimes: ResultPrimitiveRuntime[] | undefined
+): void {
+  const destroyed = new Set<Primitive | PolylineCollection>();
+  for (const runtime of runtimes ?? []) {
+    const primitive = runtime.type === "polyline" ? runtime.collection : runtime.primitive;
+    if (destroyed.has(primitive)) {
+      continue;
+    }
+    destroyed.add(primitive);
+    if (!primitive.isDestroyed()) {
+      primitive.destroy();
     }
   }
 }

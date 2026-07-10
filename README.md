@@ -68,7 +68,7 @@ The SDK is organized as small TypeScript modules instead of a global platform ob
 | `@kairos3d/cesium/tools` | Exclusive interactive tool lifecycle and `registerTool`. |
 | `@kairos3d/cesium/draw` | Point, polyline, polygon drawing, editing, and draw result cleanup. |
 | `@kairos3d/cesium/analysis` | Distance, area, height measurement, visibility/profile/terrain analysis, volume/flood/excavation estimates, clipping, and result cleanup. |
-| `@kairos3d/cesium/scene` | Camera view capture, camera bookmarks, and scene snapshot export/load, with optional runtime results. |
+| `@kairos3d/cesium/scene` | Camera views, bookmarks, v1 snapshot validation, and transactional scene recovery. |
 | `@kairos3d/cesium/picking` | Entity, 3D Tiles, imagery, and primitive picking with selection state. |
 | `@kairos3d/cesium/materials` | Public-API material registry and factories for Entity properties and Primitive fabric materials. |
 | `@kairos3d/cesium/effects` | SDK-managed geometry, particle, and weather effects with lifecycle and snapshot support. |
@@ -307,7 +307,7 @@ try {
 }
 ```
 
-Cancellation prevents late scene commits where the underlying Cesium promise cannot be aborted. Composite scene recovery is not transactional in M9; completed phases are not rolled back. See [Operations And Loading](apps/docs/guide/operations.md).
+Cancellation prevents late scene commits where the underlying Cesium promise cannot be aborted. A canceled transactional scene load rejects immediately, while `map.sceneState.whenIdle()` waits for background rollback to finish. See [Operations And Loading](apps/docs/guide/operations.md) and [Transactional Scene Recovery](apps/docs/guide/scene-transactions.md).
 
 ## Scene State
 
@@ -329,6 +329,7 @@ const snapshot = map.sceneState.toJSON({
   includeEffects: true
 });
 await map.sceneState.load(snapshot, {
+  mode: "transactional",
   clearLayers: true,
   flyToCamera: true,
   restoreResults: true,
@@ -340,7 +341,9 @@ await map.sceneState.load(snapshot, {
 });
 ```
 
-Runtime snapshots are data-only. `EffectSnapshot` stores serializable effect configuration and restarts animation from its initial phase on recovery; it does not serialize Cesium `Material`, `Primitive`, `ParticleSystem`, `PostProcessStage`, callbacks, functions, or intermediate animation state. Custom material definitions must be registered before restoring effects that reference them.
+`transactional` is the default load mode. It validates and prepares all supported SDK-managed runtime before replacing the current scene; commit failures restore the original runtime objects. Use `mode: "progressive"` only for legacy custom layer adapters that do not implement transaction hooks or when partial phase-by-phase loading is intentional.
+
+`SceneSnapshot` remains fixed at `version: 1`; the SDK does not expose migration APIs while no incompatible persisted schema exists. Runtime snapshots are data-only. `EffectSnapshot` stores serializable effect configuration and restarts animation from its initial phase on recovery; it does not serialize Cesium `Material`, `Primitive`, `ParticleSystem`, `PostProcessStage`, callbacks, functions, or intermediate animation state. Custom material definitions must be registered before restoring effects that reference them.
 
 ## Persistence Adapters
 

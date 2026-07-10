@@ -20,6 +20,7 @@ import type {
   PrimitivePolylineOverlay,
   PrimitivePolylineSnapshot
 } from "./types";
+import type { PreparedSceneStage } from "../scene/transaction";
 
 interface PreparedPrimitivePolylineSnapshot {
   options: Required<Pick<
@@ -32,6 +33,7 @@ interface PreparedPrimitivePolylineSnapshot {
 export class PrimitiveOverlayManager {
   private readonly overlays = new Map<string, PrimitiveOverlay>();
   private polylineCollection?: PolylineCollection;
+  private readonly polylineCollections = new Set<PolylineCollection>();
 
   constructor(private readonly map: KairosMap) {}
 
@@ -105,8 +107,14 @@ export class PrimitiveOverlayManager {
 
   clear(): void {
     this.overlays.clear();
-    this.polylineCollection?.removeAll();
-    this.destroyEmptyCollections();
+    for (const collection of [...this.polylineCollections]) {
+      this.map.viewer.scene.primitives.remove(collection);
+      if (!collection.isDestroyed()) {
+        collection.destroy();
+      }
+    }
+    this.polylineCollections.clear();
+    this.polylineCollection = undefined;
   }
 
   toJSON(): PrimitiveOverlaySnapshot[] {
@@ -124,8 +132,119 @@ export class PrimitiveOverlayManager {
     return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: PrimitiveOverlaySnapshot[],
+    options: { clear?: boolean } = {}
+  ): Promise<PreparedSceneStage> {
+    const prepared = preparePrimitiveSnapshots(snapshots);
+    if (!options.clear) {
+      for (const item of prepared) {
+        if (this.overlays.has(item.options.id)) {
+          throw new Error(
+            `Primitive overlay "${item.options.id}" already exists during transactional merge.`
+          );
+        }
+      }
+    }
+
+    const stagedCollection = new PolylineCollection();
+    const staged = prepared.map((item) => createPreparedPrimitiveOverlay(stagedCollection, item));
+    const previous = options.clear ? this.list() : [];
+    const previousCollections = options.clear ? [...this.polylineCollections] : [];
+    let stagedAttached = false;
+    let mapsSwapped = false;
+    let previousDetached = false;
+    let finalized = false;
+
+    return {
+      phase: "primitives",
+      commit: () => {
+        if (options.clear) {
+          for (const collection of previousCollections) {
+            detachPrimitiveCollection(this.map, collection);
+          }
+          previousDetached = true;
+        }
+        if (staged.length > 0) {
+          this.map.viewer.scene.primitives.add(stagedCollection);
+          this.polylineCollections.add(stagedCollection);
+          this.polylineCollection = stagedCollection;
+          stagedAttached = true;
+        }
+        if (options.clear) {
+          this.overlays.clear();
+          for (const collection of previousCollections) {
+            this.polylineCollections.delete(collection);
+          }
+        }
+        for (const overlay of staged) {
+          this.overlays.set(overlay.id, overlay);
+        }
+        mapsSwapped = true;
+      },
+      rollback: () => {
+        if (stagedAttached) {
+          detachPrimitiveCollection(this.map, stagedCollection);
+          this.polylineCollections.delete(stagedCollection);
+          stagedAttached = false;
+        }
+        if (mapsSwapped) {
+          for (const overlay of staged) {
+            this.overlays.delete(overlay.id);
+          }
+        }
+        if (options.clear) {
+          for (const overlay of previous) {
+            this.overlays.set(overlay.id, overlay);
+          }
+          for (const collection of previousCollections) {
+            this.map.viewer.scene.primitives.add(collection);
+            this.polylineCollections.add(collection);
+          }
+          this.polylineCollection = previousCollections.at(-1);
+          previousDetached = false;
+        }
+        mapsSwapped = false;
+      },
+      finalize: () => {
+        if (finalized) {
+          return;
+        }
+        finalized = true;
+        if (options.clear && previousDetached) {
+          for (const collection of previousCollections) {
+            if (!collection.isDestroyed()) {
+              collection.destroy();
+            }
+          }
+          previousDetached = false;
+        }
+      },
+      dispose: () => {
+        if (stagedAttached) {
+          detachPrimitiveCollection(this.map, stagedCollection);
+          this.polylineCollections.delete(stagedCollection);
+          stagedAttached = false;
+        }
+        if (!finalized && !stagedCollection.isDestroyed()) {
+          stagedCollection.destroy();
+        }
+      },
+      publish: () => undefined
+    };
+  }
+
   destroy(): void {
-    this.clear();
+    this.overlays.clear();
+    for (const collection of [...this.polylineCollections]) {
+      this.map.viewer.scene.primitives.remove(collection);
+      if (!collection.isDestroyed()) {
+        collection.destroy();
+      }
+    }
+    this.polylineCollections.clear();
+    this.polylineCollection = undefined;
   }
 
   private restoreSnapshot(snapshot: PreparedPrimitivePolylineSnapshot): PrimitiveOverlay {
@@ -150,18 +269,66 @@ export class PrimitiveOverlayManager {
     if (!this.polylineCollection || this.polylineCollection.isDestroyed()) {
       this.polylineCollection = new PolylineCollection();
       this.map.viewer.scene.primitives.add(this.polylineCollection);
+      this.polylineCollections.add(this.polylineCollection);
     }
     return this.polylineCollection;
   }
 
   private destroyEmptyCollections(): void {
-    if (this.polylineCollection && this.polylineCollection.length === 0) {
-      this.map.viewer.scene.primitives.remove(this.polylineCollection);
-      if (!this.polylineCollection.isDestroyed()) {
-        this.polylineCollection.destroy();
+    for (const collection of [...this.polylineCollections]) {
+      if (collection.length === 0) {
+        this.map.viewer.scene.primitives.remove(collection);
+        if (!collection.isDestroyed()) {
+          collection.destroy();
+        }
+        this.polylineCollections.delete(collection);
+        if (this.polylineCollection === collection) {
+          this.polylineCollection = undefined;
+        }
       }
-      this.polylineCollection = undefined;
     }
+  }
+}
+
+function createPreparedPrimitiveOverlay(
+  collection: PolylineCollection,
+  snapshot: PreparedPrimitivePolylineSnapshot
+): PrimitivePolylineOverlay {
+  const { options } = snapshot;
+  const color = serializeColor(options.color);
+  const polyline = collection.add({
+    positions: clonePositions(options.positions),
+    material: Material.fromType("Color", {
+      color: parseColorLike(color, "primitive.polyline.color")
+    }),
+    width: options.width,
+    show: options.show,
+    loop: options.loop,
+    id: options.id
+  });
+  return {
+    id: options.id,
+    type: "polyline",
+    positions: clonePositions(options.positions),
+    color,
+    width: options.width,
+    show: options.show,
+    loop: options.loop,
+    polyline,
+    collection,
+    metadata: options.metadata,
+    createdAt: snapshot.createdAt
+  };
+}
+
+function detachPrimitiveCollection(map: KairosMap, collection: PolylineCollection): void {
+  const primitives = map.viewer.scene.primitives;
+  const destroyPrimitives = primitives.destroyPrimitives;
+  primitives.destroyPrimitives = false;
+  try {
+    primitives.remove(collection);
+  } finally {
+    primitives.destroyPrimitives = destroyPrimitives;
   }
 }
 

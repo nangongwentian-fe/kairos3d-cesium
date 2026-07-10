@@ -37,6 +37,7 @@ export interface EffectRuntime {
   readonly objects: unknown[];
   readonly animated: boolean;
   attach(): void;
+  detach(): void;
   setShow(show: boolean): void;
   advance(seconds: number): void;
   destroy(): void;
@@ -262,8 +263,32 @@ class PrimitiveSceneRuntime implements EffectRuntime {
     if (this.attached || this.destroyed) {
       return;
     }
-    this.scene.primitives.add(this.primitive);
-    this.attached = true;
+    try {
+      this.scene.primitives.add(this.primitive);
+      this.attached = true;
+    } catch (error) {
+      this.attached = this.scene.primitives.contains(this.primitive);
+      throw error;
+    }
+  }
+
+  detach(): void {
+    if (!this.attached || this.destroyed) {
+      return;
+    }
+    if (!this.primitive.isDestroyed()) {
+      const collection = this.scene.primitives;
+      const destroyPrimitives = collection.destroyPrimitives;
+      collection.destroyPrimitives = false;
+      try {
+        collection.remove(this.primitive);
+      } finally {
+        collection.destroyPrimitives = destroyPrimitives;
+        this.attached = collection.contains(this.primitive);
+      }
+      return;
+    }
+    this.attached = false;
   }
 
   setShow(show: boolean): void {
@@ -310,8 +335,33 @@ class PostProcessRuntime implements EffectRuntime {
     if (this.attached || this.destroyed) {
       return;
     }
-    this.scene.postProcessStages.add(this.stage);
-    this.attached = true;
+    try {
+      this.scene.postProcessStages.add(this.stage);
+      this.attached = true;
+    } catch (error) {
+      this.attached = this.scene.postProcessStages.contains(this.stage);
+      throw error;
+    }
+  }
+
+  detach(): void {
+    if (!this.attached || this.destroyed) {
+      return;
+    }
+    if (!this.stage.isDestroyed()) {
+      // Cesium's PostProcessStageCollection always destroys removed stages.
+      // Suppress that one destroy call so the same stage can be reattached on rollback.
+      const destroy = this.stage.destroy;
+      this.stage.destroy = () => undefined;
+      try {
+        this.scene.postProcessStages.remove(this.stage);
+      } finally {
+        this.stage.destroy = destroy;
+        this.attached = this.scene.postProcessStages.contains(this.stage);
+      }
+      return;
+    }
+    this.attached = false;
   }
 
   setShow(show: boolean): void {

@@ -52,6 +52,42 @@ describe("widget snapshot validation", () => {
     expect(() => cloneJsonValue(circular)).toThrow("circular");
   });
 
+  it("delegates platform scene validation to the core scene parser", () => {
+    const workspace = {
+      version: 1,
+      activeWidgetIds: [],
+      placements: {},
+      states: {},
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    expect(() =>
+      assertKairosPlatformSnapshot({
+        version: 1,
+        scene: {
+          version: 1,
+          layers: [
+            { id: "duplicate", type: "xyz", url: "https://example.com/one" },
+            { id: "duplicate", type: "xyz", url: "https://example.com/two" }
+          ],
+          bookmarks: [],
+          createdAt: workspace.createdAt
+        },
+        workspace,
+        createdAt: workspace.createdAt
+      })
+    ).toThrow(/layer id.*unique/i);
+
+    expect(() =>
+      assertKairosPlatformSnapshot({
+        version: 1,
+        scene: { version: 1, layers: [], bookmarks: [], createdAt: "invalid" },
+        workspace,
+        createdAt: workspace.createdAt
+      })
+    ).toThrow(/createdAt/i);
+  });
+
   it("deep clones JSON-safe widget state", () => {
     const source = { filters: [{ visible: true }] };
     const cloned = cloneJsonValue(source);

@@ -43,4 +43,25 @@ describe("snapshot storage adapters", () => {
     await expect(storage.remove("scene")).resolves.toBe(true);
     await expect(storage.list()).resolves.toEqual([]);
   });
+
+  it("validates snapshots before saving them", async () => {
+    const storage = createMemorySnapshotStorage();
+    const invalid = { ...snapshot, createdAt: "invalid" } as SceneSnapshot;
+
+    await expect(storage.save("invalid", invalid)).rejects.toThrow(/createdAt/i);
+    await expect(storage.list()).resolves.toEqual([]);
+  });
+
+  it("validates localStorage data when loading it", async () => {
+    const values = new Map<string, string>([
+      ["kairos3d:scene-snapshot:invalid", JSON.stringify({ ...snapshot, version: 2 })]
+    ]);
+    const storage = createLocalStorageSnapshotStorage({
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key)
+    });
+
+    await expect(storage.load("invalid")).rejects.toThrow(/version must be 1/i);
+  });
 });

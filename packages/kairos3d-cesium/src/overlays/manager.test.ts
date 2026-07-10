@@ -17,7 +17,7 @@ function createMapMock() {
     viewer: {
       entities: {
         add: vi.fn((options) => new Entity(options)),
-        remove: vi.fn()
+        remove: vi.fn(() => true)
       }
     },
     styles: new StyleManager()
@@ -527,5 +527,33 @@ describe("OverlayManager", () => {
 
     expect(manager.list()).toEqual([]);
     expect(map.viewer.entities.remove).toHaveBeenCalledWith(second.entity);
+  });
+
+  it("prepares detached entities and restores original identity on rollback", async () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    const original = manager.addPoint({ id: "old", position: position(114, 22) });
+    const snapshot = [{
+      id: "new",
+      type: "label" as const,
+      positions: [{ longitude: 114.01, latitude: 22.01, height: 10 }],
+      data: { text: "New" },
+      show: true,
+      createdAt: "2026-07-10T00:00:00.000Z"
+    }];
+    const addsBeforePrepare = vi.mocked(map.viewer.entities.add).mock.calls.length;
+
+    const stage = await manager.prepareSceneLoad(snapshot, { clear: true });
+    expect(map.viewer.entities.add).toHaveBeenCalledTimes(addsBeforePrepare);
+
+    await stage.commit();
+    expect(manager.get("old")).toBeUndefined();
+    expect(manager.get("new")?.entity).toBeInstanceOf(Entity);
+
+    await stage.rollback();
+    expect(manager.get("old")).toBe(original);
+    expect(manager.get("old")?.entity).toBe(original.entity);
+    expect(manager.get("new")).toBeUndefined();
+    await stage.dispose();
   });
 });

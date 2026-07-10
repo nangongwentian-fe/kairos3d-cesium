@@ -1,9 +1,13 @@
 import {
   Cartesian3,
   ConstantProperty,
-  type Entity
+  Entity
 } from "cesium";
 import type { KairosMap } from "../core";
+import {
+  removeEntityIfOwned,
+  removeEntityIfOwnedTracked
+} from "../core/entity-collection";
 import { Evented } from "../core/events";
 import {
   deserializePosition,
@@ -33,13 +37,19 @@ import {
   serializeSymbolStyle
 } from "../style";
 import {
+  attachResultPrimitiveRuntimes,
+  createDetachedResultPolygonPrimitives,
+  createDetachedResultPolylinePrimitive,
   createResultPolygonPrimitives,
   createResultPolylinePrimitive,
+  destroyResultPrimitiveRuntimes,
+  detachResultPrimitiveRuntimes,
   removeResultPrimitiveRuntimes,
   resolveResultRenderMode,
   type ResultPrimitiveRuntime,
   type ResultRenderMode
 } from "../primitives";
+import type { PreparedSceneStage } from "../scene/transaction";
 import { ClippingManager } from "./clipping";
 import { TerrainAnalysisManager } from "./terrain";
 import {
@@ -122,6 +132,49 @@ export class AnalysisManager {
     await this.profile.load(snapshot.profile, { clear: false });
     await this.clipping.load(snapshot.clipping, { clear: false });
     await this.terrain.load(snapshot.terrain ?? [], { clear: false });
+  }
+
+  /** @internal */
+  async prepareSceneLoad(
+    snapshot: AnalysisResultsSnapshot,
+    options: AnalysisResultLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    const stages: PreparedSceneStage[] = [];
+    try {
+      stages.push(await this.measure.prepareSceneLoad(snapshot.measure, options));
+      stages.push(await this.visibility.prepareSceneLoad(snapshot.visibility, options));
+      stages.push(await this.profile.prepareSceneLoad(snapshot.profile, options));
+      stages.push(await this.terrain.prepareSceneLoad(snapshot.terrain ?? [], options));
+      stages.push(await this.clipping.prepareSceneLoad(snapshot.clipping, options));
+    } catch (error) {
+      await runStagesBestEffort([...stages].reverse(), "dispose");
+      throw error;
+    }
+
+    const attempted: PreparedSceneStage[] = [];
+    return {
+      phase: "analysis",
+      commit: async () => {
+        for (const stage of stages) {
+          attempted.push(stage);
+          await stage.commit();
+        }
+      },
+      rollback: async () => {
+        await runStagesBestEffort([...attempted].reverse(), "rollback");
+      },
+      finalize: async () => {
+        await runStagesBestEffort(stages, "finalize");
+      },
+      dispose: async () => {
+        await runStagesBestEffort([...stages].reverse(), "dispose");
+      },
+      publish: () => {
+        for (const stage of stages) {
+          stage.publish();
+        }
+      }
+    };
   }
 }
 
@@ -208,6 +261,38 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
     return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: MeasureResultSnapshot[],
+    options: AnalysisResultLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    const staged: MeasureResult[] = [];
+    try {
+      for (const item of this.prepareSnapshots(snapshots)) {
+        staged.push(this.createPreparedResult(item));
+      }
+    } catch (error) {
+      for (const result of staged) {
+        destroyResultPrimitiveRuntimes(result.primitives);
+      }
+      throw error;
+    }
+    return createEntityResultStage({
+      phase: "measure",
+      label: "Measure",
+      source: "measure",
+      map: this.map,
+      results: this.results,
+      staged,
+      clear: options.clear ?? false,
+      getEntities: (result) => result.entities,
+      getPrimitives: (result) => result.primitives,
+      emitRemove: (result) => this.emit("remove", result),
+      emitClear: (results) => this.emit("clear", results),
+      emitAdd: (result) => this.emit("add", result)
+    });
+  }
+
   setStyle(id: string, style: ResultSymbolStyle): MeasureResult {
     const result = this.results.get(id);
     if (!result) {
@@ -287,20 +372,24 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   }
 
   private restoreSnapshot(prepared: PreparedMeasureSnapshot): MeasureResult {
-    const { snapshot, positions, style, height, renderMode } = prepared;
-    if (this.results.has(snapshot.id)) {
-      this.remove(snapshot.id);
+    const result = this.createPreparedResult(prepared);
+    if (this.results.has(result.id)) {
+      this.remove(result.id);
     }
+    attachEntityResultRuntime(this.map, result.entities, result.primitives);
+    return this.addResult(result);
+  }
 
-    const rendered = renderMeasureResult(
-      this.map,
+  private createPreparedResult(prepared: PreparedMeasureSnapshot): MeasureResult {
+    const { snapshot, positions, style, height, renderMode } = prepared;
+    const rendered = createMeasureResultRuntime(
       snapshot,
       positions,
       style,
       height,
       renderMode
     );
-    return this.addResult({
+    return {
       id: snapshot.id,
       type: snapshot.type,
       positions,
@@ -315,7 +404,7 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
       mode: snapshot.mode,
       renderMode,
       primitives: rendered.primitives
-    });
+    };
   }
 }
 
@@ -463,6 +552,29 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
     return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: VisibilityResultSnapshot[],
+    options: AnalysisResultLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    const staged = this.prepareSnapshots(snapshots).map((item) =>
+      this.createPreparedResult(item)
+    );
+    return createEntityResultStage({
+      phase: "visibility",
+      label: "Visibility",
+      source: "visibility",
+      map: this.map,
+      results: this.results,
+      staged,
+      clear: options.clear ?? false,
+      getEntities: (result) => result.entities,
+      emitRemove: (result) => this.emit("remove", result),
+      emitClear: (results) => this.emit("clear", results),
+      emitAdd: (result) => this.emit("add", result)
+    });
+  }
+
   setStyle(id: string, style: ResultSymbolStyle): VisibilityResult {
     const result = this.results.get(id);
     if (!result) {
@@ -539,14 +651,18 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
   }
 
   private restoreSnapshot(prepared: PreparedVisibilitySnapshot): VisibilityResult {
-    const { snapshot, start, end, blockedPosition, style, height } = prepared;
-    if (this.results.has(snapshot.id)) {
-      this.remove(snapshot.id);
+    const result = this.createPreparedResult(prepared);
+    if (this.results.has(result.id)) {
+      this.remove(result.id);
     }
+    attachEntities(this.map, result.entities);
+    return this.addResult(result);
+  }
 
-    const entities = renderVisibilityEntities(this.map, start, end, blockedPosition, style, height);
-
-    return this.addResult({
+  private createPreparedResult(prepared: PreparedVisibilitySnapshot): VisibilityResult {
+    const { snapshot, start, end, blockedPosition, style, height } = prepared;
+    const entities = createVisibilityEntities(start, end, blockedPosition, style, height);
+    return {
       id: snapshot.id,
       type: "visibility",
       positions: [start, end],
@@ -558,7 +674,7 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
       createdAt: prepared.createdAt,
       style,
       height
-    });
+    };
   }
 
   private createResult(
@@ -739,6 +855,29 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
     return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: ProfileResultSnapshot[],
+    options: AnalysisResultLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    const staged = this.prepareSnapshots(snapshots).map((item) =>
+      this.createPreparedResult(item)
+    );
+    return createEntityResultStage({
+      phase: "profile",
+      label: "Profile",
+      source: "profile",
+      map: this.map,
+      results: this.results,
+      staged,
+      clear: options.clear ?? false,
+      getEntities: (result) => result.entities,
+      emitRemove: (result) => this.emit("remove", result),
+      emitClear: (results) => this.emit("clear", results),
+      emitAdd: (result) => this.emit("add", result)
+    });
+  }
+
   setStyle(id: string, style: ResultSymbolStyle): ProfileResult {
     const result = this.results.get(id);
     if (!result) {
@@ -807,14 +946,18 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
   }
 
   private restoreSnapshot(prepared: PreparedProfileSnapshot): ProfileResult {
-    const { snapshot, positions, samples, style, height } = prepared;
-    if (this.results.has(snapshot.id)) {
-      this.remove(snapshot.id);
+    const result = this.createPreparedResult(prepared);
+    if (this.results.has(result.id)) {
+      this.remove(result.id);
     }
+    attachEntities(this.map, result.entities);
+    return this.addResult(result);
+  }
 
-    const entities = renderProfileEntities(this.map, samples, style, height);
-
-    return this.addResult({
+  private createPreparedResult(prepared: PreparedProfileSnapshot): ProfileResult {
+    const { snapshot, positions, samples, style, height } = prepared;
+    const entities = createProfileEntities(samples, style, height);
+    return {
       id: snapshot.id,
       type: "profile",
       positions,
@@ -826,12 +969,24 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
       createdAt: prepared.createdAt,
       style,
       height
-    });
+    };
   }
 }
 
 function renderVisibilityEntities(
   map: KairosMap,
+  start: Cartesian3,
+  end: Cartesian3,
+  blockedPosition: Cartesian3 | undefined,
+  style: ResultSymbolStyle,
+  height?: VisibilityResult["height"]
+): Entity[] {
+  const entities = createVisibilityEntities(start, end, blockedPosition, style, height);
+  attachEntities(map, entities);
+  return entities;
+}
+
+function createVisibilityEntities(
   start: Cartesian3,
   end: Cartesian3,
   blockedPosition: Cartesian3 | undefined,
@@ -845,22 +1000,21 @@ function renderVisibilityEntities(
   const entities: Entity[] = [];
 
   if (blockedPosition) {
-    entities.push(addPolyline(map, [start, blockedPosition], visibleLineStyle, height));
-    entities.push(addPolyline(map, [blockedPosition, end], blockedLineStyle, height));
-    entities.push(addPoint(map, blockedPosition, blockedPointStyle, height));
+    entities.push(createPolylineEntity([start, blockedPosition], visibleLineStyle, height));
+    entities.push(createPolylineEntity([blockedPosition, end], blockedLineStyle, height));
+    entities.push(createPointEntity(blockedPosition, blockedPointStyle, height));
   } else {
-    entities.push(addPolyline(map, [start, end], visibleLineStyle, height));
+    entities.push(createPolylineEntity([start, end], visibleLineStyle, height));
   }
 
-  entities.push(addPoint(map, start, pointStyle, height));
-  entities.push(addPoint(map, end, pointStyle, height));
+  entities.push(createPointEntity(start, pointStyle, height));
+  entities.push(createPointEntity(end, pointStyle, height));
   return entities;
 }
 
 type MeasureSnapshotLike = Pick<MeasureResultSnapshot, "id" | "type" | "value" | "unit" | "label">;
 
-function renderMeasureEntities(
-  map: KairosMap,
+function createMeasureEntities(
   snapshot: MeasureSnapshotLike,
   positions: Cartesian3[],
   style: ResultSymbolStyle,
@@ -869,15 +1023,15 @@ function renderMeasureEntities(
   const entities: Entity[] = [];
 
   if (snapshot.type === "area") {
-    entities.push(addPolygon(map, positions, style.polygon, height));
+    entities.push(createPolygonEntity(positions, style.polygon, height));
   } else {
-    entities.push(addPolyline(map, positions, style.line, height));
+    entities.push(createPolylineEntity(positions, style.line, height));
   }
 
   const label = snapshot.label ?? `${snapshot.value} ${snapshot.unit}`;
   const labelPosition = positions[positions.length - 1];
   if (labelPosition) {
-    entities.push(addLabel(map, labelPosition, label, style.label));
+    entities.push(createLabelEntity(labelPosition, label, style.label));
   }
 
   return entities;
@@ -891,19 +1045,31 @@ function renderMeasureResult(
   height: MeasureResult["height"] | undefined,
   renderMode: ResultRenderMode | undefined
 ): { entities: Entity[]; primitives?: ResultPrimitiveRuntime[] } {
+  const rendered = createMeasureResultRuntime(snapshot, positions, style, height, renderMode);
+  attachEntityResultRuntime(map, rendered.entities, rendered.primitives);
+  return rendered;
+}
+
+function createMeasureResultRuntime(
+  snapshot: MeasureSnapshotLike,
+  positions: Cartesian3[],
+  style: ResultSymbolStyle,
+  height: MeasureResult["height"] | undefined,
+  renderMode: ResultRenderMode | undefined
+): { entities: Entity[]; primitives?: ResultPrimitiveRuntime[] } {
   const resolvedRenderMode = resolveMeasureRenderMode(snapshot.type, renderMode);
   if (resolvedRenderMode !== "primitive") {
     return {
-      entities: renderMeasureEntities(map, snapshot, positions, style, height)
+      entities: createMeasureEntities(snapshot, positions, style, height)
     };
   }
 
-  const primitives = renderMeasurePrimitives(map, snapshot.type, snapshot.id, positions, style);
+  const primitives = createMeasurePrimitives(snapshot.type, snapshot.id, positions, style);
   const entities: Entity[] = [];
   const label = snapshot.label ?? `${snapshot.value} ${snapshot.unit}`;
   const labelPosition = positions[positions.length - 1];
   if (labelPosition) {
-    entities.push(addLabel(map, labelPosition, label, style.label));
+    entities.push(createLabelEntity(labelPosition, label, style.label));
   }
   return { entities, primitives };
 }
@@ -933,6 +1099,31 @@ export function renderMeasurePrimitives(
     });
   }
 
+  return undefined;
+}
+
+function createMeasurePrimitives(
+  type: MeasureResult["type"],
+  id: string,
+  positions: Cartesian3[],
+  style: ResultSymbolStyle
+): ResultPrimitiveRuntime[] | undefined {
+  if (type === "distance") {
+    return [
+      createDetachedResultPolylinePrimitive({
+        id,
+        positions,
+        style: style.line
+      })
+    ];
+  }
+  if (type === "area") {
+    return createDetachedResultPolygonPrimitives({
+      id,
+      positions,
+      style: style.polygon
+    });
+  }
   return undefined;
 }
 
@@ -976,50 +1167,57 @@ function renderProfileEntities(
   style: ResultSymbolStyle,
   height?: ProfileResult["height"]
 ): Entity[] {
+  const entities = createProfileEntities(samples, style, height);
+  attachEntities(map, entities);
+  return entities;
+}
+
+function createProfileEntities(
+  samples: { position: Cartesian3 }[],
+  style: ResultSymbolStyle,
+  height?: ProfileResult["height"]
+): Entity[] {
   const positions = samples.map((sample) => sample.position);
-  const entities = [addPolyline(map, positions, style.line, height)];
+  const entities = [createPolylineEntity(positions, style.line, height)];
 
   if (positions.length >= 2) {
-    entities.push(addPoint(map, positions[0], style.point, height));
-    entities.push(addPoint(map, positions[positions.length - 1], style.point, height));
+    entities.push(createPointEntity(positions[0], style.point, height));
+    entities.push(createPointEntity(positions[positions.length - 1], style.point, height));
   }
 
   return entities;
 }
 
-function addPolyline(
-  map: KairosMap,
+function createPolylineEntity(
   positions: Cartesian3[],
   style?: ResultSymbolStyle["line"],
   height?: MeasureResult["height"] | VisibilityResult["height"] | ProfileResult["height"]
 ): Entity {
-  const entity = map.viewer.entities.add({
+  const entity = new Entity({
     polyline: createLineGraphics(positions, lineStyleWithHeight(style, height))
   });
   applyHeightOptionsToEntity(entity, height);
   return entity;
 }
 
-function addPolygon(
-  map: KairosMap,
+function createPolygonEntity(
   positions: Cartesian3[],
   style?: ResultSymbolStyle["polygon"],
   height?: MeasureResult["height"]
 ): Entity {
-  const entity = map.viewer.entities.add({
+  const entity = new Entity({
     polygon: createPolygonGraphics(new ConstantProperty(positions), style)
   });
   applyHeightOptionsToEntity(entity, height);
   return entity;
 }
 
-function addPoint(
-  map: KairosMap,
+function createPointEntity(
   position: Cartesian3,
   style?: ResultSymbolStyle["point"],
   height?: VisibilityResult["height"] | ProfileResult["height"]
 ): Entity {
-  const entity = map.viewer.entities.add({
+  const entity = new Entity({
     position,
     point: createPointGraphics(style)
   });
@@ -1027,13 +1225,12 @@ function addPoint(
   return entity;
 }
 
-function addLabel(
-  map: KairosMap,
+function createLabelEntity(
   position: Cartesian3,
   text: string,
   style?: ResultSymbolStyle["label"]
 ): Entity {
-  return map.viewer.entities.add({
+  return new Entity({
     position,
     label: createLabelGraphics(text, style)
   });
@@ -1041,7 +1238,293 @@ function addLabel(
 
 function removeEntities(map: KairosMap, entities: Entity[]): void {
   for (const entity of entities) {
-    map.viewer.entities.remove(entity);
+    removeEntityIfOwned(map.viewer.entities, entity);
+  }
+}
+
+interface EntityResultStageOptions<T extends { id: string }> {
+  phase: string;
+  label: string;
+  source: "measure" | "visibility" | "profile" | "terrain";
+  map: KairosMap;
+  results: Map<string, T>;
+  staged: T[];
+  clear: boolean;
+  getEntities(result: T): Entity[];
+  getPrimitives?(result: T): ResultPrimitiveRuntime[] | undefined;
+  emitRemove(result: T): void;
+  emitClear(results: T[]): void;
+  emitAdd(result: T): void;
+}
+
+function createEntityResultStage<T extends { id: string }>(
+  options: EntityResultStageOptions<T>
+): PreparedSceneStage {
+  if (!options.clear) {
+    for (const result of options.staged) {
+      if (options.results.has(result.id)) {
+        for (const staged of options.staged) {
+          destroyResultPrimitiveRuntimes(options.getPrimitives?.(staged));
+        }
+        throw new Error(
+          `${options.label} result "${result.id}" already exists during transactional merge.`
+        );
+      }
+    }
+  }
+
+  const previous = options.clear ? [...options.results.values()] : [];
+  let commitStarted = false;
+  let mapsSwapped = false;
+  let rolledBack = false;
+  let finalized = false;
+  let disposed = false;
+  let published = false;
+  const detachedPreviousEntities: Entity[] = [];
+  const detachedPreviousPrimitives: ResultPrimitiveRuntime[] = [];
+
+  return {
+    phase: options.phase,
+    commit: () => {
+      assertEntityStageBaseUnchanged(options, previous);
+      commitStarted = true;
+      for (const result of previous) {
+        detachEntityResultRuntimeTracked(
+          options.map,
+          options.getEntities(result),
+          options.getPrimitives?.(result),
+          detachedPreviousEntities,
+          detachedPreviousPrimitives
+        );
+      }
+      for (const result of options.staged) {
+        attachEntityResultRuntime(
+          options.map,
+          options.getEntities(result),
+          options.getPrimitives?.(result)
+        );
+      }
+      if (options.clear) {
+        options.results.clear();
+      }
+      for (const result of options.staged) {
+        options.results.set(result.id, result);
+      }
+      mapsSwapped = true;
+    },
+    rollback: () => {
+      if (!commitStarted || rolledBack || finalized || disposed) {
+        return;
+      }
+      const errors: unknown[] = [];
+      for (const result of [...options.staged].reverse()) {
+        try {
+          detachEntityResultRuntime(
+            options.map,
+            options.getEntities(result),
+            options.getPrimitives?.(result)
+          );
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (mapsSwapped) {
+        for (const result of options.staged) {
+          options.results.delete(result.id);
+        }
+      }
+      for (const entity of detachedPreviousEntities) {
+        try {
+          options.map.viewer.entities.add(entity);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      for (const runtime of detachedPreviousPrimitives) {
+        try {
+          attachResultPrimitiveRuntimes(options.map, [runtime]);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      for (const result of previous) {
+        options.results.set(result.id, result);
+      }
+      detachedPreviousEntities.length = 0;
+      detachedPreviousPrimitives.length = 0;
+      mapsSwapped = false;
+      rolledBack = true;
+      if (errors.length > 0) {
+        throw new AggregateError(errors, `Failed to roll back ${options.label} results.`);
+      }
+    },
+    finalize: () => {
+      if (finalized) {
+        return;
+      }
+      for (const result of previous) {
+        destroyResultPrimitiveRuntimes(options.getPrimitives?.(result));
+      }
+      finalized = true;
+    },
+    dispose: () => {
+      if (disposed || finalized) {
+        return;
+      }
+      const errors: unknown[] = [];
+      for (const result of [...options.staged].reverse()) {
+        try {
+          detachEntityResultRuntime(
+            options.map,
+            options.getEntities(result),
+            options.getPrimitives?.(result)
+          );
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          destroyResultPrimitiveRuntimes(options.getPrimitives?.(result));
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      disposed = true;
+      if (errors.length > 0) {
+        throw new AggregateError(errors, `Failed to dispose prepared ${options.label} results.`);
+      }
+    },
+    publish: () => {
+      if (published) {
+        return;
+      }
+      if (options.clear) {
+        for (const result of previous) {
+          options.emitRemove(result);
+        }
+        options.emitClear(previous);
+        options.map.tools.emitClear({
+          source: options.source,
+          ids: previous.map((result) => result.id)
+        });
+      }
+      for (const result of options.staged) {
+        options.emitAdd(result);
+      }
+      published = true;
+    }
+  };
+}
+
+function assertEntityStageBaseUnchanged<T extends { id: string }>(
+  options: EntityResultStageOptions<T>,
+  previous: T[]
+): void {
+  if (options.clear && options.results.size !== previous.length) {
+    throw new Error(`${options.label} results changed after transactional preparation.`);
+  }
+  for (const result of previous) {
+    if (options.results.get(result.id) !== result) {
+      throw new Error(
+        `${options.label} result "${result.id}" changed after transactional preparation.`
+      );
+    }
+  }
+  if (!options.clear) {
+    for (const result of options.staged) {
+      if (options.results.has(result.id)) {
+        throw new Error(
+          `${options.label} result "${result.id}" changed after transactional preparation.`
+        );
+      }
+    }
+  }
+}
+
+function attachEntities(map: KairosMap, entities: Entity[]): void {
+  for (const entity of entities) {
+    map.viewer.entities.add(entity);
+  }
+}
+
+function attachEntityResultRuntime(
+  map: KairosMap,
+  entities: Entity[],
+  primitives?: ResultPrimitiveRuntime[]
+): void {
+  attachEntities(map, entities);
+  if (primitives?.length) {
+    attachResultPrimitiveRuntimes(map, primitives);
+  }
+}
+
+function detachEntityResultRuntime(
+  map: KairosMap,
+  entities: Entity[],
+  primitives?: ResultPrimitiveRuntime[]
+): void {
+  removeEntities(map, entities);
+  if (primitives?.length) {
+    detachResultPrimitiveRuntimes(map, primitives);
+  }
+}
+
+function detachEntityResultRuntimeTracked(
+  map: KairosMap,
+  entities: Entity[],
+  primitives: ResultPrimitiveRuntime[] | undefined,
+  detachedEntities: Entity[],
+  detachedPrimitives: ResultPrimitiveRuntime[]
+): void {
+  for (const entity of entities) {
+    removeEntityIfOwnedTracked(map.viewer.entities, entity, detachedEntities);
+  }
+  detachResultPrimitivesTracked(map, primitives, detachedPrimitives);
+}
+
+function detachResultPrimitivesTracked(
+  map: KairosMap,
+  runtimes: ResultPrimitiveRuntime[] | undefined,
+  detached: ResultPrimitiveRuntime[]
+): void {
+  const collection = map.viewer.scene.primitives;
+  const canInspect = typeof collection.contains === "function";
+  const attached = canInspect
+    ? (runtimes ?? []).filter((runtime) =>
+        collection.contains(getResultPrimitiveObject(runtime))
+      )
+    : [];
+  try {
+    detachResultPrimitiveRuntimes(map, runtimes);
+  } finally {
+    for (const runtime of attached) {
+      if (
+        !collection.contains(getResultPrimitiveObject(runtime)) &&
+        !detached.includes(runtime)
+      ) {
+        detached.push(runtime);
+      }
+    }
+  }
+}
+
+function getResultPrimitiveObject(runtime: ResultPrimitiveRuntime) {
+  return runtime.type === "polyline" ? runtime.collection : runtime.primitive;
+}
+
+async function runStagesBestEffort(
+  stages: PreparedSceneStage[],
+  method: "rollback" | "finalize" | "dispose"
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const stage of stages) {
+    try {
+      await stage[method]();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, `Failed to ${method} analysis stages.`);
   }
 }
 

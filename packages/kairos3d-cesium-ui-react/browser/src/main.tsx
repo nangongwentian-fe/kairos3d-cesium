@@ -1,12 +1,18 @@
 import type { KairosMap } from "@kairos3d/cesium/core";
 import type { EffectConfig, EffectType } from "@kairos3d/cesium/effects";
+import {
+  layerRegistry,
+  type BaseLayerConfig,
+  type LayerAdapter,
+  type LayerConfig
+} from "@kairos3d/cesium/layers";
 import { isOperationCanceledError } from "@kairos3d/cesium/operations";
-import type { SceneSnapshot } from "@kairos3d/cesium/scene";
+import { SceneTransactionError, type SceneSnapshot } from "@kairos3d/cesium/scene";
 import { createMemoryWidgetSnapshotStorage } from "@kairos3d/cesium-widget";
 import { Cartesian3, EllipsoidTerrainProvider, Material } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import { useEffect, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import {
   KairosMapProvider,
   KairosMapViewport,
@@ -179,10 +185,10 @@ function BrowserSmoke() {
         data-k3d-animated-count={currentCounts?.animatedEffects ?? 0}
         data-k3d-scene-primitive-count={currentCounts?.scenePrimitives ?? 0}
         data-k3d-stage-count={currentCounts?.postProcessStages ?? 0}
-        aria-label={`M8 Effects and M9 Operations Core smoke report: ${report.status}; ${Object.values(report.checks).filter(Boolean).length}/${Object.keys(report.checks).length} checks`}
+        aria-label={`M8 Effects, M9 Operations, and M10 Scene Transactions smoke report: ${report.status}; ${Object.values(report.checks).filter(Boolean).length}/${Object.keys(report.checks).length} checks`}
       >
         <header>
-          <strong>M8 Effects / M9 Operations</strong>
+          <strong>M8 Effects / M9 Operations / M10 Transactions</strong>
           <span className={`effects-smoke__badge effects-smoke__badge--${report.status}`}>
             {report.status}
           </span>
@@ -224,6 +230,7 @@ async function runEffectsSmoke(map: KairosMap): Promise<{
   snapshot: SceneSnapshot;
   report: SmokeReport;
 }> {
+  markSmokeStep("effects-add");
   map.effects.clear();
   map.operations.clearFinished();
   const baseline = captureCounts(map);
@@ -293,7 +300,11 @@ async function runEffectsSmoke(map: KairosMap): Promise<{
     restoredEffects.filter((effect) => effect.group === "particle").length === 1;
   checks.restoreShow = map.effects.get("snow-1")?.show === false;
   checks.restoreRuntimeCount = restored.runtimeObjects === expectedTypes.length;
+  markSmokeStep("operations");
   Object.assign(checks, await runOperationChecks(map, restored));
+  markSmokeStep("scene-transactions");
+  Object.assign(checks, await runSceneTransactionChecks(map));
+  markSmokeStep("complete");
 
   return {
     snapshot,
@@ -442,6 +453,620 @@ async function runOperationChecks(
   };
 }
 
+async function runSceneTransactionChecks(map: KairosMap): Promise<Record<string, boolean>> {
+  markSmokeStep("scene-prepare-failure");
+  const checks: Record<string, boolean> = {};
+  await ensureTransactionFixtureSections(map);
+  const operationCountBefore = map.operations.list().length;
+  const baselineSnapshot = map.sceneState.toJSON({
+    includeResults: true,
+    includePrimitives: true,
+    includeOverlays: true,
+    includeEffects: true
+  });
+  const baselineFingerprint = captureSceneFingerprint(map);
+  const baselineRuntimeIdentity = captureSceneRuntimeIdentity(map);
+  const loadOptions = {
+    clearLayers: true,
+    flyToCamera: false,
+    restoreResults: true,
+    clearResults: true,
+    restorePrimitives: true,
+    clearPrimitives: true,
+    restoreOverlays: true,
+    clearOverlays: true,
+    restoreEffects: true,
+    clearEffects: true
+  } as const;
+
+  const invalidMaterialSnapshot = structuredClone(baselineSnapshot);
+  const materialEffect = invalidMaterialSnapshot.effects?.find(
+    (effect) => effect.config.material !== undefined
+  );
+  if (!materialEffect) {
+    throw new Error("Browser transaction fixture requires an effect with a material.");
+  }
+  materialEffect.config.material = {
+    type: "browser-missing-material",
+    options: {}
+  };
+  let prepareError: unknown;
+  try {
+    await map.sceneState.load(invalidMaterialSnapshot, {
+      ...loadOptions,
+      operationId: "browser-scene-prepare-failure"
+    });
+  } catch (error) {
+    prepareError = error;
+  }
+  await map.sceneState.whenIdle();
+  const afterPrepareFailure = captureSceneFingerprint(map);
+  checks.scenePrepareFailure =
+    prepareError instanceof SceneTransactionError && prepareError.phase === "prepare";
+  checks.scenePreparePreservesFingerprint =
+    sameFingerprint(afterPrepareFailure, baselineFingerprint);
+  checks.scenePreparePreservesRuntimeIdentity =
+    sameRuntimeIdentity(captureSceneRuntimeIdentity(map), baselineRuntimeIdentity);
+
+  markSmokeStep("scene-commit-failure");
+  const commitFailureType = "browser-transaction-commit-failure";
+  const unregisterCommitFailure = registerFixtureLayer(commitFailureType, {
+    attach: () => {
+      throw new Error("browser layer commit failure");
+    }
+  });
+  let commitError: unknown;
+  try {
+    await map.sceneState.load(
+      snapshotWithFixtureLayer(baselineSnapshot, commitFailureType, "commit-failure"),
+      { ...loadOptions, operationId: "browser-scene-commit-failure" }
+    );
+  } catch (error) {
+    commitError = error;
+  } finally {
+    unregisterCommitFailure();
+  }
+  await map.sceneState.whenIdle();
+  const afterCommitFailure = captureSceneFingerprint(map);
+  checks.sceneCommitFailure =
+    commitError instanceof SceneTransactionError &&
+    commitError.phase === "commit" &&
+    commitError.rollbackStatus === "succeeded";
+  checks.sceneCommitRestoresFingerprint =
+    sameFingerprint(afterCommitFailure, baselineFingerprint);
+  checks.sceneCommitRestoresRuntimeIdentity =
+    sameRuntimeIdentity(captureSceneRuntimeIdentity(map), baselineRuntimeIdentity);
+
+  markSmokeStep("scene-prepare-cancel");
+  const prepareGate = createBrowserGate();
+  const prepareCancelType = "browser-transaction-prepare-cancel";
+  const unregisterPrepareCancel = registerFixtureLayer(prepareCancelType, {
+    prepare: async () => {
+      prepareGate.markStarted();
+      await prepareGate.waitForRelease;
+    }
+  });
+  const prepareCancelPromise = map.sceneState.load(
+    snapshotWithFixtureLayer(baselineSnapshot, prepareCancelType, "prepare-cancel"),
+    { ...loadOptions, operationId: "browser-scene-prepare-cancel" }
+  );
+  await prepareGate.started;
+  markSmokeStep("scene-prepare-cancel-started");
+  const prepareCancelAccepted = map.operations.cancel("browser-scene-prepare-cancel");
+  markSmokeStep(`scene-prepare-cancel-requested-${prepareCancelAccepted}`);
+  let prepareCanceledImmediately = false;
+  try {
+    await prepareCancelPromise;
+  } catch (error) {
+    prepareCanceledImmediately = isOperationCanceledError(error);
+  }
+  markSmokeStep(`scene-prepare-cancel-rejected-${prepareCanceledImmediately}`);
+  let concurrentBlocked = false;
+  try {
+    await map.sceneState.load(baselineSnapshot, loadOptions);
+  } catch (error) {
+    concurrentBlocked =
+      error instanceof Error && error.message.includes("already running");
+  }
+  markSmokeStep(`scene-prepare-cancel-concurrent-${concurrentBlocked}`);
+  prepareGate.release();
+  markSmokeStep("scene-prepare-cancel-released");
+  await map.sceneState.whenIdle();
+  const afterPrepareCancel = captureSceneFingerprint(map);
+  markSmokeStep("scene-prepare-cancel-idle");
+  unregisterPrepareCancel();
+  checks.scenePrepareCancelImmediate = prepareCancelAccepted && prepareCanceledImmediately;
+  checks.sceneCancelBlocksConcurrentLoad = concurrentBlocked;
+  checks.scenePrepareCancelRestoresFingerprint =
+    sameFingerprint(afterPrepareCancel, baselineFingerprint);
+  checks.scenePrepareCancelRestoresRuntimeIdentity =
+    sameRuntimeIdentity(captureSceneRuntimeIdentity(map), baselineRuntimeIdentity);
+
+  markSmokeStep("scene-commit-cancel");
+  const commitGate = createBrowserGate();
+  const commitCancelType = "browser-transaction-commit-cancel";
+  const unregisterCommitCancel = registerFixtureLayer(commitCancelType, {
+    attach: async () => {
+      commitGate.markStarted();
+      await commitGate.waitForRelease;
+    }
+  });
+  const transactionStatuses: string[] = [];
+  const offTransaction = map.sceneState.on("transaction-change", (event) => {
+    transactionStatuses.push(event.data.status);
+  });
+  const commitCancelPromise = map.sceneState.load(
+    snapshotWithFixtureLayer(baselineSnapshot, commitCancelType, "commit-cancel"),
+    { ...loadOptions, operationId: "browser-scene-commit-cancel" }
+  );
+  await commitGate.started;
+  const commitCancelAccepted = map.operations.cancel("browser-scene-commit-cancel");
+  let commitCanceledImmediately = false;
+  try {
+    await commitCancelPromise;
+  } catch (error) {
+    commitCanceledImmediately = isOperationCanceledError(error);
+  }
+  commitGate.release();
+  await map.sceneState.whenIdle();
+  const afterCommitCancel = captureSceneFingerprint(map);
+  offTransaction();
+  unregisterCommitCancel();
+  checks.sceneCommitCancelImmediate = commitCancelAccepted && commitCanceledImmediately;
+  checks.sceneCommitCancelRestoresFingerprint =
+    sameFingerprint(afterCommitCancel, baselineFingerprint);
+  checks.sceneCommitCancelRestoresRuntimeIdentity =
+    sameRuntimeIdentity(captureSceneRuntimeIdentity(map), baselineRuntimeIdentity);
+  checks.sceneRollbackStateObserved =
+    transactionStatuses.includes("rolling-back") &&
+    map.sceneState.getTransactionState()?.status === "canceled" &&
+    map.sceneState.getTransactionState()?.rollbackStatus === "succeeded";
+
+  markSmokeStep("scene-success");
+  const successSnapshot = structuredClone(baselineSnapshot);
+  successSnapshot.layers = successSnapshot.layers.map((layer) => ({
+    ...layer,
+    show: layer.id === "smoke-geojson" ? false : layer.show
+  }));
+  successSnapshot.bookmarks = successSnapshot.bookmarks.map((bookmark, index) =>
+    index === 0 ? { ...bookmark, name: "事务恢复视角" } : bookmark
+  );
+  map.viewer.camera.setView({
+    destination: Cartesian3.fromDegrees(113.9, 22.1, 9_000),
+    orientation: { heading: 0.2, pitch: -1.1, roll: 0 }
+  });
+  const runtimeBeforeSuccess = captureSceneRuntimeIdentity(map);
+  const countsBeforeSuccess = captureCounts(map);
+  const successProgress: number[] = [];
+  const successTransactionStatuses: string[] = [];
+  const offSuccessOperation = map.operations.on("change", (event) => {
+    if (
+      event.data.id === "browser-scene-success" &&
+      event.data.progress !== undefined
+    ) {
+      successProgress.push(event.data.progress);
+    }
+  });
+  const offSuccessTransaction = map.sceneState.on("transaction-change", (event) => {
+    if (event.data.operationId === "browser-scene-success") {
+      successTransactionStatuses.push(event.data.status);
+    }
+  });
+  try {
+    await map.sceneState.load(successSnapshot, {
+      ...loadOptions,
+      flyToCamera: true,
+      operationId: "browser-scene-success"
+    });
+  } finally {
+    offSuccessOperation();
+    offSuccessTransaction();
+  }
+  await map.sceneState.whenIdle();
+  const runtimeAfterSuccess = captureSceneRuntimeIdentity(map);
+  const countsAfterSuccess = captureCounts(map);
+  const cameraAfterSuccess = map.sceneState.captureCamera();
+  checks.sceneSuccessAppliesLayers =
+    map.layers.listState().find((layer) => layer.id === "smoke-geojson")?.show === false &&
+    sameSerializable(map.layers.toJSON(), successSnapshot.layers);
+  checks.sceneSuccessAppliesBookmarks =
+    map.sceneState.bookmarks.list()[0]?.name === "事务恢复视角" &&
+    sameSerializable(map.sceneState.bookmarks.list(), successSnapshot.bookmarks);
+  checks.sceneSuccessAppliesCamera =
+    successSnapshot.camera !== undefined &&
+    sameCameraView(cameraAfterSuccess, successSnapshot.camera);
+  checks.sceneSuccessAppliesDraw =
+    containsSerializable(map.draw.toJSON(), successSnapshot.results?.draw);
+  checks.sceneSuccessAppliesAnalysis =
+    containsSerializable(map.analysis.toJSON(), analysisSnapshotFromScene(successSnapshot));
+  checks.sceneSuccessAppliesPrimitives =
+    containsSerializable(map.primitives.toJSON(), successSnapshot.primitives);
+  checks.sceneSuccessAppliesOverlays =
+    containsSerializable(map.overlays.toJSON(), successSnapshot.overlays);
+  checks.sceneSuccessAppliesEffects =
+    containsSerializable(map.effects.toJSON(), successSnapshot.effects);
+  checks.sceneSuccessReplacesRuntimeIdentity =
+    runtimeIdentityReplaced(runtimeAfterSuccess, runtimeBeforeSuccess);
+  const retiredDestroyables = destroyableRuntimeObjects(runtimeBeforeSuccess);
+  checks.sceneSuccessDestroysRetiredRuntime =
+    retiredDestroyables.length > 0 &&
+    retiredDestroyables.every((object) => object.isDestroyed());
+  checks.sceneSuccessRuntimeCountsStable =
+    countsAfterSuccess.effects === countsBeforeSuccess.effects &&
+    countsAfterSuccess.runtimeObjects === countsBeforeSuccess.runtimeObjects &&
+    countsAfterSuccess.animatedEffects === countsBeforeSuccess.animatedEffects &&
+    countsAfterSuccess.scenePrimitives === countsBeforeSuccess.scenePrimitives &&
+    countsAfterSuccess.postProcessStages === countsBeforeSuccess.postProcessStages;
+  checks.sceneSuccessOperationAndTransaction =
+    map.operations.get("browser-scene-success")?.status === "succeeded" &&
+    isMonotonic(successProgress) &&
+    successProgress.at(-1) === 1 &&
+    successTransactionStatuses.includes("preparing") &&
+    successTransactionStatuses.includes("committing") &&
+    successTransactionStatuses.includes("succeeded") &&
+    map.sceneState.getTransactionState()?.status === "succeeded";
+
+  const operationIds = [
+    "browser-scene-prepare-failure",
+    "browser-scene-commit-failure",
+    "browser-scene-prepare-cancel",
+    "browser-scene-commit-cancel",
+    "browser-scene-success"
+  ];
+  checks.sceneUsesSingleParentOperations =
+    map.operations.list().length === operationCountBefore + operationIds.length &&
+    operationIds.every((id) => map.operations.get(id)?.kind === "scene.load");
+  return checks;
+}
+
+async function ensureTransactionFixtureSections(map: KairosMap): Promise<void> {
+  if (map.sceneState.bookmarks.list().length === 0) {
+    map.sceneState.bookmarks.add({
+      id: "smoke-home",
+      name: "Smoke Home",
+      view: map.sceneState.captureCamera()
+    });
+  }
+  if (map.primitives.list().length === 0) {
+    map.primitives.addPolyline({
+      id: "smoke-primitive",
+      positions: [
+        Cartesian3.fromDegrees(114.166, 22.298, 100),
+        Cartesian3.fromDegrees(114.174, 22.302, 100)
+      ],
+      color: "#35d07f",
+      width: 3
+    });
+  }
+  if (map.analysis.visibility.list().length === 0) {
+    await map.analysis.visibility.compute(
+      {
+        start: Cartesian3.fromDegrees(114.166, 22.298, 120),
+        end: Cartesian3.fromDegrees(114.174, 22.302, 120),
+        sampleCount: 8
+      },
+      { operationId: "browser-scene-baseline-visibility" }
+    );
+  }
+}
+
+interface SceneRuntimeIdentity {
+  entries: Map<string, unknown[]>;
+}
+
+function captureSceneRuntimeIdentity(map: KairosMap): SceneRuntimeIdentity {
+  const entries = new Map<string, unknown[]>();
+  for (const layer of map.layers.listState()) {
+    entries.set(`layer:${layer.id}`, uniqueObjects(map.layers.getRuntimeObjects(layer.id)));
+  }
+  for (const result of map.draw.list()) {
+    entries.set(`draw:${result.id}`, managedRuntimeObjects(result));
+  }
+  const analysisGroups = [
+    ["measure", map.analysis.measure.list()],
+    ["visibility", map.analysis.visibility.list()],
+    ["profile", map.analysis.profile.list()],
+    ["clipping", map.analysis.clipping.list()],
+    ["terrain", map.analysis.terrain.list()]
+  ] as const;
+  for (const [source, results] of analysisGroups) {
+    for (const result of results) {
+      entries.set(`analysis:${source}:${result.id}`, managedRuntimeObjects(result));
+    }
+  }
+  for (const primitive of map.primitives.list()) {
+    entries.set(`primitive:${primitive.id}`, managedRuntimeObjects(primitive));
+  }
+  for (const overlay of map.overlays.list()) {
+    entries.set(`overlay:${overlay.id}`, managedRuntimeObjects(overlay));
+  }
+  for (const effect of map.effects.list()) {
+    entries.set(
+      `effect:${effect.id}`,
+      uniqueObjects(map.effects.getRuntimeObjects(effect.id))
+    );
+  }
+  return { entries };
+}
+
+function managedRuntimeObjects(value: object): unknown[] {
+  const runtime = value as {
+    entity?: unknown;
+    entities?: unknown[];
+    collection?: unknown;
+    primitive?: unknown;
+    polyline?: unknown;
+    primitives?: Array<{
+      collection?: unknown;
+      primitive?: unknown;
+      polyline?: unknown;
+    }>;
+  };
+  return uniqueObjects([
+    runtime.entity,
+    ...(runtime.entities ?? []),
+    runtime.collection,
+    runtime.primitive,
+    runtime.polyline,
+    ...(runtime.primitives ?? []).flatMap((item) => [
+      item,
+      item.collection,
+      item.primitive,
+      item.polyline
+    ])
+  ]);
+}
+
+function uniqueObjects(values: unknown[]): unknown[] {
+  return [...new Set(values.filter((value) => value !== undefined && value !== null))];
+}
+
+function sameRuntimeIdentity(
+  left: SceneRuntimeIdentity,
+  right: SceneRuntimeIdentity
+): boolean {
+  if (left.entries.size !== right.entries.size) {
+    return false;
+  }
+  for (const [key, rightObjects] of right.entries) {
+    const leftObjects = left.entries.get(key);
+    if (
+      !leftObjects ||
+      leftObjects.length !== rightObjects.length ||
+      leftObjects.some((object, index) => object !== rightObjects[index])
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function runtimeIdentityReplaced(
+  current: SceneRuntimeIdentity,
+  previous: SceneRuntimeIdentity
+): boolean {
+  if (current.entries.size !== previous.entries.size || current.entries.size === 0) {
+    return false;
+  }
+  for (const [key, previousObjects] of previous.entries) {
+    const currentObjects = current.entries.get(key);
+    if (!currentObjects || currentObjects.length === 0 || previousObjects.length === 0) {
+      return false;
+    }
+    if (currentObjects.some((object) => previousObjects.includes(object))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function destroyableRuntimeObjects(
+  identity: SceneRuntimeIdentity
+): Array<{ isDestroyed(): boolean }> {
+  return uniqueObjects([...identity.entries.values()].flat()).filter(
+    (value): value is { isDestroyed(): boolean } =>
+      typeof (value as { isDestroyed?: unknown }).isDestroyed === "function"
+  );
+}
+
+function sameCameraView(
+  actual: ReturnType<KairosMap["sceneState"]["captureCamera"]>,
+  expected: NonNullable<SceneSnapshot["camera"]>
+): boolean {
+  return (
+    Math.abs(actual.longitude - expected.longitude) < 1e-6 &&
+    Math.abs(actual.latitude - expected.latitude) < 1e-6 &&
+    Math.abs(actual.height - expected.height) < 0.1 &&
+    Math.abs(actual.heading - expected.heading) < 1e-6 &&
+    Math.abs(actual.pitch - expected.pitch) < 1e-6 &&
+    Math.abs(actual.roll - expected.roll) < 1e-6
+  );
+}
+
+function isMonotonic(values: number[]): boolean {
+  return values.length > 0 && values.every((value, index) => index === 0 || value >= values[index - 1]);
+}
+
+function analysisSnapshotFromScene(snapshot: SceneSnapshot) {
+  return snapshot.results
+    ? {
+        measure: snapshot.results.measure,
+        visibility: snapshot.results.visibility,
+        profile: snapshot.results.profile,
+        clipping: snapshot.results.clipping,
+        terrain: snapshot.results.terrain
+      }
+    : undefined;
+}
+
+function sameSerializable(left: unknown, right: unknown): boolean {
+  return JSON.stringify(sortSerializable(left)) === JSON.stringify(sortSerializable(right));
+}
+
+function containsSerializable(actual: unknown, expected: unknown): boolean {
+  if (typeof actual === "number" && typeof expected === "number") {
+    return Math.abs(actual - expected) <= 1e-8 * Math.max(1, Math.abs(expected));
+  }
+  if (Array.isArray(expected)) {
+    return (
+      Array.isArray(actual) &&
+      actual.length === expected.length &&
+      expected.every((item, index) => containsSerializable(actual[index], item))
+    );
+  }
+  if (expected && typeof expected === "object") {
+    if (!actual || typeof actual !== "object" || Array.isArray(actual)) {
+      return false;
+    }
+    return Object.entries(expected as Record<string, unknown>).every(
+      ([key, value]) =>
+        value === undefined ||
+        containsSerializable((actual as Record<string, unknown>)[key], value)
+    );
+  }
+  return Object.is(actual, expected);
+}
+
+function sortSerializable(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortSerializable);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, sortSerializable(item)])
+    );
+  }
+  return value;
+}
+
+interface SceneFingerprint {
+  camera: ReturnType<KairosMap["sceneState"]["captureCamera"]>;
+  layers: ReturnType<KairosMap["layers"]["toJSON"]>;
+  bookmarks: ReturnType<KairosMap["sceneState"]["bookmarks"]["list"]>;
+  draw: ReturnType<KairosMap["draw"]["toJSON"]>;
+  analysis: ReturnType<KairosMap["analysis"]["toJSON"]>;
+  primitives: ReturnType<KairosMap["primitives"]["toJSON"]>;
+  overlays: ReturnType<KairosMap["overlays"]["toJSON"]>;
+  effects: ReturnType<KairosMap["effects"]["toJSON"]>;
+  viewerEntityIds: string[];
+  scenePrimitiveCount: number;
+  postProcessStageNames: string[];
+  effectRuntimeObjectCount: number;
+  animatedEffectCount: number;
+}
+
+function captureSceneFingerprint(map: KairosMap): SceneFingerprint {
+  const stats = map.performance.getStats();
+  const postProcessStageNames: string[] = [];
+  for (let index = 0; index < map.viewer.scene.postProcessStages.length; index += 1) {
+    postProcessStageNames.push(map.viewer.scene.postProcessStages.get(index).name);
+  }
+  return {
+    camera: map.sceneState.captureCamera(),
+    layers: map.layers.toJSON(),
+    bookmarks: map.sceneState.bookmarks.list(),
+    draw: map.draw.toJSON(),
+    analysis: map.analysis.toJSON(),
+    primitives: map.primitives.toJSON(),
+    overlays: map.overlays.toJSON(),
+    effects: map.effects.toJSON(),
+    viewerEntityIds: map.viewer.entities.values.map((entity) => entity.id).sort(),
+    scenePrimitiveCount: map.viewer.scene.primitives.length,
+    postProcessStageNames,
+    effectRuntimeObjectCount: stats.effectRuntimeObjectCount,
+    animatedEffectCount: stats.animatedEffectCount
+  };
+}
+
+function sameFingerprint(left: SceneFingerprint, right: SceneFingerprint): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+interface FixtureLayerBehavior {
+  prepare?: () => void | Promise<void>;
+  attach?: () => void | Promise<void>;
+  detach?: () => void | Promise<void>;
+}
+
+function registerFixtureLayer(
+  type: string,
+  behavior: FixtureLayerBehavior
+): () => void {
+  layerRegistry.register(type, (config) => createFixtureLayer(config, behavior));
+  return () => layerRegistry.unregister(type);
+}
+
+function createFixtureLayer(
+  config: BaseLayerConfig,
+  behavior: FixtureLayerBehavior
+): LayerAdapter {
+  const id = config.id ?? `${config.type}-fixture`;
+  const runtime = { id, type: config.type };
+  let show = config.show ?? true;
+  let map: KairosMap | undefined;
+  const adapter: LayerAdapter = {
+    id,
+    type: config.type,
+    get show() {
+      return show;
+    },
+    set show(value: boolean) {
+      show = value;
+    },
+    transaction: {
+      prepare: () => behavior.prepare?.(),
+      attach: () => behavior.attach?.(),
+      detach: () => behavior.detach?.()
+    },
+    async addTo(nextMap) {
+      map = nextMap;
+      await adapter.transaction!.prepare(nextMap);
+      await adapter.transaction!.attach(nextMap);
+    },
+    remove() {
+      if (map) {
+        void adapter.transaction!.detach(map);
+        map = undefined;
+      }
+    },
+    destroy() {
+      adapter.remove();
+    },
+    toConfig: () => ({ ...config, id, show }) as LayerConfig,
+    getRuntimeObjects: () => [runtime]
+  };
+  return adapter;
+}
+
+function snapshotWithFixtureLayer(
+  snapshot: SceneSnapshot,
+  type: string,
+  id: string
+): SceneSnapshot {
+  return {
+    ...structuredClone(snapshot),
+    layers: [{ id, type } as LayerConfig]
+  };
+}
+
+function createBrowserGate() {
+  let markStarted!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const waitForRelease = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { markStarted, release, started, waitForRelease };
+}
+
+function markSmokeStep(step: string): void {
+  document.documentElement.dataset.k3dSmokeStep = step;
+}
+
 async function waitForFrames(count: number): Promise<void> {
   for (let index = 0; index < count; index += 1) {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -586,7 +1211,16 @@ function seedM7Objects(map: KairosMap): void {
   });
 }
 
-createRoot(document.getElementById("root")!).render(
+interface BrowserSmokeWindow extends Window {
+  __KAIROS_BROWSER_SMOKE_ROOT__?: Root;
+}
+
+const browserSmokeWindow = window as BrowserSmokeWindow;
+browserSmokeWindow.__KAIROS_BROWSER_SMOKE_ROOT__?.unmount();
+const browserSmokeRoot = createRoot(document.getElementById("root")!);
+browserSmokeWindow.__KAIROS_BROWSER_SMOKE_ROOT__ = browserSmokeRoot;
+
+browserSmokeRoot.render(
   <KairosMapProvider
     createOptions={{
       viewerOptions: {
@@ -627,7 +1261,16 @@ createRoot(document.getElementById("root")!).render(
       <KairosMapViewport />
       <KairosWidgetToolbar />
       <KairosWidgetHost />
-      <BrowserSmoke />
     </KairosWidgetShell>
+    <BrowserSmoke />
   </KairosMapProvider>
 );
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    if (browserSmokeWindow.__KAIROS_BROWSER_SMOKE_ROOT__ === browserSmokeRoot) {
+      browserSmokeRoot.unmount();
+      delete browserSmokeWindow.__KAIROS_BROWSER_SMOKE_ROOT__;
+    }
+  });
+}

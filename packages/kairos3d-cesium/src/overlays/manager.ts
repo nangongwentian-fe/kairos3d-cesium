@@ -1,5 +1,6 @@
 import { Cartesian3 } from "cesium";
 import type { KairosMap } from "../core/map";
+import { removeEntityIfOwned } from "../core/entity-collection";
 import {
   deserializePositions,
   parseSnapshotDate,
@@ -12,11 +13,13 @@ import {
 } from "./geojson";
 import {
   cloneOverlayData,
+  createOverlayEntity,
   normalizeOverlayHeight,
   renderOverlayEntity,
   serializeOverlayData,
   validateOverlayShape
 } from "./render";
+import type { PreparedSceneStage } from "../scene/transaction";
 import type {
   BillboardOverlayOptions,
   BoxOverlayOptions,
@@ -248,7 +251,7 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     const editable = options.editable ?? overlay.editable;
 
     validateOverlayShape(id, overlay.type, positions, data);
-    this.map.viewer.entities.remove(overlay.entity);
+    removeEntityIfOwned(this.map.viewer.entities, overlay.entity);
     overlay.entity = renderOverlayEntity(this.map, {
       id,
       type: overlay.type,
@@ -283,7 +286,7 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     overlay.style = this.map.styles.resolveDrawStyle(overlay.type, style);
     overlay.updatedAt = new Date();
     if (overlay.type === "circle" || overlay.type === "rectangle") {
-      this.map.viewer.entities.remove(overlay.entity);
+      removeEntityIfOwned(this.map.viewer.entities, overlay.entity);
       overlay.entity = renderOverlayEntity(this.map, {
         id,
         type: overlay.type,
@@ -460,13 +463,95 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     this.prepareSnapshots(snapshots);
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: OverlaySnapshot[],
+    options: OverlayLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    const prepared = this.prepareSnapshots(snapshots);
+    const staged = prepared.map((item) => this.createPreparedOverlay(item, false));
+    const previous = options.clear
+      ? this.list()
+      : staged
+          .map((overlay) => this.overlays.get(overlay.id))
+          .filter((overlay): overlay is Overlay => Boolean(overlay));
+    const detachedPrevious: Overlay[] = [];
+    const attachedStaged: Overlay[] = [];
+    let mapsSwapped = false;
+    let published = false;
+
+    return {
+      phase: "overlays",
+      commit: () => {
+        for (const overlay of previous) {
+          if (removeEntityIfOwned(this.map.viewer.entities, overlay.entity)) {
+            detachedPrevious.push(overlay);
+          }
+        }
+        for (const overlay of staged) {
+          this.map.viewer.entities.add(overlay.entity);
+          attachedStaged.push(overlay);
+        }
+        for (const overlay of previous) {
+          this.overlays.delete(overlay.id);
+        }
+        for (const overlay of staged) {
+          this.overlays.set(overlay.id, overlay);
+        }
+        mapsSwapped = true;
+      },
+      rollback: () => {
+        for (const overlay of [...attachedStaged].reverse()) {
+          removeEntityIfOwned(this.map.viewer.entities, overlay.entity);
+        }
+        attachedStaged.length = 0;
+        if (mapsSwapped) {
+          for (const overlay of staged) {
+            this.overlays.delete(overlay.id);
+          }
+        }
+        for (const overlay of detachedPrevious) {
+          this.map.viewer.entities.add(overlay.entity);
+          this.overlays.set(overlay.id, overlay);
+        }
+        detachedPrevious.length = 0;
+        mapsSwapped = false;
+      },
+      finalize: () => undefined,
+      dispose: () => {
+        for (const overlay of [...attachedStaged].reverse()) {
+          removeEntityIfOwned(this.map.viewer.entities, overlay.entity);
+        }
+        attachedStaged.length = 0;
+      },
+      publish: () => {
+        if (published) {
+          return;
+        }
+        published = true;
+        if (previous.length > 0) {
+          for (const overlay of previous) {
+            this.emit("remove", overlay);
+          }
+          if (options.clear) {
+            this.emit("clear", previous);
+          }
+        }
+        for (const overlay of staged) {
+          this.emit("add", overlay);
+        }
+        this.emit("load", staged);
+      }
+    };
+  }
+
   remove(id: string): boolean {
     const overlay = this.overlays.get(id);
     if (!overlay) {
       return false;
     }
 
-    this.map.viewer.entities.remove(overlay.entity);
+    removeEntityIfOwned(this.map.viewer.entities, overlay.entity);
     this.overlays.delete(id);
     this.emit("remove", overlay);
     return true;
@@ -487,7 +572,7 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   clear(): void {
     const removed = this.list();
     for (const overlay of removed) {
-      this.map.viewer.entities.remove(overlay.entity);
+      removeEntityIfOwned(this.map.viewer.entities, overlay.entity);
       this.emit("remove", overlay);
     }
 
@@ -573,6 +658,19 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   private restoreSnapshot(prepared: PreparedOverlaySnapshot): Overlay {
+    const overlay = this.createPreparedOverlay(prepared, true);
+    if (this.overlays.has(overlay.id)) {
+      this.remove(overlay.id);
+    }
+    this.overlays.set(overlay.id, overlay);
+    this.emit("add", overlay);
+    return overlay;
+  }
+
+  private createPreparedOverlay(
+    prepared: PreparedOverlaySnapshot,
+    attach: boolean
+  ): Overlay {
     const {
       snapshot,
       positions,
@@ -586,22 +684,28 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       locked,
       editable
     } = prepared;
-    if (this.overlays.has(snapshot.id)) {
-      this.remove(snapshot.id);
-    }
-
     const overlay: Overlay = {
       id: snapshot.id,
       type: snapshot.type,
-      entity: renderOverlayEntity(this.map, {
-        id: snapshot.id,
-        type: snapshot.type,
-        positions,
-        data,
-        style,
-        height,
-        show
-      }),
+      entity: attach
+        ? renderOverlayEntity(this.map, {
+            id: snapshot.id,
+            type: snapshot.type,
+            positions,
+            data,
+            style,
+            height,
+            show
+          })
+        : createOverlayEntity({
+            id: snapshot.id,
+            type: snapshot.type,
+            positions,
+            data,
+            style,
+            height,
+            show
+          }),
       positions,
       data,
       style,
@@ -616,8 +720,6 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       updatedAt: prepared.updatedAt
     };
 
-    this.overlays.set(overlay.id, overlay);
-    this.emit("add", overlay);
     return overlay;
   }
 

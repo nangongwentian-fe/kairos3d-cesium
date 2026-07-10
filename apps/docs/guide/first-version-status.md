@@ -25,8 +25,11 @@ This page records what the current SDK can claim as the first complete version a
 | `analysis.profile` | Polyline profile sampling, distance chain, min/max height, managed entities, and snapshots. |
 | `analysis.clipping` | Plane and polygon clipping for globe, managed layers, compatible picked targets, and programmatic result editing. |
 | `analysis.terrain` | Terrain sample grids, slope/aspect, contours, sampled-cell and triangulated volume, flood, and excavation estimates. |
-| `scene` | Camera capture/fly-to, bookmarks, scene snapshots, optional runtime result recovery, and optional primitive overlay recovery. |
+| `scene` | Camera capture/fly-to, bookmarks, v1 snapshot validation, transactional recovery with rollback diagnostics, optional runtime result recovery, and optional primitive/effect recovery. |
 | `picking` | Entity, GeoJSON, glTF, 3D Tiles, primitive, and optional imagery feature normalization. |
+| `materials` | Target-aware Entity/Primitive material registry and factories built only on public Cesium APIs. |
+| `effects` | Nine managed geometry, particle, and weather effects with grouping, lifecycle cleanup, shared animation ticking, and data-only snapshots. |
+| `operations` | Shared progress, cancellation, failure, retention, and late-commit protection for asynchronous SDK work. |
 | `style` | JSON-safe colors, default styles, presets, and result style serialization. |
 | `height` | Height modes, terrain sampling helpers, clamp helpers, and surface distance path. |
 | `results` | Aggregate listing, lookup, remove, clear, and events across SDK-managed draw and analysis results. |
@@ -38,7 +41,7 @@ This page records what the current SDK can claim as the first complete version a
 
 | Stored | Not stored |
 | --- | --- |
-| Camera view, bookmarks, recoverable layer configs, and optional primitive overlays. | Cesium runtime objects, providers, and custom entities. |
+| Camera view, bookmarks, recoverable layer configs, and optional primitive/effect descriptions. | Cesium runtime objects, providers, and custom entities. |
 | SDK-managed draw, measure, visibility, profile, terrain, and recoverable clipping results. | `PickResult.object`, 3D Tiles feature identity, picked-object clipping targets. |
 | JSON-safe positions, vectors, colors, timestamps, result ids, types, and height/style options. | Cesium `Material`, `CallbackProperty`, functions, popup state, and app UI state. |
 
@@ -49,7 +52,9 @@ This page records what the current SDK can claim as the first complete version a
 | Terrain analysis | Volume, flooding, excavation, and surface area can use triangulated estimates, but they are not survey-grade solid modeling or real terrain deformation. |
 | Surface area | `surface` area is implemented through sampled grid triangulation. |
 | Primitive rendering | Entity rendering is still the default. Draw polyline/polygon and distance/area measurement can opt into Primitive-backed rendering with `renderMode: "primitive"`. |
-| Scene snapshots | Primitive overlays are included only when `includePrimitives: true` is requested. |
+| Scene snapshots | `SceneSnapshot` remains version `1`; transactional recovery is the default, and no migration API exists before a real incompatible schema change. |
+| Operations | Cancellation rejects immediately, while late Cesium work is retained only for cleanup and cannot commit afterward. |
+| Effects | Effect snapshots contain descriptors only; they never serialize Cesium materials, primitives, particle systems, stages, or animation phase. |
 | UI widgets | Popup panels, property tables, chart components, and Mars3D-style widgets belong in apps, not the SDK core. |
 | Persistence | The SDK returns serializable data; apps decide whether to use files, localStorage, or a backend. |
 

@@ -160,10 +160,17 @@ export type LayerConfig =
   | GeoJsonLayerConfig
   | GltfLayerConfig;
 
+export interface LayerTransactionHooks {
+  prepare(map: KairosMap): void | Promise<void>;
+  attach(map: KairosMap): void | Promise<void>;
+  detach(map: KairosMap): void | Promise<void>;
+}
+
 export interface LayerAdapter extends Disposable {
   readonly id: string;
   readonly type: string;
   readonly name?: string;
+  readonly transaction?: LayerTransactionHooks;
   show: boolean;
   addTo(map: KairosMap): Promise<void> | void;
   remove(): void;

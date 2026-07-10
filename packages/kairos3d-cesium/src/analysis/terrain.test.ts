@@ -97,6 +97,56 @@ describe("TerrainAnalysisManager", () => {
     });
   });
 
+  it("restores only terrain entities detached before a commit failure", async () => {
+    const map = createMapMock();
+    const manager = new TerrainAnalysisManager(map);
+    const first = await manager.slopeAspect({
+      area: createArea(),
+      sampleStep: 80,
+      maxSamples: 16
+    });
+    const second = await manager.slopeAspect({
+      area: createArea(),
+      sampleStep: 80,
+      maxSamples: 16
+    });
+    const allEntities = [...first.entities, ...second.entities];
+    const current = new Map(allEntities.map((entity) => [entity.id, entity]));
+    const failingEntity = second.entities[0];
+    const add = vi.mocked(map.viewer.entities.add).mockImplementation((entity) => {
+      const value = entity as Entity;
+      if (current.has(value.id)) {
+        throw new Error(`duplicate ${value.id}`);
+      }
+      current.set(value.id, value);
+      return value;
+    });
+    add.mockClear();
+    vi.mocked(map.viewer.entities.remove).mockImplementation((entity) => {
+      if (entity === failingEntity) {
+        throw new Error("detach failed");
+      }
+      return current.delete(entity.id);
+    });
+    Object.assign(map.viewer.entities, {
+      getById: (id: string) => current.get(id)
+    });
+    const snapshot = {
+      ...manager.toJSON()[0],
+      id: "terrain-new"
+    };
+    const stage = await manager.prepareSceneLoad([snapshot], { clear: true });
+
+    expect(() => stage.commit()).toThrow("detach failed");
+    expect(() => stage.rollback()).not.toThrow();
+    await stage.dispose();
+
+    for (const entity of allEntities) {
+      expect(current.get(entity.id)).toBe(entity);
+    }
+    expect(add).toHaveBeenCalledTimes(first.entities.length);
+  });
+
   it("computes contour results and serializes them", async () => {
     const map = createMapMock();
     const manager = new TerrainAnalysisManager(map);

@@ -19,6 +19,7 @@ function createMapMock() {
     viewer: {
       scene: {
         primitives: {
+          destroyPrimitives: true,
           add: vi.fn((primitive) => primitive),
           remove: vi.fn(() => true)
         }
@@ -916,5 +917,105 @@ describe("DrawManager", () => {
       ids: ["draw-1", "draw-2"]
     });
     expect(manager.list()).toEqual([]);
+  });
+
+  it("stages primitive results without viewer mutation and restores runtime identity", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const positions = [
+      { longitude: 114, latitude: 22, height: 10 },
+      { longitude: 114.01, latitude: 22.01, height: 20 }
+    ];
+    await manager.load([
+      {
+        id: "draw-old",
+        type: "polyline",
+        positions,
+        createdAt: "2026-07-10T00:00:00.000Z",
+        renderMode: "primitive"
+      }
+    ]);
+    const oldResult = manager.get("draw-old")!;
+    const oldPrimitive = oldResult.primitives![0];
+    vi.mocked(map.viewer.scene.primitives.add).mockClear();
+
+    const stage = await manager.prepareSceneLoad(
+      [
+        {
+          id: "draw-new",
+          type: "polyline",
+          positions,
+          createdAt: "2026-07-10T01:00:00.000Z",
+          renderMode: "primitive"
+        }
+      ],
+      { clear: true }
+    );
+
+    expect(map.viewer.scene.primitives.add).not.toHaveBeenCalled();
+    expect(manager.get("draw-old")).toBe(oldResult);
+
+    await stage.commit();
+    const stagedResult = manager.get("draw-new")!;
+    const stagedPrimitive = stagedResult.primitives![0];
+    await stage.rollback();
+    await stage.dispose();
+
+    expect(manager.get("draw-old")).toBe(oldResult);
+    expect(oldResult.primitives![0]).toBe(oldPrimitive);
+    expect(oldPrimitive.type === "polyline" && oldPrimitive.collection.isDestroyed()).toBe(false);
+    expect(
+      stagedPrimitive.type === "polyline" && stagedPrimitive.collection.isDestroyed()
+    ).toBe(true);
+  });
+
+  it("rolls back only old entities that were actually detached", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const first = manager.addResult(createResult("draw-old-1"));
+    const second = manager.addResult(createResult("draw-old-2"));
+    const current = new Map([
+      [first.entity.id, first.entity],
+      [second.entity.id, second.entity]
+    ]);
+    const add = vi.mocked(map.viewer.entities.add).mockImplementation((entity) => {
+      const value = entity as Entity;
+      if (current.has(value.id)) {
+        throw new Error(`duplicate ${value.id}`);
+      }
+      current.set(value.id, value);
+      return value;
+    });
+    vi.mocked(map.viewer.entities.remove).mockImplementation((entity) => {
+      if (entity === second.entity) {
+        throw new Error("detach failed");
+      }
+      return current.delete(entity.id);
+    });
+    Object.assign(map.viewer.entities, {
+      getById: (id: string) => current.get(id)
+    });
+    const stage = await manager.prepareSceneLoad(
+      [
+        {
+          id: "draw-new",
+          type: "polyline",
+          positions: [
+            { longitude: 114, latitude: 22, height: 10 },
+            { longitude: 114.01, latitude: 22.01, height: 20 }
+          ],
+          createdAt: "2026-07-10T01:00:00.000Z"
+        }
+      ],
+      { clear: true }
+    );
+
+    expect(() => stage.commit()).toThrow("detach failed");
+    expect(() => stage.rollback()).not.toThrow();
+    await stage.dispose();
+
+    expect(current.get(first.entity.id)).toBe(first.entity);
+    expect(current.get(second.entity.id)).toBe(second.entity);
+    expect(add).toHaveBeenCalledTimes(1);
   });
 });

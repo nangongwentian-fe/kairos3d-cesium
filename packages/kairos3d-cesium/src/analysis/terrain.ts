@@ -1,9 +1,13 @@
 import {
   Cartesian3,
   ConstantProperty,
-  type Entity
+  Entity
 } from "cesium";
 import type { KairosMap } from "../core";
+import {
+  removeEntityIfOwned,
+  removeEntityIfOwnedTracked
+} from "../core/entity-collection";
 import { Evented } from "../core/events";
 import {
   deserializePosition,
@@ -21,6 +25,7 @@ import {
   serializeSymbolStyle
 } from "../style";
 import type { Tool } from "../tools";
+import type { PreparedSceneStage } from "../scene/transaction";
 import {
   runOrReuseOperation,
   type OperationContext
@@ -316,6 +321,90 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
     return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: TerrainResultSnapshot[],
+    options: RuntimeResultLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    validateTerrainSnapshots(this.map, snapshots);
+    const clear = options.clear ?? false;
+    if (!clear) {
+      for (const snapshot of snapshots) {
+        if (this.results.has(snapshot.id)) {
+          throw new Error(
+            `Terrain result "${snapshot.id}" already exists during transactional merge.`
+          );
+        }
+      }
+    }
+    const staged = snapshots.map((snapshot) =>
+      restoreTerrainSnapshot(this.map, snapshot, true)
+    );
+    const previous = clear ? this.list() : [];
+    let commitStarted = false;
+    let mapsSwapped = false;
+    let rolledBack = false;
+    let finalized = false;
+    let disposed = false;
+    let published = false;
+    const detachedPreviousEntities: Entity[] = [];
+
+    return {
+      phase: "terrain",
+      commit: () => {
+        assertTerrainBaseUnchanged(this.results, previous, staged, clear);
+        commitStarted = true;
+        for (const result of previous) {
+          removeEntitiesTracked(
+            this.map,
+            result.entities,
+            detachedPreviousEntities
+          );
+        }
+        for (const result of staged) attachEntities(this.map, result.entities);
+        if (clear) this.results.clear();
+        for (const result of staged) this.results.set(result.id, result);
+        mapsSwapped = true;
+      },
+      rollback: () => {
+        if (!commitStarted || rolledBack || finalized || disposed) return;
+        const errors: unknown[] = [];
+        for (const result of [...staged].reverse()) {
+          try { removeEntities(this.map, result.entities); } catch (error) { errors.push(error); }
+        }
+        if (mapsSwapped) {
+          for (const result of staged) this.results.delete(result.id);
+        }
+        for (const entity of detachedPreviousEntities) {
+          try { this.map.viewer.entities.add(entity); } catch (error) { errors.push(error); }
+        }
+        for (const result of previous) {
+          this.results.set(result.id, result);
+        }
+        detachedPreviousEntities.length = 0;
+        mapsSwapped = false;
+        rolledBack = true;
+        if (errors.length) throw new AggregateError(errors, "Failed to roll back terrain results.");
+      },
+      finalize: () => { finalized = true; },
+      dispose: () => {
+        if (disposed || finalized) return;
+        for (const result of [...staged].reverse()) removeEntities(this.map, result.entities);
+        disposed = true;
+      },
+      publish: () => {
+        if (published) return;
+        if (clear) {
+          for (const result of previous) this.emit("remove", result);
+          this.emit("clear", previous);
+          this.map.tools.emitClear({ source: "terrain", ids: previous.map((item) => item.id) });
+        }
+        for (const result of staged) this.emit("add", result);
+        published = true;
+      }
+    };
+  }
+
   setStyle(id: string, style: ResultSymbolStyle): TerrainResult {
     const result = this.requireResult(id);
     removeEntities(this.map, result.entities);
@@ -408,15 +497,25 @@ function renderAreaEntities(
   style: ResultSymbolStyle,
   height?: TerrainResult["height"]
 ): Entity[] {
+  const entities = createAreaEntities(area, style, height);
+  attachEntities(map, entities);
+  return entities;
+}
+
+function createAreaEntities(
+  area: Cartesian3[],
+  style: ResultSymbolStyle,
+  height?: TerrainResult["height"]
+): Entity[] {
   const entities = [
-    map.viewer.entities.add({
+    new Entity({
       polygon: createPolygonGraphics(new ConstantProperty(area), style.polygon)
     })
   ];
 
   if (style.line && area.length >= 2) {
     entities.push(
-      map.viewer.entities.add({
+      new Entity({
         polyline: createLineGraphics([...area, area[0]], lineStyleWithHeight(style.line, height))
       })
     );
@@ -439,8 +538,18 @@ function renderContourEntities(
   style: ResultSymbolStyle,
   height?: ContourResult["height"]
 ): Entity[] {
+  const entities = createContourEntities(lines, style, height);
+  attachEntities(map, entities);
+  return entities;
+}
+
+function createContourEntities(
+  lines: ContourLine[],
+  style: ResultSymbolStyle,
+  height?: ContourResult["height"]
+): Entity[] {
   return lines.map((line) =>
-    map.viewer.entities.add({
+    new Entity({
       polyline: createLineGraphics(line.positions, lineStyleWithHeight(style.line, height))
     })
   );
@@ -555,7 +664,8 @@ function terrainResultToSnapshot(result: TerrainResult): TerrainResultSnapshot {
 
 function restoreSlopeAspect(
   map: KairosMap,
-  snapshot: SlopeAspectResultSnapshot
+  snapshot: SlopeAspectResultSnapshot,
+  detached = false
 ): SlopeAspectResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
@@ -569,14 +679,20 @@ function restoreSlopeAspect(
     minSlope: snapshot.minSlope,
     maxSlope: snapshot.maxSlope,
     averageSlope: snapshot.averageSlope,
-    entities: renderAreaEntities(map, area, style, height),
+    entities: detached
+      ? createAreaEntities(area, style, height)
+      : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
     style,
     height
   };
 }
 
-function restoreContour(map: KairosMap, snapshot: ContourResultSnapshot): ContourResult {
+function restoreContour(
+  map: KairosMap,
+  snapshot: ContourResultSnapshot,
+  detached = false
+): ContourResult {
   const area = deserializePositions(snapshot.area);
   const lines = snapshot.lines.map(deserializeContourLine);
   const style = map.styles.resolveTerrainStyle("contour", snapshot.style);
@@ -590,14 +706,20 @@ function restoreContour(map: KairosMap, snapshot: ContourResultSnapshot): Contou
     lines,
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: renderContourEntities(map, lines, style, height),
+    entities: detached
+      ? createContourEntities(lines, style, height)
+      : renderContourEntities(map, lines, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
     style,
     height
   };
 }
 
-function restoreVolume(map: KairosMap, snapshot: VolumeResultSnapshot): VolumeResult {
+function restoreVolume(
+  map: KairosMap,
+  snapshot: VolumeResultSnapshot,
+  detached = false
+): VolumeResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
   const style = map.styles.resolveTerrainStyle("volume", snapshot.style);
@@ -616,14 +738,20 @@ function restoreVolume(map: KairosMap, snapshot: VolumeResultSnapshot): VolumeRe
     calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: renderAreaEntities(map, area, style, height),
+    entities: detached
+      ? createAreaEntities(area, style, height)
+      : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
     style,
     height
   };
 }
 
-function restoreFlood(map: KairosMap, snapshot: FloodResultSnapshot): FloodResult {
+function restoreFlood(
+  map: KairosMap,
+  snapshot: FloodResultSnapshot,
+  detached = false
+): FloodResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
   const style = map.styles.resolveTerrainStyle("flood", snapshot.style);
@@ -641,7 +769,9 @@ function restoreFlood(map: KairosMap, snapshot: FloodResultSnapshot): FloodResul
     calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: renderAreaEntities(map, area, style, height),
+    entities: detached
+      ? createAreaEntities(area, style, height)
+      : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
     style,
     height
@@ -650,7 +780,8 @@ function restoreFlood(map: KairosMap, snapshot: FloodResultSnapshot): FloodResul
 
 function restoreExcavation(
   map: KairosMap,
-  snapshot: ExcavationResultSnapshot
+  snapshot: ExcavationResultSnapshot,
+  detached = false
 ): ExcavationResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
@@ -669,7 +800,9 @@ function restoreExcavation(
     calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: renderAreaEntities(map, area, style, height),
+    entities: detached
+      ? createAreaEntities(area, style, height)
+      : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
     style,
     height
@@ -678,19 +811,20 @@ function restoreExcavation(
 
 function restoreTerrainSnapshot(
   map: KairosMap,
-  snapshot: TerrainResultSnapshot
+  snapshot: TerrainResultSnapshot,
+  detached = false
 ): TerrainResult {
   switch (snapshot.type) {
     case "slope-aspect":
-      return restoreSlopeAspect(map, snapshot);
+      return restoreSlopeAspect(map, snapshot, detached);
     case "contour":
-      return restoreContour(map, snapshot);
+      return restoreContour(map, snapshot, detached);
     case "volume":
-      return restoreVolume(map, snapshot);
+      return restoreVolume(map, snapshot, detached);
     case "flood":
-      return restoreFlood(map, snapshot);
+      return restoreFlood(map, snapshot, detached);
     case "excavation":
-      return restoreExcavation(map, snapshot);
+      return restoreExcavation(map, snapshot, detached);
   }
 }
 
@@ -906,7 +1040,50 @@ function rollbackTerrainResult(
 
 function removeEntities(map: KairosMap, entities: Entity[]): void {
   for (const entity of entities) {
-    map.viewer.entities.remove(entity);
+    removeEntityIfOwned(map.viewer.entities, entity);
+  }
+}
+
+function removeEntitiesTracked(
+  map: KairosMap,
+  entities: Entity[],
+  detached: Entity[]
+): void {
+  for (const entity of entities) {
+    removeEntityIfOwnedTracked(map.viewer.entities, entity, detached);
+  }
+}
+
+function attachEntities(map: KairosMap, entities: Entity[]): void {
+  for (const entity of entities) {
+    map.viewer.entities.add(entity);
+  }
+}
+
+function assertTerrainBaseUnchanged(
+  results: Map<string, TerrainResult>,
+  previous: TerrainResult[],
+  staged: TerrainResult[],
+  clear: boolean
+): void {
+  if (clear && results.size !== previous.length) {
+    throw new Error("Terrain results changed after transactional preparation.");
+  }
+  for (const result of previous) {
+    if (results.get(result.id) !== result) {
+      throw new Error(
+        `Terrain result "${result.id}" changed after transactional preparation.`
+      );
+    }
+  }
+  if (!clear) {
+    for (const result of staged) {
+      if (results.has(result.id)) {
+        throw new Error(
+          `Terrain result "${result.id}" changed after transactional preparation.`
+        );
+      }
+    }
   }
 }
 

@@ -264,6 +264,58 @@ describe("MeasureManager", () => {
     expect(manager.remove("measure-primitive")).toBe(true);
     expect(map.viewer.scene.primitives.remove).toHaveBeenCalled();
   });
+
+  it("restores only measurement entities detached before a commit failure", async () => {
+    const map = createMapMock();
+    const manager = new MeasureManager(map);
+    const first = manager.addResult(createResult("measure-old-1"));
+    const second = manager.addResult(createResult("measure-old-2"));
+    const allEntities = [...first.entities, ...second.entities];
+    const current = new Map(allEntities.map((entity) => [entity.id, entity]));
+    const failingEntity = second.entities[0];
+    const add = vi.mocked(map.viewer.entities.add).mockImplementation((entity) => {
+      const value = entity as Entity;
+      if (current.has(value.id)) {
+        throw new Error(`duplicate ${value.id}`);
+      }
+      current.set(value.id, value);
+      return value;
+    });
+    vi.mocked(map.viewer.entities.remove).mockImplementation((entity) => {
+      if (entity === failingEntity) {
+        throw new Error("detach failed");
+      }
+      return current.delete(entity.id);
+    });
+    Object.assign(map.viewer.entities, {
+      getById: (id: string) => current.get(id)
+    });
+    const stage = await manager.prepareSceneLoad(
+      [
+        {
+          id: "measure-new",
+          type: "distance",
+          positions: [
+            { longitude: 114, latitude: 22, height: 10 },
+            { longitude: 114.01, latitude: 22.01, height: 20 }
+          ],
+          value: 10,
+          unit: "m",
+          createdAt: "2026-07-10T01:00:00.000Z"
+        }
+      ],
+      { clear: true }
+    );
+
+    expect(() => stage.commit()).toThrow("detach failed");
+    expect(() => stage.rollback()).not.toThrow();
+    await stage.dispose();
+
+    for (const entity of allEntities) {
+      expect(current.get(entity.id)).toBe(entity);
+    }
+    expect(add).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("VisibilityManager", () => {

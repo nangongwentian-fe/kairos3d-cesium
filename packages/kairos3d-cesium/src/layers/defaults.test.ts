@@ -5,11 +5,59 @@ import { layerRegistry } from "./registry";
 import type {
   GeoJsonLayerConfig,
   GltfLayerConfig,
+  LayerConfig,
   TilesetLayerConfig,
   XyzLayerConfig
 } from "./types";
 
 describe("default layer factories", () => {
+  it("exposes detached transaction hooks for every built-in layer type", async () => {
+    registerDefaultLayerFactories();
+    const configs: LayerConfig[] = [
+      {
+        id: "xyz",
+        type: "xyz",
+        url: "https://example.com/{z}/{x}/{y}.png"
+      },
+      {
+        id: "wms",
+        type: "wms",
+        url: "https://example.com/wms",
+        layers: "demo"
+      },
+      {
+        id: "wmts",
+        type: "wmts",
+        url: "https://example.com/wmts",
+        layer: "demo",
+        style: "default",
+        tileMatrixSetID: "default"
+      },
+      { id: "terrain", type: "terrain" },
+      { id: "tiles", type: "3dtiles", url: "/tileset.json" },
+      {
+        id: "geojson",
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] }
+      },
+      {
+        id: "gltf",
+        type: "gltf",
+        url: "/model.glb",
+        position: Cartesian3.ZERO
+      }
+    ];
+
+    for (const config of configs) {
+      const layer = await layerRegistry.create(config);
+      expect(layer.transaction, config.type).toMatchObject({
+        prepare: expect.any(Function),
+        attach: expect.any(Function),
+        detach: expect.any(Function)
+      });
+    }
+  });
+
   it("creates an xyz adapter from config without touching a viewer", async () => {
     registerDefaultLayerFactories();
 

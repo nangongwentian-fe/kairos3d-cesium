@@ -3,8 +3,10 @@ import type { DrawResultSnapshot } from "../draw";
 import type { EffectSnapshot } from "../effects";
 import type { LayerConfig } from "../layers";
 import type { OverlaySnapshot } from "../overlays";
-import type { AsyncOperationOptions } from "../operations";
+import type { AsyncOperationOptions, OperationErrorInfo } from "../operations";
 import type { PrimitiveOverlaySnapshot } from "../primitives";
+
+export const SCENE_SNAPSHOT_VERSION = 1;
 
 export interface CameraView {
   longitude: number;
@@ -64,6 +66,7 @@ export interface SceneStateSnapshotOptions {
 }
 
 export interface SceneStateLoadOptions extends AsyncOperationOptions {
+  mode?: SceneLoadMode;
   clearLayers?: boolean;
   flyToCamera?: boolean;
   restoreResults?: boolean;
@@ -74,4 +77,36 @@ export interface SceneStateLoadOptions extends AsyncOperationOptions {
   clearOverlays?: boolean;
   restoreEffects?: boolean;
   clearEffects?: boolean;
+}
+
+export type SceneLoadMode = "transactional" | "progressive";
+
+export type SceneTransactionStatus =
+  | "preparing"
+  | "committing"
+  | "rolling-back"
+  | "succeeded"
+  | "failed"
+  | "canceled";
+
+export type SceneRollbackStatus =
+  | "not-needed"
+  | "running"
+  | "succeeded"
+  | "failed";
+
+export interface SceneTransactionState {
+  operationId: string;
+  mode: SceneLoadMode;
+  status: SceneTransactionStatus;
+  stage?: string;
+  rollbackStatus: SceneRollbackStatus;
+  error?: OperationErrorInfo;
+  rollbackErrors?: OperationErrorInfo[];
+  startedAt: Date;
+  finishedAt?: Date;
+}
+
+export interface SceneStateManagerEvents {
+  "transaction-change": SceneTransactionState;
 }

@@ -447,4 +447,85 @@ describe("ClippingManager", () => {
     expect(map.viewer.entities.remove).not.toHaveBeenCalled();
     expect(manager.stopEdit()?.id).toBe(result.id);
   });
+
+  it("defers layer target resolution until commit and rolls it back", async () => {
+    const host = createClippingHost();
+    const map = createMapMock();
+    const manager = new ClippingManager(map);
+    const getRuntimeObjects = vi.mocked(map.layers.getRuntimeObjects);
+
+    const stage = await manager.prepareSceneLoad(
+      [
+        {
+          id: "clip-layer",
+          type: "plane",
+          target: { type: "layer", layerId: "layer-next" },
+          enabled: true,
+          normal: { x: 1, y: 0, z: 0 },
+          distance: 10,
+          createdAt: "2026-07-10T00:00:00.000Z"
+        }
+      ],
+      { clear: true }
+    );
+
+    expect(getRuntimeObjects).not.toHaveBeenCalled();
+    getRuntimeObjects.mockReturnValue([host]);
+    await stage.commit();
+    const result = manager.get("clip-layer")!;
+    expect(host.clippingPlanes).toBe(result.collection);
+
+    await stage.rollback();
+    await stage.dispose();
+    expect(host.clippingPlanes).toBeUndefined();
+    expect(manager.get("clip-layer")).toBeUndefined();
+  });
+
+  it("restores only clipping targets detached before a commit failure", async () => {
+    const globe = createClippingHost();
+    const layerHost = createClippingHost();
+    const map = createMapMock(globe);
+    vi.mocked(map.layers.getRuntimeObjects).mockReturnValue([layerHost]);
+    const manager = new ClippingManager(map);
+    const first = manager.addPlane({
+      target: { type: "globe" },
+      normal: Cartesian3.UNIT_X,
+      distance: 0
+    });
+    const second = manager.addPlane({
+      target: { type: "layer", layerId: "layer-old" },
+      normal: Cartesian3.UNIT_Y,
+      distance: 0
+    });
+    Object.defineProperty(layerHost, "clippingPlanes", {
+      configurable: true,
+      get: () => second.collection,
+      set: () => {
+        throw new Error("detach failed");
+      }
+    });
+    const stage = await manager.prepareSceneLoad(
+      [
+        {
+          id: "clip-new",
+          type: "plane",
+          target: { type: "globe" },
+          enabled: true,
+          normal: { x: 1, y: 0, z: 0 },
+          distance: 10,
+          createdAt: "2026-07-10T00:00:00.000Z"
+        }
+      ],
+      { clear: true }
+    );
+
+    expect(() => stage.commit()).toThrow("detach failed");
+    expect(() => stage.rollback()).not.toThrow();
+    await stage.dispose();
+
+    expect(globe.clippingPlanes).toBe(first.collection);
+    expect(layerHost.clippingPlanes).toBe(second.collection);
+    expect(manager.get(first.id)).toBe(first);
+    expect(manager.get(second.id)).toBe(second);
+  });
 });

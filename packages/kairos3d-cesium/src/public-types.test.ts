@@ -22,6 +22,7 @@ import type {
   LayerAdapter,
   LayerLoadOptions,
   LayerState,
+  LayerTransactionHooks,
   TilesetLayerConfig
 } from "./layers";
 import type {
@@ -46,9 +47,13 @@ import type {
   CameraBookmark,
   CameraView,
   RuntimeResultsSnapshot,
+  SceneLoadMode,
+  SceneRollbackStatus,
   SceneSnapshot,
   SceneStateSnapshotOptions,
-  SceneStateLoadOptions
+  SceneStateLoadOptions,
+  SceneTransactionState,
+  SceneTransactionStatus
 } from "./scene";
 import type {
   AnalysisType,
@@ -1375,11 +1380,18 @@ describe("public SDK types", () => {
     expectTypeOf<LayerAdapter>().toMatchTypeOf<{
       id: string;
       type: string;
+      transaction?: LayerTransactionHooks;
       show: boolean;
       getState?: () => LayerState;
       getRuntimeObjects?: () => unknown[];
       ownsRuntimeObject?: (object: unknown) => boolean;
       getFeatureProperties?: (object: unknown) => Record<string, unknown> | undefined;
+    }>();
+
+    expectTypeOf<LayerTransactionHooks>().toEqualTypeOf<{
+      prepare: (map: KairosMap) => void | Promise<void>;
+      attach: (map: KairosMap) => void | Promise<void>;
+      detach: (map: KairosMap) => void | Promise<void>;
     }>();
 
     expectTypeOf<TilesetLayerConfig>().toMatchTypeOf<{
@@ -1446,6 +1458,7 @@ describe("public SDK types", () => {
     }>();
 
     expectTypeOf<SceneStateLoadOptions>().toEqualTypeOf<{
+      mode?: SceneLoadMode;
       clearLayers?: boolean;
       flyToCamera?: boolean;
       restoreResults?: boolean;
@@ -1459,6 +1472,33 @@ describe("public SDK types", () => {
       signal?: AbortSignal;
       operationId?: string;
     }>();
+
+    expectTypeOf<SceneLoadMode>().toEqualTypeOf<"transactional" | "progressive">();
+    expectTypeOf<SceneTransactionStatus>().toEqualTypeOf<
+      | "preparing"
+      | "committing"
+      | "rolling-back"
+      | "succeeded"
+      | "failed"
+      | "canceled"
+    >();
+    expectTypeOf<SceneRollbackStatus>().toEqualTypeOf<
+      "not-needed" | "running" | "succeeded" | "failed"
+    >();
+    expectTypeOf<SceneTransactionState>().toMatchTypeOf<{
+      operationId: string;
+      mode: SceneLoadMode;
+      status: SceneTransactionStatus;
+      stage?: string;
+      rollbackStatus: SceneRollbackStatus;
+      startedAt: Date;
+      finishedAt?: Date;
+    }>();
+    expectTypeOf<KairosMap["sceneState"]["getTransactionState"]>().returns.toEqualTypeOf<
+      SceneTransactionState | undefined
+    >();
+    expectTypeOf<KairosMap["sceneState"]["whenIdle"]>().returns.toEqualTypeOf<Promise<void>>();
+    expectTypeOf<import("./scene").SceneTransactionError>().toMatchTypeOf<Error>();
 
     expectTypeOf<RuntimeResultsSnapshot>().toEqualTypeOf<{
       draw: DrawResultSnapshot[];

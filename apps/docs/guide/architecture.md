@@ -46,7 +46,7 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | `@kairos3d/cesium/tools` | Exclusive interaction lifecycle and shared tool events. |
 | `@kairos3d/cesium/draw` | Drawing tools, draw result management, and first-stage point/line/polygon editing. |
 | `@kairos3d/cesium/analysis` | Measurement tools, visibility/profile/terrain analysis, clipping, and analysis result management. |
-| `@kairos3d/cesium/scene` | Camera view capture/fly-to, camera bookmarks, and scene snapshot recovery. |
+| `@kairos3d/cesium/scene` | Camera views, bookmarks, v1 snapshot validation, transactional recovery, and rollback diagnostics. |
 | `@kairos3d/cesium/picking` | Object picking, normalized properties, selection state, and first-stage highlight. |
 | `@kairos3d/cesium/materials` | Target-aware material registry and factories built on public Cesium material APIs. |
 | `@kairos3d/cesium/effects` | Long-running geometry, particle, and weather effect lifecycle. |
@@ -102,8 +102,14 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Feature | Current boundary |
 | --- | --- |
 | Camera view | `CameraView` stores longitude/latitude in degrees, height in meters, and heading/pitch/roll in Cesium radians. |
+| Schema version | `SceneSnapshot` remains `version: 1`. There is no migration registry or v1→v2 conversion while no incompatible persisted schema exists. |
+| Validation | `parseSceneSnapshot()` validates and deep-clones the v1 envelope without reading the Viewer or creating Cesium runtime. Transaction prepare delegates business-section validation to each manager. Persistence and Widget layers delegate Scene envelope validation to Core. |
 | Snapshot | `SceneSnapshot` stores `camera + layers + bookmarks` by default, and can opt into results, primitive overlays, overlays, and effects. |
-| Layer recovery | Snapshot load delegates to `map.layers.load()`, so only recoverable layer configs are restored. |
+| Default recovery | `sceneState.load()` defaults to `mode: "transactional"`: validate, prepare detached runtime, commit the swap, then finalize the old runtime. |
+| Rollback | Commit failure or cancellation detaches new runtime and reattaches supported original runtime objects. `whenIdle()` waits for rollback completion. |
+| Progressive recovery | `mode: "progressive"` retains phase-by-phase loading for intentional partial recovery and legacy custom layer adapters. |
+| Custom layers | Transactional recovery requires `LayerAdapter.transaction` hooks. Unsupported custom adapters fail before scene mutation; progressive mode remains available. |
+| Export guard | `sceneState.toJSON()` rejects while a transaction is active, so applications cannot persist an intermediate scene. |
 | Runtime results | SDK-managed draw, measure, visibility, profile, terrain, and recoverable clipping results can be serialized without Cesium runtime objects. |
 | Result styles | SDK-managed result styles are serialized as JSON-safe colors when `includeResults: true` is used. |
 | Primitive overlays | SDK-managed primitive overlays can be serialized with `includePrimitives: true`. |
@@ -111,6 +117,8 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Result index | `map.results` aggregates SDK-managed result lookup and cleanup, but it delegates entity ownership to draw and analysis managers. |
 | Clipping recovery | Clipping snapshots only restore `globe` targets and `layer` targets with a stable `layerId`; picked-object targets are skipped. |
 | Unsupported state | Custom entities, `PickResult.object`, 3D Tiles feature identities, popup/widget UI, Cesium runtime materials/objects, callbacks, functions, and intermediate animation phases are not serialized. |
+| Transaction scope | Strong rollback covers SDK-managed runtime with transaction support. Business-created Cesium objects, external event side effects, render-frame isolation, and Widget Workspace state are outside the Scene transaction. |
+| Transient interaction | Commit stops the active Tool and clears Selection. These transient states are not serialized or restored during rollback. |
 | Persistence | The SDK provides optional adapters, but apps still decide whether to use memory, localStorage, files, or a backend. |
 | Roaming | Route flight, keyboard roam, first-person roam, tracking mode, and Mars3D-style camera systems are out of scope for this milestone. |
 
@@ -122,8 +130,9 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Cancellation | Uses `AbortSignal`; work that Cesium cannot abort is prevented from committing after it resolves. |
 | Progress | Progress is monotonic from `0` to `1`; composite scene loads reuse one parent operation instead of creating duplicate records. |
 | Retention | At most 100 finished records are retained. Operation records are runtime diagnostics and are not serialized. |
-| Scene recovery | Cancellation stops later phases but does not roll back phases already committed. Transactional recovery is deferred to M10. |
-| UI | M9 does not add an Operations or Effects Widget. Applications may subscribe to `map.operations` directly. |
+| Scene recovery | Transactional mode uses one `scene.load` operation. Cancellation rejects that promise immediately; rollback continues independently and is observed through Scene transaction state. |
+| Progressive limit | Progressive scene loading and direct `layers.load({ clear: true })` can leave completed phases applied after cancellation. |
+| UI | Core does not add an Operations, Effects, or Transaction Widget. Applications subscribe to manager events directly. |
 
 ## Picking Boundaries
 

@@ -68,21 +68,34 @@ map.operations.clearFinished();
 
 Existing return values are unchanged. APIs with an existing options object accept `signal` and `operationId` there; Effects add/update and programmatic analysis compute methods accept a final operation-options argument.
 
+`sceneState.load()` creates only one `scene.load` record. Its internal prepare, commit, and rollback stages do not create nested operations. Transaction diagnostics are exposed separately through `map.sceneState.getTransactionState()` and `transaction-change`.
+
 ## Cancellation Rules
 
 - Cancellation is cooperative. Cesium requests without native abort support may finish in the background, but their late results are not committed.
 - A manager keeps its pending/load concurrency lock until that background cleanup finishes, even though the public promise rejects immediately.
+- A canceled transactional scene load rejects immediately with `OperationCanceledError`. Rollback ignores the original abort signal and continues in the background; wait for `map.sceneState.whenIdle()` before inspecting the restored scene.
 - Prepared Effects runtime objects are destroyed after cancellation. A canceled or failed Effect update keeps the old runtime active.
 - Layer loads remove layers added by that invocation after cancellation or failure.
 - Interactive visibility, profile, and terrain tools abort their in-flight compute work when the tool stops or is canceled.
 - `map.destroy()` cancels operations before destroying the remaining managers and suppresses late operation events.
 
+## Scene Loading Modes
+
+| Mode | Behavior |
+| --- | --- |
+| `transactional` | Default. Validates and prepares supported runtime before commit; commit failure or cancellation restores original runtime objects. |
+| `progressive` | Applies phases incrementally. Later failure or cancellation does not undo already completed phases. |
+
+Transactional rollback state is not written back into the already-finished `OperationState`. Observe `map.sceneState.on("transaction-change", ...)` for `rolling-back`, rollback diagnostics, and final idle state. See [Transactional Scene Recovery](./scene-transactions.md).
+
 ## Current Limits
 
-- Scene recovery is not transactional yet. Canceling `sceneState.load()` stops later phases but does not roll back phases that already completed.
 - `layers.load({ clear: true })` does not restore the old layer set after cancellation.
+- Progressive scene loading does not roll back completed phases.
+- Strong scene rollback only covers SDK-managed runtime whose manager or layer adapter supports transaction staging.
 - Operations are not serialized into `SceneSnapshot`, `map.results`, picking, selection, or layer ownership.
-- Worker scheduling and an Operations Widget are outside M9.
+- Worker scheduling and Operations/Transaction Widgets are outside Core.
 
 ## Verification
 
@@ -95,4 +108,5 @@ pnpm --filter @kairos3d/cesium build
 ## Related Docs
 
 - [Architecture](./architecture.md)
+- [Transactional Scene Recovery](./scene-transactions.md)
 - [Roadmap](./roadmap.md)

@@ -10,7 +10,7 @@ import {
   WebMapServiceImageryProvider,
   WebMapTileServiceImageryProvider
 } from "cesium";
-import type { Cartesian3 } from "cesium";
+import type { Cartesian3, TerrainProvider } from "cesium";
 import type { KairosMap } from "../core";
 import {
   cartesianWithHeight,
@@ -36,6 +36,7 @@ import type {
   LayerAdapter,
   LayerConfig,
   LayerState,
+  LayerTransactionHooks,
   TerrainLayerConfig,
   TilesetLayerConfig,
   WmsLayerConfig,
@@ -48,6 +49,11 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
   readonly id: string;
   readonly type: string;
   readonly name?: string;
+  readonly transaction: LayerTransactionHooks = {
+    prepare: (map) => this.prepare(map),
+    attach: (map) => this.attach(map),
+    detach: (map) => this.detach(map)
+  };
 
   protected map?: KairosMap;
   protected visible: boolean;
@@ -71,8 +77,24 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
     this.setVisible(value);
   }
 
-  abstract addTo(map: KairosMap): Promise<void> | void;
-  abstract remove(): void;
+  async addTo(map: KairosMap): Promise<void> {
+    await this.transaction.prepare(map);
+    try {
+      await this.transaction.attach(map);
+      await this.afterAdd(map);
+    } catch (error) {
+      this.destroy();
+      throw error;
+    }
+  }
+
+  remove(): void {
+    if (this.map) {
+      this.detach(this.map);
+    }
+    this.destroyRuntime();
+    this.map = undefined;
+  }
 
   getState(): LayerState {
     return {
@@ -120,7 +142,7 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
   }
 
   async flyTo(): Promise<boolean> {
-    if (!this.map) {
+    if (!this.map || !this.isRuntimeAttached(this.map)) {
       return false;
     }
 
@@ -131,6 +153,20 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
 
   destroy(): void {
     this.remove();
+  }
+
+  protected get isAttached(): boolean {
+    return this.map ? this.isRuntimeAttached(this.map) : false;
+  }
+
+  protected abstract prepareRuntime(map: KairosMap): void | Promise<void>;
+  protected abstract attachRuntime(map: KairosMap): void | Promise<void>;
+  protected abstract detachRuntime(map: KairosMap): void;
+  protected abstract isRuntimeAttached(map: KairosMap): boolean;
+  protected abstract destroyRuntime(): void;
+
+  protected afterAdd(_map: KairosMap): void | Promise<void> {
+    // Subclasses with flyTo config preserve their existing addTo behavior here.
   }
 
   protected setVisible(_value: boolean): void {
@@ -144,12 +180,64 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
   protected applyOrder(_order: number): void {
     // Subclasses with ordered Cesium collections update native order.
   }
+
+  private async prepare(map: KairosMap): Promise<void> {
+    if (this.map) {
+      throw new Error(`Layer "${this.id}" is already prepared.`);
+    }
+
+    this.map = map;
+    try {
+      await this.prepareRuntime(map);
+    } catch (error) {
+      this.destroyRuntime();
+      this.map = undefined;
+      throw error;
+    }
+  }
+
+  private async attach(map: KairosMap): Promise<void> {
+    this.requirePreparedMap(map);
+    if (this.isRuntimeAttached(map)) {
+      return;
+    }
+
+    try {
+      await this.attachRuntime(map);
+    } catch (error) {
+      try {
+        await this.detachRuntime(map);
+      } catch {
+        // Preserve the original attach error. The manager's rollback will retry cleanup.
+      }
+      throw error;
+    }
+  }
+
+  private detach(map: KairosMap): void {
+    this.requirePreparedMap(map);
+    if (!this.isRuntimeAttached(map)) {
+      return;
+    }
+
+    this.detachRuntime(map);
+  }
+
+  private requirePreparedMap(map: KairosMap): void {
+    if (!this.map) {
+      throw new Error(`Layer "${this.id}" has not been prepared.`);
+    }
+    if (this.map !== map) {
+      throw new Error(`Layer "${this.id}" was prepared for a different map.`);
+    }
+  }
 }
 
 export class ImageryConfigLayer extends BaseLayerAdapter<
   XyzLayerConfig | WmsLayerConfig | WmtsLayerConfig
 > {
   private layer?: ImageryLayer;
+  private detachedIndex?: number;
 
   constructor(config: XyzLayerConfig | WmsLayerConfig | WmtsLayerConfig) {
     super(config);
@@ -157,16 +245,47 @@ export class ImageryConfigLayer extends BaseLayerAdapter<
     this.opacity = config.alpha ?? 1;
   }
 
-  async addTo(map: KairosMap): Promise<void> {
-    this.map = map;
+  protected prepareRuntime(_map: KairosMap): void {
     const provider = createImageryProviderFromConfig(this.config);
     this.layer = new ImageryLayer(provider, {
       alpha: this.opacity,
       show: this.show
     });
+  }
 
-    const index = this.order;
-    map.viewer.imageryLayers.add(this.layer, index);
+  protected attachRuntime(map: KairosMap): void {
+    if (!this.layer) {
+      throw new Error(`Layer "${this.id}" has no prepared imagery runtime.`);
+    }
+
+    const collection = map.viewer.imageryLayers;
+    const index = clampInsertionIndex(this.detachedIndex ?? this.order, collection.length);
+    collection.add(this.layer, index);
+    this.detachedIndex = undefined;
+  }
+
+  protected detachRuntime(map: KairosMap): void {
+    if (!this.layer) {
+      return;
+    }
+
+    const collection = map.viewer.imageryLayers;
+    if (collection.contains(this.layer)) {
+      this.detachedIndex = collection.indexOf(this.layer);
+      collection.remove(this.layer, false);
+    }
+  }
+
+  protected isRuntimeAttached(map: KairosMap): boolean {
+    return Boolean(this.layer && map.viewer.imageryLayers.contains(this.layer));
+  }
+
+  protected destroyRuntime(): void {
+    if (this.layer && !this.layer.isDestroyed()) {
+      this.layer.destroy();
+    }
+    this.layer = undefined;
+    this.detachedIndex = undefined;
   }
 
   override toConfig(): LayerConfig | undefined {
@@ -193,14 +312,6 @@ export class ImageryConfigLayer extends BaseLayerAdapter<
     return imageryFeature ? extractImageryFeatureProperties(imageryFeature) : undefined;
   }
 
-  remove(): void {
-    if (this.map && this.layer) {
-      this.map.viewer.imageryLayers.remove(this.layer, true);
-    }
-    this.layer = undefined;
-    this.map = undefined;
-  }
-
   protected setVisible(value: boolean): void {
     if (this.layer) {
       this.layer.show = value;
@@ -221,36 +332,53 @@ export class ImageryConfigLayer extends BaseLayerAdapter<
 }
 
 export class TerrainConfigLayer extends BaseLayerAdapter<TerrainLayerConfig> {
-  private previousTerrainProvider?: EllipsoidTerrainProvider | CesiumTerrainProvider;
+  private previousTerrainProvider?: TerrainProvider;
   private terrainProvider?: EllipsoidTerrainProvider | CesiumTerrainProvider;
+  private hiddenTerrainProvider?: EllipsoidTerrainProvider;
 
-  async addTo(map: KairosMap): Promise<void> {
-    this.map = map;
-    this.previousTerrainProvider = map.viewer.terrainProvider as
-      | EllipsoidTerrainProvider
-      | CesiumTerrainProvider;
+  protected async prepareRuntime(_map: KairosMap): Promise<void> {
     this.terrainProvider = await createTerrainProviderFromConfig(this.config);
-    map.viewer.terrainProvider = this.show
-      ? this.terrainProvider
-      : new EllipsoidTerrainProvider();
+    this.hiddenTerrainProvider = new EllipsoidTerrainProvider();
   }
 
-  remove(): void {
-    if (this.map && this.previousTerrainProvider) {
-      this.map.viewer.terrainProvider = this.previousTerrainProvider;
+  protected attachRuntime(map: KairosMap): void {
+    if (!this.terrainProvider || !this.hiddenTerrainProvider) {
+      throw new Error(`Layer "${this.id}" has no prepared terrain runtime.`);
     }
-    this.map = undefined;
+
+    this.previousTerrainProvider = map.viewer.terrainProvider;
+    map.viewer.terrainProvider = this.show
+      ? this.terrainProvider
+      : this.hiddenTerrainProvider;
+  }
+
+  protected detachRuntime(map: KairosMap): void {
+    if (this.previousTerrainProvider) {
+      map.viewer.terrainProvider = this.previousTerrainProvider;
+    }
+    this.previousTerrainProvider = undefined;
+  }
+
+  protected isRuntimeAttached(map: KairosMap): boolean {
+    return Boolean(
+      (this.terrainProvider && map.viewer.terrainProvider === this.terrainProvider) ||
+      (this.hiddenTerrainProvider && map.viewer.terrainProvider === this.hiddenTerrainProvider)
+    );
+  }
+
+  protected destroyRuntime(): void {
     this.terrainProvider = undefined;
+    this.hiddenTerrainProvider = undefined;
     this.previousTerrainProvider = undefined;
   }
 
   protected setVisible(value: boolean): void {
-    if (!this.map || !this.terrainProvider) {
+    if (!this.map || !this.isAttached || !this.terrainProvider || !this.hiddenTerrainProvider) {
       return;
     }
     this.map.viewer.terrainProvider = value
       ? this.terrainProvider
-      : new EllipsoidTerrainProvider();
+      : this.hiddenTerrainProvider;
   }
 
   override getRuntimeObjects(): unknown[] {
@@ -264,9 +392,9 @@ export class TerrainConfigLayer extends BaseLayerAdapter<TerrainLayerConfig> {
 
 export class TilesetConfigLayer extends BaseLayerAdapter<TilesetLayerConfig> {
   private tileset?: Cesium3DTileset;
+  private detachedIndex?: number;
 
-  async addTo(map: KairosMap): Promise<void> {
-    this.map = map;
+  protected async prepareRuntime(_map: KairosMap): Promise<void> {
     this.tileset = await Cesium3DTileset.fromUrl(
       this.config.url,
       createTilesetOptionsFromConfig(this.config)
@@ -275,9 +403,45 @@ export class TilesetConfigLayer extends BaseLayerAdapter<TilesetLayerConfig> {
     if (this.config.style) {
       this.tileset.style = new Cesium3DTileStyle(this.config.style);
     }
-    map.viewer.scene.primitives.add(this.tileset);
+  }
 
-    if (this.config.flyTo) {
+  protected attachRuntime(map: KairosMap): void {
+    if (!this.tileset) {
+      throw new Error(`Layer "${this.id}" has no prepared 3D Tiles runtime.`);
+    }
+
+    const collection = map.viewer.scene.primitives;
+    const index = clampInsertionIndex(this.detachedIndex ?? this.order, collection.length);
+    collection.add(this.tileset, index);
+    this.detachedIndex = undefined;
+  }
+
+  protected detachRuntime(map: KairosMap): void {
+    if (!this.tileset) {
+      return;
+    }
+
+    const collection = map.viewer.scene.primitives;
+    if (collection.contains(this.tileset)) {
+      this.detachedIndex = findPrimitiveIndex(collection, this.tileset);
+      removePrimitiveWithoutDestroy(collection, this.tileset);
+    }
+  }
+
+  protected isRuntimeAttached(map: KairosMap): boolean {
+    return Boolean(this.tileset && map.viewer.scene.primitives.contains(this.tileset));
+  }
+
+  protected destroyRuntime(): void {
+    if (this.tileset && !this.tileset.isDestroyed()) {
+      this.tileset.destroy();
+    }
+    this.tileset = undefined;
+    this.detachedIndex = undefined;
+  }
+
+  protected override async afterAdd(map: KairosMap): Promise<void> {
+    if (this.config.flyTo && this.tileset) {
       await map.viewer.flyTo(this.tileset);
     }
   }
@@ -296,14 +460,6 @@ export class TilesetConfigLayer extends BaseLayerAdapter<TilesetLayerConfig> {
     return tileFeature ? extractTileFeatureProperties(tileFeature) : undefined;
   }
 
-  remove(): void {
-    if (this.map && this.tileset) {
-      this.map.viewer.scene.primitives.remove(this.tileset);
-    }
-    this.tileset = undefined;
-    this.map = undefined;
-  }
-
   protected setVisible(value: boolean): void {
     if (this.tileset) {
       this.tileset.show = value;
@@ -319,18 +475,50 @@ export class TilesetConfigLayer extends BaseLayerAdapter<TilesetLayerConfig> {
 
 export class GeoJsonConfigLayer extends BaseLayerAdapter<GeoJsonLayerConfig> {
   private dataSource?: GeoJsonDataSource;
+  private detachedIndex?: number;
 
-  async addTo(map: KairosMap): Promise<void> {
-    this.map = map;
+  protected async prepareRuntime(_map: KairosMap): Promise<void> {
     this.dataSource = await GeoJsonDataSource.load(
       this.config.data,
       createGeoJsonLoadOptions(this.config)
     );
     tagDataSourceEntities(this.dataSource, this.id);
     this.dataSource.show = this.show;
-    await map.viewer.dataSources.add(this.dataSource);
+  }
 
-    if (this.config.flyTo) {
+  protected async attachRuntime(map: KairosMap): Promise<void> {
+    if (!this.dataSource) {
+      throw new Error(`Layer "${this.id}" has no prepared GeoJSON runtime.`);
+    }
+
+    await map.viewer.dataSources.add(this.dataSource);
+    moveDataSourceToIndex(map, this.dataSource, this.detachedIndex ?? this.order);
+    this.detachedIndex = undefined;
+  }
+
+  protected detachRuntime(map: KairosMap): void {
+    if (!this.dataSource) {
+      return;
+    }
+
+    const collection = map.viewer.dataSources;
+    if (collection.contains(this.dataSource)) {
+      this.detachedIndex = collection.indexOf(this.dataSource);
+      collection.remove(this.dataSource, false);
+    }
+  }
+
+  protected isRuntimeAttached(map: KairosMap): boolean {
+    return Boolean(this.dataSource && map.viewer.dataSources.contains(this.dataSource));
+  }
+
+  protected destroyRuntime(): void {
+    this.dataSource = undefined;
+    this.detachedIndex = undefined;
+  }
+
+  protected override async afterAdd(map: KairosMap): Promise<void> {
+    if (this.config.flyTo && this.dataSource) {
       await map.viewer.flyTo(this.dataSource);
     }
   }
@@ -353,14 +541,6 @@ export class GeoJsonConfigLayer extends BaseLayerAdapter<GeoJsonLayerConfig> {
     return entity ? extractEntityProperties(entity) : undefined;
   }
 
-  remove(): void {
-    if (this.map && this.dataSource) {
-      this.map.viewer.dataSources.remove(this.dataSource, true);
-    }
-    this.dataSource = undefined;
-    this.map = undefined;
-  }
-
   protected setVisible(value: boolean): void {
     if (this.dataSource) {
       this.dataSource.show = value;
@@ -377,9 +557,8 @@ export class GeoJsonConfigLayer extends BaseLayerAdapter<GeoJsonLayerConfig> {
 export class GltfConfigLayer extends BaseLayerAdapter<GltfLayerConfig> {
   private entity?: Entity;
 
-  addTo(map: KairosMap): void {
-    this.map = map;
-    this.entity = map.viewer.entities.add({
+  protected prepareRuntime(_map: KairosMap): void {
+    this.entity = new Entity({
       id: this.id,
       name: this.name,
       position: resolveGltfPosition(this.config),
@@ -402,8 +581,31 @@ export class GltfConfigLayer extends BaseLayerAdapter<GltfLayerConfig> {
         silhouetteSize: this.config.silhouetteSize
       }
     });
+  }
 
-    if (this.config.flyTo) {
+  protected attachRuntime(map: KairosMap): void {
+    if (!this.entity) {
+      throw new Error(`Layer "${this.id}" has no prepared glTF runtime.`);
+    }
+    map.viewer.entities.add(this.entity);
+  }
+
+  protected detachRuntime(map: KairosMap): void {
+    if (this.entity && map.viewer.entities.contains(this.entity)) {
+      map.viewer.entities.remove(this.entity);
+    }
+  }
+
+  protected isRuntimeAttached(map: KairosMap): boolean {
+    return Boolean(this.entity && map.viewer.entities.contains(this.entity));
+  }
+
+  protected destroyRuntime(): void {
+    this.entity = undefined;
+  }
+
+  protected override afterAdd(map: KairosMap): void {
+    if (this.config.flyTo && this.entity) {
       void map.viewer.flyTo(this.entity);
     }
   }
@@ -430,14 +632,6 @@ export class GltfConfigLayer extends BaseLayerAdapter<GltfLayerConfig> {
   override getFeatureProperties(object: unknown): Record<string, unknown> | undefined {
     const entity = getPickedEntity(object);
     return entity && entity === this.entity ? extractEntityProperties(entity) : undefined;
-  }
-
-  remove(): void {
-    if (this.map && this.entity) {
-      this.map.viewer.entities.remove(this.entity);
-    }
-    this.entity = undefined;
-    this.map = undefined;
   }
 
   protected setVisible(value: boolean): void {
@@ -677,6 +871,23 @@ function findPrimitiveIndex(
   }
 
   return -1;
+}
+
+function removePrimitiveWithoutDestroy(
+  collection: KairosMap["viewer"]["scene"]["primitives"],
+  primitive: Cesium3DTileset
+): void {
+  const destroyPrimitives = collection.destroyPrimitives;
+  collection.destroyPrimitives = false;
+  try {
+    collection.remove(primitive);
+  } finally {
+    collection.destroyPrimitives = destroyPrimitives;
+  }
+}
+
+function clampInsertionIndex(order: number, length: number): number {
+  return Math.max(0, Math.min(Math.floor(order), length));
 }
 
 function clampCollectionIndex(order: number, length: number): number {

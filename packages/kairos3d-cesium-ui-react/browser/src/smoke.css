@@ -22,7 +22,7 @@ body,
   position: absolute;
   top: 8px;
   right: 8px;
-  z-index: 110;
+  z-index: 10000;
   display: grid;
   width: min(360px, calc(100vw - 80px));
   max-height: calc(100vh - 44px);

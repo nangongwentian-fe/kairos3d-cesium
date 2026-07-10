@@ -13,6 +13,7 @@ import {
   type OperationContext
 } from "../operations/manager";
 import type { AsyncOperationOptions } from "../operations/types";
+import type { PreparedSceneStage } from "../scene/transaction";
 import { parseColorLike, serializeColor } from "../style";
 import type { ColorLike } from "../style";
 import {
@@ -49,6 +50,14 @@ interface PreparedLoadResult {
   removed: EffectInstance[];
 }
 
+type PreparedSceneEffectState =
+  | "prepared"
+  | "committing"
+  | "committed"
+  | "rolled-back"
+  | "finalized"
+  | "disposed";
+
 export class EffectManager extends Evented<EffectManagerEvents> {
   private readonly effects = new Map<string, ManagedEffect>();
   private readonly pendingIds = new Set<string>();
@@ -56,6 +65,7 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   private removeTicker?: () => void;
   private previousTickTime?: number;
   private loadPending = false;
+  private sceneLoadToken?: symbol;
   private clearEpoch = 0;
   private stateRevision = 0;
   private destroyed = false;
@@ -243,6 +253,7 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   setShow(id: string, show: boolean): EffectInstance {
+    this.assertNoSceneLoad("change effect visibility");
     const managed = this.requireEffect(id);
     managed.runtime.setShow(show);
     managed.instance.show = show;
@@ -256,6 +267,7 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   setGroupShow(group: string, show: boolean): EffectInstance[] {
+    this.assertNoSceneLoad("change effect group visibility");
     const updated: EffectInstance[] = [];
     for (const managed of this.effects.values()) {
       if (managed.instance.group === group) {
@@ -266,6 +278,7 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   remove(id: string): boolean {
+    this.assertNoSceneLoad(`remove effect "${id}"`);
     this.invalidateId(id);
     this.stateRevision += 1;
     const managed = this.effects.get(id);
@@ -281,6 +294,7 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   clear(): void {
+    this.assertNoSceneLoad("clear effects");
     const removed = this.clearManagedEffects();
     this.emit("clear", removed);
   }
@@ -332,6 +346,225 @@ export class EffectManager extends Evented<EffectManagerEvents> {
       assertJSONSafe(snapshot, `Effect snapshot "${snapshot.id}"`);
       this.validateConfig(deserializeSnapshotConfig(snapshot));
     }
+  }
+
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: EffectSnapshot[],
+    options: { clear?: boolean } = {}
+  ): Promise<PreparedSceneStage> {
+    this.assertActive();
+    this.assertSceneLoadAvailable();
+    this.validateSnapshots(snapshots);
+    const clear = options.clear ?? false;
+    if (!clear) {
+      for (const snapshot of snapshots) {
+        if (this.effects.has(snapshot.id)) {
+          throw new Error(`Effect "${snapshot.id}" already exists.`);
+        }
+      }
+    }
+
+    const revision = this.stateRevision;
+    const epoch = this.clearEpoch;
+    const token = Symbol("effects.scene-load");
+    const release = () => {
+      if (this.sceneLoadToken === token) {
+        this.sceneLoadToken = undefined;
+      }
+    };
+    this.sceneLoadToken = token;
+
+    const prepared: PreparedEffect[] = [];
+    try {
+      for (const snapshot of snapshots) {
+        const config = this.normalizeConfig(deserializeSnapshotConfig(snapshot));
+        prepared.push({
+          config,
+          runtime: await this.prepareRuntime(config),
+          createdAt: parseSnapshotDate(snapshot.createdAt, "Effect createdAt"),
+          updatedAt: snapshot.updatedAt
+            ? parseSnapshotDate(snapshot.updatedAt, "Effect updatedAt")
+            : undefined
+        });
+        this.assertSceneLoadCurrent(revision, epoch, token);
+      }
+    } catch (error) {
+      for (const item of prepared) {
+        item.runtime.destroy();
+      }
+      release();
+      throw error;
+    }
+
+    const previousEffects = new Map(this.effects);
+    const previousIdVersions = new Map(this.idVersions);
+    const removed = clear
+      ? [...previousEffects.values()].map((managed) =>
+          this.cloneInstance(managed.instance)
+        )
+      : [];
+    const nextEffects = prepared.map((item) => {
+      const instance = this.createInstance(
+        item.config,
+        item.runtime,
+        item.createdAt,
+        item.updatedAt
+      );
+      return { instance, runtime: item.runtime };
+    });
+    const loaded = nextEffects.map((managed) =>
+      this.cloneInstance(managed.instance)
+    );
+    let state: PreparedSceneEffectState = "prepared";
+    let published = false;
+
+    return {
+      phase: "effects",
+      commit: () => {
+        if (state !== "prepared") {
+          throw new Error(`Cannot commit effects from state "${state}".`);
+        }
+        this.assertSceneLoadCurrent(revision, epoch, token);
+        state = "committing";
+
+        if (clear) {
+          for (const managed of previousEffects.values()) {
+            managed.runtime.detach();
+          }
+        }
+        for (const managed of nextEffects) {
+          managed.runtime.attach();
+        }
+
+        this.effects.clear();
+        if (!clear) {
+          for (const [id, managed] of previousEffects) {
+            this.effects.set(id, managed);
+          }
+        }
+        for (const managed of nextEffects) {
+          this.effects.set(managed.instance.id, managed);
+          this.invalidateId(managed.instance.id);
+        }
+        if (clear) {
+          this.clearEpoch += 1;
+        }
+        this.stateRevision += clear ? 2 : 1;
+        this.previousTickTime = undefined;
+        this.syncTicker();
+        this.requestRender();
+        state = "committed";
+      },
+      rollback: () => {
+        if (state === "rolled-back" || state === "disposed") {
+          return;
+        }
+        if (state === "finalized") {
+          throw new Error("Cannot roll back finalized effects.");
+        }
+        if (state === "prepared") {
+          state = "rolled-back";
+          return;
+        }
+
+        const errors: unknown[] = [];
+        for (const managed of [...nextEffects].reverse()) {
+          try {
+            managed.runtime.detach();
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (clear) {
+          for (const managed of previousEffects.values()) {
+            try {
+              managed.runtime.attach();
+            } catch (error) {
+              errors.push(error);
+            }
+          }
+        }
+
+        this.effects.clear();
+        for (const [id, managed] of previousEffects) {
+          this.effects.set(id, managed);
+        }
+        this.idVersions.clear();
+        for (const [id, version] of previousIdVersions) {
+          this.idVersions.set(id, version);
+        }
+        this.clearEpoch = epoch;
+        this.stateRevision = revision;
+        this.previousTickTime = undefined;
+        this.syncTicker();
+        this.requestRender();
+        state = "rolled-back";
+
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to roll back effects.");
+        }
+      },
+      finalize: () => {
+        if (state === "finalized") {
+          return;
+        }
+        if (state !== "committed") {
+          throw new Error(`Cannot finalize effects from state "${state}".`);
+        }
+
+        const errors: unknown[] = [];
+        if (clear) {
+          for (const managed of previousEffects.values()) {
+            try {
+              managed.runtime.destroy();
+            } catch (error) {
+              errors.push(error);
+            }
+          }
+        }
+        state = "finalized";
+        release();
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to finalize effects.");
+        }
+      },
+      dispose: () => {
+        if (state === "disposed" || state === "finalized") {
+          return;
+        }
+        if (state === "committing" || state === "committed") {
+          throw new Error("Effects must be rolled back before disposal.");
+        }
+
+        const errors: unknown[] = [];
+        for (const managed of nextEffects) {
+          try {
+            managed.runtime.destroy();
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        state = "disposed";
+        release();
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to dispose prepared effects.");
+        }
+      },
+      publish: () => {
+        if (published) {
+          return;
+        }
+        if (state !== "finalized") {
+          throw new Error(`Cannot publish effects from state "${state}".`);
+        }
+        published = true;
+        if (clear) {
+          this.emit("clear", removed.map((instance) => this.cloneInstance(instance)));
+        }
+        this.emit("load", loaded.map((instance) => this.cloneInstance(instance)));
+      }
+    };
   }
 
   async load(
@@ -457,7 +690,8 @@ export class EffectManager extends Evented<EffectManagerEvents> {
     if (this.destroyed) {
       return;
     }
-    this.clear();
+    const removed = this.clearManagedEffects();
+    this.emit("clear", removed);
     this.removeTicker?.();
     this.removeTicker = undefined;
     this.previousTickTime = undefined;
@@ -737,6 +971,36 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   private assertNoPendingMutation(action: string): void {
     if (this.loadPending) {
       throw new Error(`Cannot ${action} while an effect load is in progress.`);
+    }
+    this.assertNoSceneLoad(action);
+  }
+
+  private assertNoSceneLoad(action: string): void {
+    if (this.sceneLoadToken) {
+      throw new Error(
+        `Cannot ${action} while a scene effect transaction is in progress.`
+      );
+    }
+  }
+
+  private assertSceneLoadAvailable(): void {
+    if (this.sceneLoadToken || this.loadPending || this.pendingIds.size > 0) {
+      throw new Error("Cannot prepare effects while another effect operation is in progress.");
+    }
+  }
+
+  private assertSceneLoadCurrent(
+    revision: number,
+    epoch: number,
+    token: symbol
+  ): void {
+    if (
+      this.destroyed ||
+      this.sceneLoadToken !== token ||
+      this.stateRevision !== revision ||
+      this.clearEpoch !== epoch
+    ) {
+      throw new Error("Effect scene load was superseded by another mutation.");
     }
   }
 

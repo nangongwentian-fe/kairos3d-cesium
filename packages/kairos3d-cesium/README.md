@@ -12,6 +12,7 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `registerLayer` | Registers a custom config-driven layer adapter. |
 | `LayerState` | Serializable layer state for list views and config recovery. |
 | `LayerLoadOptions` | Options for loading a group of layer configs. |
+| `LayerTransactionHooks` | Optional detached prepare/attach/detach lifecycle required by transactional scene recovery. |
 | `TilesetLayerConfig` | Recoverable 3D Tiles layer config with common tileset runtime options. |
 | `GeoJsonLayerStyle` | Basic point, line, and polygon style config for GeoJSON layers. |
 | `GltfLayerConfig` | Recoverable glTF layer config with model, color, and height options. |
@@ -48,8 +49,15 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `CameraBookmark` | Serializable named camera bookmark. |
 | `RuntimeResultsSnapshot` | Serializable draw and analysis result group for scene snapshots. |
 | `SceneSnapshot` | Serializable `camera + layers + bookmarks` snapshot, optionally with runtime results. |
+| `SCENE_SNAPSHOT_VERSION` | Current supported Scene snapshot schema version, fixed at `1`. |
 | `SceneStateSnapshotOptions` | Options for exporting scene snapshots. |
 | `SceneStateLoadOptions` | Options for loading a scene snapshot. |
+| `SceneLoadMode` | Scene recovery mode: default `transactional` or compatibility `progressive`. |
+| `SceneTransactionStatus` | Prepare, commit, rollback, and final transaction status values. |
+| `SceneRollbackStatus` | Rollback lifecycle and diagnostic status values. |
+| `SceneTransactionState` | Observable prepare, commit, rollback, and completion state for scene recovery. |
+| `SceneTransactionError` | Scene load failure with phase, stage, and rollback diagnostics. |
+| `parseSceneSnapshot` | Validates and deep-clones a `SceneSnapshot` v1 without creating Cesium runtime. |
 | `ResultRecord` | Aggregated index entry for an SDK-managed runtime result. |
 | `ResultSource` | Source label for aggregated results: draw, measure, visibility, profile, clipping, or terrain. |
 | `ResultQueryOptions` | Filters accepted by `map.results.list()` and `map.results.clear()`. |
@@ -88,7 +96,7 @@ pnpm add @kairos3d/cesium cesium
 ```ts
 import { Cartesian3 } from "cesium";
 import { createMap } from "@kairos3d/cesium/core";
-import { registerLayer } from "@kairos3d/cesium/layers";
+import { registerLayer, type LayerTransactionHooks } from "@kairos3d/cesium/layers";
 import { registerTool } from "@kairos3d/cesium/tools";
 import type { LayerState } from "@kairos3d/cesium/layers";
 import type { SerializablePosition } from "@kairos3d/cesium/core";
@@ -103,7 +111,18 @@ import type {
   SlopeAspectResult,
   VisibilityResult
 } from "@kairos3d/cesium/analysis";
-import type { CameraView, RuntimeResultsSnapshot, SceneSnapshot } from "@kairos3d/cesium/scene";
+import {
+  parseSceneSnapshot,
+  SCENE_SNAPSHOT_VERSION,
+  SceneTransactionError,
+  type CameraView,
+  type RuntimeResultsSnapshot,
+  type SceneLoadMode,
+  type SceneRollbackStatus,
+  type SceneSnapshot,
+  type SceneTransactionState,
+  type SceneTransactionStatus
+} from "@kairos3d/cesium/scene";
 import type { PickResult, SelectionState } from "@kairos3d/cesium/picking";
 import type { MaterialDefinition, MaterialDescriptor } from "@kairos3d/cesium/materials";
 import type { EffectConfig, EffectInstance, EffectSnapshot } from "@kairos3d/cesium/effects";
@@ -250,7 +269,7 @@ console.log(ground, samples, profile.samples);
 
 `absolute` is the default mode and keeps older snapshots compatible. `clampToGround` uses Cesium ground rendering for lines and height references for point/polygon entities where Cesium supports them. `relativeToGround` stores an offset and can sample terrain when requested. If the active terrain provider does not expose availability, `sampleTerrain()` returns original positions with `sampled: false` instead of inventing heights.
 
-`surface` distance is implemented by accumulating resolved positions. `surface` area is exposed as a type boundary only in this stage; true terrain-surface area needs a later triangulation pass.
+`surface` distance is implemented by accumulating resolved positions. `surface` area resolves sampled terrain positions and uses triangulated area estimation; it remains a browser-side estimate rather than survey-grade solid modeling.
 
 ## Terrain Analysis
 
@@ -364,7 +383,7 @@ try {
 }
 ```
 
-`map.operations` supports `get/list/cancel/cancelAll/clearFinished` and retains at most 100 finished records. Cancellation is cooperative: late Cesium results are discarded and temporary runtime objects are cleaned, but M9 does not roll back scene-load phases that already completed.
+`map.operations` supports `get/list/cancel/cancelAll/clearFinished` and retains at most 100 finished records. Cancellation is cooperative: late Cesium results are discarded and temporary runtime objects are cleaned. Transactional scene recovery additionally rolls back in the background; call `map.sceneState.whenIdle()` before reading the restored scene after cancellation.
 
 ## Scene State
 
@@ -384,6 +403,7 @@ const snapshot = map.sceneState.toJSON({
   includeEffects: true
 });
 await map.sceneState.load(snapshot, {
+  mode: "transactional",
   clearLayers: true,
   flyToCamera: true,
   restoreResults: true,
@@ -395,7 +415,11 @@ await map.sceneState.load(snapshot, {
 });
 ```
 
-Scene snapshots include camera, recoverable layer configs, and camera bookmarks by default. Pass `includeResults: true` for SDK-managed results, `includePrimitives: true` for primitive overlays, and `includeEffects: true` for effect configuration. `EffectSnapshot` never contains Cesium `Material`, `Primitive`, `ParticleSystem`, `PostProcessStage`, or an in-progress animation phase; recovered animations restart from their initial phase.
+`transactional` is the default. It prepares detached SDK runtime, swaps it during commit, and restores the original runtime objects if commit fails. `mode: "progressive"` retains the M9 phase-by-phase behavior and supports legacy custom layer adapters without transaction hooks.
+
+Scene snapshots remain `version: 1`; no migration API exists until a real incompatible persisted schema appears. `parseSceneSnapshot()` validates and deep-clones input before scene mutation. Scene snapshots include camera, recoverable layer configs, and camera bookmarks by default. Pass `includeResults: true` for SDK-managed results, `includePrimitives: true` for primitive overlays, and `includeEffects: true` for effect configuration. `EffectSnapshot` never contains Cesium `Material`, `Primitive`, `ParticleSystem`, `PostProcessStage`, or an in-progress animation phase; recovered animations restart from their initial phase.
+
+During a transaction, `toJSON()` rejects because the scene may be between prepare and commit states. A canceled load rejects immediately with `OperationCanceledError`; use `await map.sceneState.whenIdle()` to wait for rollback. See [Transactional Scene Recovery](../../apps/docs/guide/scene-transactions.md).
 
 ## Persistence Adapters
 
@@ -517,7 +541,7 @@ Draw polyline/polygon and distance/area measurement results can opt into Primiti
 | `tools` | One active interactive tool at a time, plus `start`, `stop`, `cancel`, `complete`, `point-add`, and `clear` events. |
 | `draw` | Point, polyline, polygon, result list/update/edit/remove/clear, and opt-in Primitive rendering for polyline/polygon. |
 | `analysis` | Distance, area, height measurement, visibility/profile/terrain analysis, volume/flood/excavation estimates, clipping, result list/remove/clear, result snapshot load/export, and opt-in Primitive rendering for distance/area. |
-| `scene` | Camera capture/fly-to, camera bookmarks, scene snapshot export/load, and optional runtime result recovery. |
+| `scene` | Camera capture/fly-to, bookmarks, v1 snapshot validation, transactional recovery, rollback state, and optional runtime result recovery. |
 | `picking` | Entity, GeoJSON, glTF, 3D Tiles, optional imagery feature picking, selection, and first-stage highlight. |
 | `materials` | Built-in and custom Entity/Primitive material definitions using public Cesium APIs. |
 | `effects` | Geometry, particle, and weather effects with transactional update, lifecycle cleanup, grouping, and data-only snapshots. |

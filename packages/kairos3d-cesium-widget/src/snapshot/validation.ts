@@ -1,3 +1,4 @@
+import { parseSceneSnapshot } from "@kairos3d/cesium/scene";
 import type {
   JsonValue,
   KairosPlatformSnapshot,
@@ -38,9 +39,7 @@ export function assertKairosPlatformSnapshot(
     throw new Error("Kairos platform snapshot version must be 1.");
   }
   assertIsoDate(value.createdAt, "Kairos platform snapshot createdAt");
-  if (!isRecord(value.scene) || value.scene.version !== 1) {
-    throw new Error("Kairos platform scene snapshot version must be 1.");
-  }
+  parseSceneSnapshot(value.scene);
   assertWidgetWorkspaceSnapshot(value.workspace);
 }
 

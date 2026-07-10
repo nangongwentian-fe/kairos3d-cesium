@@ -47,6 +47,7 @@ export class KairosMap extends Evented<KairosMapEvents> {
   readonly operations: OperationManager;
 
   private destroyed = false;
+  private destroyCompleted = false;
 
   constructor(viewer: Viewer) {
     super();
@@ -78,7 +79,24 @@ export class KairosMap extends Evented<KairosMapEvents> {
       return;
     }
 
+    this.destroyed = true;
     this.operations.destroy();
+    const sceneCleanup = this.sceneState.destroyAndWait();
+    if (sceneCleanup) {
+      void sceneCleanup.then(
+        () => this.finishDestroy(),
+        () => this.finishDestroy()
+      );
+      return;
+    }
+    this.finishDestroy();
+  }
+
+  private finishDestroy(): void {
+    if (this.destroyCompleted) {
+      return;
+    }
+    this.destroyCompleted = true;
     this.effects.destroy();
     this.materials.destroy();
     this.primitives.destroy();
@@ -90,10 +108,8 @@ export class KairosMap extends Evented<KairosMapEvents> {
     this.analysis.destroy();
     this.picking.destroy();
     this.selection.destroy();
-    this.sceneState.destroy();
     this.layers.destroy();
     destroyViewer(this.viewer);
-    this.destroyed = true;
     this.emit("destroy", undefined);
     this.off();
   }

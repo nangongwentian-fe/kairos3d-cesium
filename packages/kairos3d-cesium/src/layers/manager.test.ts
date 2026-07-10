@@ -70,10 +70,88 @@ class MemoryLayer implements LayerAdapter {
   }
 }
 
+class TransactionalMemoryLayer implements LayerAdapter {
+  readonly id: string;
+  readonly type: string;
+  readonly name?: string;
+  readonly runtime = {};
+  show: boolean;
+  order: number;
+  attached = false;
+  destroyed = false;
+
+  readonly transaction = {
+    prepare: vi.fn((_map: KairosMap) => undefined),
+    attach: vi.fn((_map: KairosMap) => {
+      if (this.config.metadata?.failAttach) {
+        throw new Error(`attach failed: ${this.id}`);
+      }
+      this.attached = true;
+    }),
+    detach: vi.fn((_map: KairosMap) => {
+      this.attached = false;
+    })
+  };
+  readonly addTo = vi.fn(async (map: KairosMap) => {
+    await this.transaction.prepare(map);
+    await this.transaction.attach(map);
+  });
+  readonly remove = vi.fn(() => {
+    this.attached = false;
+  });
+
+  constructor(private readonly config: XyzLayerConfig) {
+    this.id = config.id ?? "transactional-memory";
+    this.type = config.type;
+    this.name = config.name;
+    this.show = config.show ?? true;
+    this.order = config.order ?? config.index ?? 0;
+  }
+
+  destroy(): void {
+    this.remove();
+    this.destroyed = true;
+  }
+
+  getState(): LayerState {
+    return {
+      id: this.id,
+      type: this.type,
+      name: this.name,
+      show: this.show,
+      order: this.order,
+      config: this.toConfig()
+    };
+  }
+
+  toConfig(): LayerConfig {
+    return {
+      ...this.config,
+      id: this.id,
+      show: this.show,
+      order: this.order
+    };
+  }
+
+  getRuntimeObjects(): unknown[] {
+    return [this.runtime];
+  }
+}
+
 function createRegistry(created: MemoryLayer[]): LayerRegistry {
   const registry = new LayerRegistry();
   registry.register<XyzLayerConfig>("xyz", (config) => {
     const layer = new MemoryLayer(config);
+    created.push(layer);
+    return layer;
+  });
+  return registry;
+}
+
+function createTransactionalRegistry(created: TransactionalMemoryLayer[]): LayerRegistry {
+  const registry = new LayerRegistry();
+  registry.register<XyzLayerConfig>("xyz", (config) => {
+    const layer = new TransactionalMemoryLayer(config);
     created.push(layer);
     return layer;
   });
@@ -383,5 +461,180 @@ describe("LayerManager", () => {
     expect(() => manager.move("base", Number.NaN)).toThrow(
       "Layer order must be a finite number."
     );
+  });
+
+  it("stages a silent replacement and restores the same adapters on rollback", async () => {
+    const created: TransactionalMemoryLayer[] = [];
+    const manager = new LayerManager(
+      createMapMock(),
+      createTransactionalRegistry(created)
+    );
+    await manager.add({
+      id: "old",
+      type: "xyz",
+      url: "https://example.com/old/{z}/{x}/{y}.png"
+    });
+    const oldLayer = created[0];
+    const oldRuntime = oldLayer.runtime;
+    const addListener = vi.fn();
+    const clearListener = vi.fn();
+    const loadListener = vi.fn();
+    manager.on("add", addListener);
+    manager.on("clear", clearListener);
+    manager.on("load", loadListener);
+
+    const stage = await manager.prepareTransaction(
+      [{
+        id: "new",
+        type: "xyz",
+        url: "https://example.com/new/{z}/{x}/{y}.png",
+        flyTo: true
+      }],
+      { clear: true, flyTo: false }
+    );
+    const nextLayer = created[1];
+
+    expect(manager.get("old")).toBe(oldLayer);
+    expect(oldLayer.attached).toBe(true);
+    expect(nextLayer.attached).toBe(false);
+    expect(nextLayer.toConfig()).toMatchObject({ flyTo: false });
+
+    await stage.commit();
+
+    expect(manager.get("old")).toBeUndefined();
+    expect(manager.get("new")).toBe(nextLayer);
+    expect(oldLayer.attached).toBe(false);
+    expect(nextLayer.attached).toBe(true);
+    expect(addListener).not.toHaveBeenCalled();
+    expect(clearListener).not.toHaveBeenCalled();
+    expect(loadListener).not.toHaveBeenCalled();
+
+    await stage.rollback();
+    await stage.dispose();
+
+    expect(manager.get("old")).toBe(oldLayer);
+    expect(manager.getRuntimeObjects("old")).toEqual([oldRuntime]);
+    expect(oldLayer.attached).toBe(true);
+    expect(oldLayer.destroyed).toBe(false);
+    expect(nextLayer.attached).toBe(false);
+    expect(nextLayer.destroyed).toBe(true);
+  });
+
+  it("finalizes a replacement before publishing buffered manager events", async () => {
+    const created: TransactionalMemoryLayer[] = [];
+    const manager = new LayerManager(
+      createMapMock(),
+      createTransactionalRegistry(created)
+    );
+    await manager.add({
+      id: "old",
+      type: "xyz",
+      url: "https://example.com/old/{z}/{x}/{y}.png"
+    });
+    const addListener = vi.fn();
+    const clearListener = vi.fn();
+    const loadListener = vi.fn();
+    manager.on("add", addListener);
+    manager.on("clear", clearListener);
+    manager.on("load", loadListener);
+
+    const stage = await manager.prepareTransaction(
+      [{
+        id: "new",
+        type: "xyz",
+        url: "https://example.com/new/{z}/{x}/{y}.png"
+      }],
+      { clear: true }
+    );
+    await stage.commit();
+    await stage.finalize();
+
+    expect(created[0].destroyed).toBe(true);
+    expect(created[1].destroyed).toBe(false);
+    expect(clearListener).not.toHaveBeenCalled();
+
+    stage.publish();
+
+    expect(clearListener).toHaveBeenCalledOnce();
+    expect(addListener).toHaveBeenCalledOnce();
+    expect(loadListener).toHaveBeenCalledOnce();
+    expect(manager.get("new")).toBe(created[1]);
+  });
+
+  it("rolls back every attempted layer when a transactional attach fails", async () => {
+    const created: TransactionalMemoryLayer[] = [];
+    const manager = new LayerManager(
+      createMapMock(),
+      createTransactionalRegistry(created)
+    );
+    await manager.add({
+      id: "old",
+      type: "xyz",
+      url: "https://example.com/old/{z}/{x}/{y}.png"
+    });
+    const oldLayer = created[0];
+    const stage = await manager.prepareTransaction(
+      [
+        {
+          id: "first",
+          type: "xyz",
+          url: "https://example.com/first/{z}/{x}/{y}.png"
+        },
+        {
+          id: "broken",
+          type: "xyz",
+          url: "https://example.com/broken/{z}/{x}/{y}.png",
+          metadata: { failAttach: true }
+        }
+      ],
+      { clear: true }
+    );
+
+    await expect(stage.commit()).rejects.toThrow("attach failed: broken");
+    await stage.rollback();
+    await stage.dispose();
+
+    expect(manager.list()).toEqual([oldLayer]);
+    expect(oldLayer.attached).toBe(true);
+    expect(created[1]).toMatchObject({ attached: false, destroyed: true });
+    expect(created[2]).toMatchObject({ attached: false, destroyed: true });
+  });
+
+  it("rejects an existing non-transactional adapter before preparing replacements", async () => {
+    const createdLegacy: MemoryLayer[] = [];
+    const createdNext: TransactionalMemoryLayer[] = [];
+    const registry = new LayerRegistry();
+    registry.register<XyzLayerConfig>("xyz", (config) => {
+      if (config.id === "old") {
+        const layer = new MemoryLayer(config);
+        createdLegacy.push(layer);
+        return layer;
+      }
+      const layer = new TransactionalMemoryLayer(config);
+      createdNext.push(layer);
+      return layer;
+    });
+    const manager = new LayerManager(createMapMock(), registry);
+    await manager.add({
+      id: "old",
+      type: "xyz",
+      url: "https://example.com/old/{z}/{x}/{y}.png"
+    });
+
+    await expect(
+      manager.prepareTransaction(
+        [{
+          id: "new",
+          type: "xyz",
+          url: "https://example.com/new/{z}/{x}/{y}.png"
+        }],
+        { clear: true }
+      )
+    ).rejects.toThrow("does not support transactional loading");
+
+    expect(manager.get("old")).toBe(createdLegacy[0]);
+    expect(createdLegacy[0].destroyed).toBe(false);
+    expect(createdNext[0].transaction.prepare).not.toHaveBeenCalled();
+    expect(createdNext[0].destroyed).toBe(true);
   });
 });

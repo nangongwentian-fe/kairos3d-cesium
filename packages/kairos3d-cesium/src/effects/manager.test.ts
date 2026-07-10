@@ -597,6 +597,209 @@ describe("EffectManager", () => {
     ).rejects.toThrow("does not support target");
   });
 
+  it("rolls back a prepared scene replacement with the original runtime identities", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    await manager.add({
+      id: "original-pulse",
+      type: "pulse-circle",
+      position: Cartesian3.fromDegrees(114, 22),
+      radius: 100
+    });
+    await manager.add({ id: "original-rain", type: "rain", intensity: 0.4 });
+    const originalPrimitive = manager.getRuntimeObjects("original-pulse")[0] as {
+      destroy(): void;
+      isDestroyed(): boolean;
+    };
+    const originalStage = manager.getRuntimeObjects("original-rain")[0] as {
+      destroy(): void;
+      isDestroyed(): boolean;
+    };
+    const primitiveDestroy = vi.spyOn(originalPrimitive, "destroy");
+    const stageDestroy = vi.spyOn(originalStage, "destroy");
+    const cleared = vi.fn();
+    const loaded = vi.fn();
+    manager.on("clear", cleared);
+    manager.on("load", loaded);
+
+    const transaction = await manager.prepareSceneLoad(
+      createSceneTransactionSnapshots("replacement"),
+      { clear: true }
+    );
+
+    expect(fixture.primitives).toEqual([originalPrimitive]);
+    expect(fixture.stages).toEqual([originalStage]);
+    expect(fixture.onTick.numberOfListeners).toBe(1);
+
+    transaction.commit();
+    const replacementPrimitive = manager.getRuntimeObjects("replacement-pulse")[0] as {
+      isDestroyed(): boolean;
+    };
+    const replacementStage = manager.getRuntimeObjects("replacement-rain")[0] as {
+      isDestroyed(): boolean;
+    };
+    expect(fixture.primitives).toEqual([replacementPrimitive]);
+    expect(fixture.stages).toEqual([replacementStage]);
+    expect(fixture.primitiveCollection.destroyPrimitives).toBe(true);
+    expect(primitiveDestroy).not.toHaveBeenCalled();
+    expect(stageDestroy).not.toHaveBeenCalled();
+    expect(fixture.onTick.numberOfListeners).toBe(1);
+    expect(() => manager.clear()).toThrow("scene effect transaction");
+
+    transaction.rollback();
+    expect(manager.getRuntimeObjects("original-pulse")[0]).toBe(originalPrimitive);
+    expect(manager.getRuntimeObjects("original-rain")[0]).toBe(originalStage);
+    expect(manager.get("replacement-pulse")).toBeUndefined();
+    expect(fixture.primitives).toEqual([originalPrimitive]);
+    expect(fixture.stages).toEqual([originalStage]);
+    expect(originalPrimitive.isDestroyed()).toBe(false);
+    expect(originalStage.isDestroyed()).toBe(false);
+    expect(fixture.onTick.numberOfListeners).toBe(1);
+    expect(cleared).not.toHaveBeenCalled();
+    expect(loaded).not.toHaveBeenCalled();
+
+    transaction.dispose();
+    expect(replacementPrimitive.isDestroyed()).toBe(true);
+    expect(replacementStage.isDestroyed()).toBe(true);
+    expect(manager.setShow("original-rain", false)).toMatchObject({ show: false });
+  });
+
+  it("disposes detached runtimes when scene preparation fails", async () => {
+    const fixture = createMapFixture();
+    fixture.materials.register({
+      type: "broken-scene-material",
+      targets: ["primitive"],
+      createMaterial: async () => {
+        throw new Error("scene material failed");
+      }
+    });
+    const manager = new EffectManager(fixture.map);
+    await manager.add({ id: "stable-scene-fog", type: "fog", intensity: 0.2 });
+    const stableStage = manager.getRuntimeObjects("stable-scene-fog")[0];
+    const destroyMaterial = vi.spyOn(Material.prototype, "destroy");
+    const valid = createSceneTransactionSnapshots("prepared")[0];
+    const invalid: EffectSnapshot = {
+      id: "broken-scene-flow",
+      type: "flow-line",
+      show: true,
+      config: {
+        positions: [
+          { longitude: 114, latitude: 22, height: 0 },
+          { longitude: 114.01, latitude: 22.01, height: 0 }
+        ],
+        material: { type: "broken-scene-material", options: {} }
+      },
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    await expect(
+      manager.prepareSceneLoad([valid, invalid], { clear: true })
+    ).rejects.toThrow("scene material failed");
+
+    expect(manager.getRuntimeObjects("stable-scene-fog")[0]).toBe(stableStage);
+    expect(fixture.primitives).toHaveLength(0);
+    expect(fixture.stages).toEqual([stableStage]);
+    expect(fixture.onTick.numberOfListeners).toBe(0);
+    expect(destroyMaterial).toHaveBeenCalledOnce();
+    expect(manager.setShow("stable-scene-fog", false)).toMatchObject({ show: false });
+    destroyMaterial.mockRestore();
+  });
+
+  it("finalizes a scene replacement before publishing buffered events", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    await manager.add({
+      id: "retired-pulse",
+      type: "pulse-circle",
+      position: Cartesian3.fromDegrees(114, 22),
+      radius: 100
+    });
+    await manager.add({ id: "retired-rain", type: "rain", intensity: 0.4 });
+    const retiredPrimitive = manager.getRuntimeObjects("retired-pulse")[0] as {
+      isDestroyed(): boolean;
+    };
+    const retiredStage = manager.getRuntimeObjects("retired-rain")[0] as {
+      isDestroyed(): boolean;
+    };
+    const cleared = vi.fn();
+    const loaded = vi.fn();
+    manager.on("clear", cleared);
+    manager.on("load", loaded);
+    const transaction = await manager.prepareSceneLoad(
+      createSceneTransactionSnapshots("active"),
+      { clear: true }
+    );
+
+    transaction.commit();
+    const activePrimitive = manager.getRuntimeObjects("active-pulse")[0] as {
+      isDestroyed(): boolean;
+    };
+    const activeStage = manager.getRuntimeObjects("active-rain")[0] as {
+      isDestroyed(): boolean;
+    };
+    expect(retiredPrimitive.isDestroyed()).toBe(false);
+    expect(retiredStage.isDestroyed()).toBe(false);
+    expect(cleared).not.toHaveBeenCalled();
+    expect(loaded).not.toHaveBeenCalled();
+
+    transaction.finalize();
+    expect(retiredPrimitive.isDestroyed()).toBe(true);
+    expect(retiredStage.isDestroyed()).toBe(true);
+    expect(activePrimitive.isDestroyed()).toBe(false);
+    expect(activeStage.isDestroyed()).toBe(false);
+    expect(cleared).not.toHaveBeenCalled();
+    expect(loaded).not.toHaveBeenCalled();
+
+    transaction.publish();
+    transaction.publish();
+    expect(cleared).toHaveBeenCalledOnce();
+    expect(
+      cleared.mock.calls[0][0].data.map((effect: { id: string }) => effect.id)
+    ).toEqual(["retired-pulse", "retired-rain"]);
+    expect(loaded).toHaveBeenCalledOnce();
+    expect(
+      loaded.mock.calls[0][0].data.map((effect: { id: string }) => effect.id)
+    ).toEqual(["active-pulse", "active-rain"]);
+    expect(fixture.primitives).toEqual([activePrimitive]);
+    expect(fixture.stages).toEqual([activeStage]);
+    expect(fixture.onTick.numberOfListeners).toBe(1);
+
+    transaction.dispose();
+    expect(activePrimitive.isDestroyed()).toBe(false);
+    expect(activeStage.isDestroyed()).toBe(false);
+  });
+
+  it("restores ticker state after rolling back an additive scene load", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    await manager.add({ id: "stable-fog", type: "fog", intensity: 0.2 });
+    const stableStage = manager.getRuntimeObjects("stable-fog")[0];
+    await expect(
+      manager.prepareSceneLoad(manager.toJSON(), { clear: false })
+    ).rejects.toThrow("already exists");
+
+    const transaction = await manager.prepareSceneLoad(
+      [createSceneTransactionSnapshots("additive")[1]],
+      { clear: false }
+    );
+    expect(fixture.onTick.numberOfListeners).toBe(0);
+    transaction.commit();
+    const additiveStage = manager.getRuntimeObjects("additive-rain")[0] as {
+      isDestroyed(): boolean;
+    };
+    expect(manager.getRuntimeObjects("stable-fog")[0]).toBe(stableStage);
+    expect(fixture.stages).toEqual([stableStage, additiveStage]);
+    expect(fixture.onTick.numberOfListeners).toBe(1);
+
+    transaction.rollback();
+    expect(manager.getRuntimeObjects("stable-fog")[0]).toBe(stableStage);
+    expect(manager.get("additive-rain")).toBeUndefined();
+    expect(fixture.stages).toEqual([stableStage]);
+    expect(fixture.onTick.numberOfListeners).toBe(0);
+    transaction.dispose();
+    expect(additiveStage.isDestroyed()).toBe(true);
+  });
+
   it("is idempotent after destroy and rejects new mutations", async () => {
     const fixture = createMapFixture();
     const manager = new EffectManager(fixture.map);
@@ -622,31 +825,46 @@ function createMapFixture() {
   } as Clock;
   const materials = new MaterialManager();
   const operations = new OperationManager();
+  const primitiveCollection = {
+    destroyPrimitives: true,
+    add: vi.fn((object: unknown) => {
+      primitives.push(object);
+      return object;
+    }),
+    contains: vi.fn((object: unknown) => primitives.includes(object)),
+    remove: undefined as unknown
+  };
   const removePrimitive = vi.fn((object: unknown) => {
     const index = primitives.indexOf(object);
-    if (index >= 0) primitives.splice(index, 1);
+    if (index >= 0) {
+      primitives.splice(index, 1);
+      if (primitiveCollection.destroyPrimitives) {
+        (object as { destroy(): void }).destroy();
+      }
+    }
     return index >= 0;
   });
+  primitiveCollection.remove = removePrimitive;
+  const postProcessStages = {
+    add: vi.fn((object: unknown) => {
+      stages.push(object);
+      return object;
+    }),
+    contains: vi.fn((object: unknown) => stages.includes(object)),
+    remove: undefined as unknown
+  };
   const removeStage = vi.fn((object: unknown) => {
     const index = stages.indexOf(object);
-    if (index >= 0) stages.splice(index, 1);
+    if (index >= 0) {
+      stages.splice(index, 1);
+      (object as { destroy(): void }).destroy();
+    }
     return index >= 0;
   });
+  postProcessStages.remove = removeStage;
   const scene = {
-    primitives: {
-      add: vi.fn((object: unknown) => {
-        primitives.push(object);
-        return object;
-      }),
-      remove: removePrimitive
-    },
-    postProcessStages: {
-      add: vi.fn((object: unknown) => {
-        stages.push(object);
-        return object;
-      }),
-      remove: removeStage
-    },
+    primitives: primitiveCollection,
+    postProcessStages,
     requestRender
   };
   const map = {
@@ -663,6 +881,8 @@ function createMapFixture() {
     requestRender,
     clock,
     onTick,
+    primitiveCollection,
+    postProcessStages,
     viewerIsDestroyed,
     removePrimitive,
     removeStage
@@ -699,6 +919,28 @@ function slowFlowConfig(id: string, materialType: string): EffectConfig {
     ],
     material: { type: materialType, options: {} }
   };
+}
+
+function createSceneTransactionSnapshots(prefix: string): EffectSnapshot[] {
+  return [
+    {
+      id: `${prefix}-pulse`,
+      type: "pulse-circle",
+      show: true,
+      config: {
+        position: { longitude: 114, latitude: 22, height: 0 },
+        radius: 200
+      },
+      createdAt: "2026-07-10T00:00:00.000Z"
+    },
+    {
+      id: `${prefix}-rain`,
+      type: "rain",
+      show: true,
+      config: { intensity: 0.6, speed: 1.5 },
+      createdAt: "2026-07-10T00:00:00.000Z"
+    }
+  ];
 }
 
 function createAllEffectConfigs(): EffectConfig[] {

@@ -46,9 +46,15 @@ export function renderOverlayEntity(
   map: KairosMap,
   options: OverlayRenderOptions
 ): Entity {
+  const entity = createOverlayEntity(options);
+  map.viewer.entities.add(entity);
+  return entity;
+}
+
+export function createOverlayEntity(options: OverlayRenderOptions): Entity {
   validateOverlayShape(options.id, options.type, options.positions, options.data);
 
-  const entity = map.viewer.entities.add(createEntityOptions(options));
+  const entity = new Entity(createEntityOptions(options));
   applyHeightOptionsToEntity(entity, options.height);
   return entity;
 }

@@ -8,6 +8,10 @@ import {
   Entity
 } from "cesium";
 import type { KairosMap } from "../core";
+import {
+  removeEntityIfOwned,
+  removeEntityIfOwnedTracked
+} from "../core/entity-collection";
 import { Evented } from "../core/events";
 import {
   deserializePositions,
@@ -28,6 +32,7 @@ import {
   serializeSymbolStyle
 } from "../style";
 import type { Tool } from "../tools";
+import type { PreparedSceneStage } from "../scene/transaction";
 import type {
   ClippingResultSnapshot,
   ClippingPlaneOptions,
@@ -53,6 +58,16 @@ interface ClippingRuntime {
   result: ClippingResult;
   target: ResolvedClippingTarget;
   previousCollection: unknown;
+}
+
+interface PreparedClippingRuntime {
+  result: ClippingResult;
+}
+
+interface DetachedClippingRuntime {
+  runtime: ClippingRuntime;
+  collectionDetached: boolean;
+  entities: Entity[];
 }
 
 interface ClippingResultMeta {
@@ -313,6 +328,179 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: ClippingResultSnapshot[],
+    options: RuntimeResultLoadOptions = {}
+  ): Promise<PreparedSceneStage> {
+    this.prepareSnapshots(snapshots, false);
+    const clear = options.clear ?? false;
+    if (!clear) {
+      for (const snapshot of snapshots) {
+        if (this.results.has(snapshot.id)) {
+          throw new Error(
+            `Clipping result "${snapshot.id}" already exists during transactional merge.`
+          );
+        }
+      }
+    }
+    const staged: PreparedClippingRuntime[] = [];
+    try {
+      for (const snapshot of snapshots) {
+        staged.push(this.createPreparedRuntime(snapshot));
+      }
+    } catch (error) {
+      for (const item of staged) {
+        destroyCollection(item.result.collection);
+      }
+      throw error;
+    }
+    const previous = clear ? [...this.results.values()] : [];
+    const attachedStaged: ClippingRuntime[] = [];
+    const detachedPrevious: DetachedClippingRuntime[] = [];
+    let commitStarted = false;
+    let mapsSwapped = false;
+    let rolledBack = false;
+    let finalized = false;
+    let disposed = false;
+    let published = false;
+
+    return {
+      phase: "clipping",
+      commit: () => {
+        this.assertTransactionBase(previous, staged, clear);
+        const resolved = staged.map(({ result }) => ({
+          result,
+          target: this.resolveTarget(result.target, result.type)
+        }));
+        const keys = new Set<string>();
+        for (const item of resolved) {
+          if (keys.has(item.target.key)) {
+            throw new Error(`Clipping target "${item.target.key}" is duplicated.`);
+          }
+          keys.add(item.target.key);
+          if (!clear && this.targetResultIds.has(item.target.key)) {
+            throw new Error(
+              `Clipping target "${item.target.key}" already has a transactional result.`
+            );
+          }
+        }
+
+        commitStarted = true;
+        this.clearEditHandles();
+        for (const runtime of previous) {
+          const detached: DetachedClippingRuntime = {
+            runtime,
+            collectionDetached: false,
+            entities: []
+          };
+          detachedPrevious.push(detached);
+          try {
+            runtime.target.object[runtime.target.property] = runtime.previousCollection;
+            detached.collectionDetached = true;
+          } catch (error) {
+            try {
+              detached.collectionDetached =
+                runtime.target.object[runtime.target.property] !== runtime.result.collection;
+            } catch {
+              // Keep the original assignment error.
+            }
+            throw error;
+          }
+          for (const entity of runtime.result.entities) {
+            removeEntityIfOwnedTracked(
+              this.map.viewer.entities,
+              entity,
+              detached.entities
+            );
+          }
+        }
+        for (const item of resolved) {
+          const runtime: ClippingRuntime = {
+            result: item.result,
+            target: item.target,
+            previousCollection: item.target.object[item.target.property]
+          };
+          attachedStaged.push(runtime);
+          item.target.object[item.target.property] = item.result.collection;
+          attachEntities(this.map, item.result.entities);
+        }
+        if (clear) {
+          this.results.clear();
+          this.targetResultIds.clear();
+        }
+        for (const runtime of attachedStaged) {
+          this.results.set(runtime.result.id, runtime);
+          this.targetResultIds.set(runtime.target.key, runtime.result.id);
+        }
+        mapsSwapped = true;
+      },
+      rollback: () => {
+        if (!commitStarted || rolledBack || finalized || disposed) return;
+        const errors: unknown[] = [];
+        for (const runtime of [...attachedStaged].reverse()) {
+          try { detachClippingRuntime(this.map, runtime); } catch (error) { errors.push(error); }
+        }
+        if (mapsSwapped) {
+          for (const runtime of attachedStaged) {
+            this.results.delete(runtime.result.id);
+            this.targetResultIds.delete(runtime.target.key);
+          }
+        }
+        for (const detached of detachedPrevious) {
+          const runtime = detached.runtime;
+          try {
+            if (detached.collectionDetached) {
+              runtime.target.object[runtime.target.property] = runtime.result.collection;
+            }
+          } catch (error) {
+            errors.push(error);
+          }
+          for (const entity of detached.entities) {
+            try {
+              this.map.viewer.entities.add(entity);
+            } catch (error) {
+              errors.push(error);
+            }
+          }
+        }
+        for (const runtime of previous) {
+          this.results.set(runtime.result.id, runtime);
+          this.targetResultIds.set(runtime.target.key, runtime.result.id);
+        }
+        attachedStaged.length = 0;
+        detachedPrevious.length = 0;
+        mapsSwapped = false;
+        rolledBack = true;
+        if (errors.length) throw new AggregateError(errors, "Failed to roll back clipping results.");
+      },
+      finalize: () => {
+        if (finalized) return;
+        for (const runtime of previous) destroyCollection(runtime.result.collection);
+        finalized = true;
+      },
+      dispose: () => {
+        if (disposed || finalized) return;
+        for (const runtime of [...attachedStaged].reverse()) {
+          detachClippingRuntime(this.map, runtime);
+        }
+        for (const item of staged) destroyCollection(item.result.collection);
+        disposed = true;
+      },
+      publish: () => {
+        if (published) return;
+        if (clear) {
+          const removed = previous.map((runtime) => runtime.result);
+          for (const result of removed) this.emit("remove", result);
+          this.emit("clear", removed);
+          this.map.tools.emitClear({ source: "clipping", ids: removed.map((item) => item.id) });
+        }
+        for (const item of staged) this.emit("add", item.result);
+        published = true;
+      }
+    };
+  }
+
   remove(id: string): boolean {
     const runtime = this.results.get(id);
     if (!runtime) {
@@ -423,7 +611,85 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     );
   }
 
-  private prepareSnapshots(snapshots: ClippingResultSnapshot[]): void {
+  private createPreparedRuntime(snapshot: ClippingResultSnapshot): PreparedClippingRuntime {
+    const target = snapshotTargetToTarget(snapshot.target);
+    const createdAt = parseSnapshotDate(snapshot.createdAt, "Clipping result createdAt");
+    const style = this.map.styles.resolveClippingStyle(snapshot.style);
+    if (snapshot.type === "plane") {
+      const collection = new ClippingPlaneCollection({
+        planes: [new ClippingPlane(normalizeNormal(deserializeVector3(snapshot.normal)), snapshot.distance)],
+        enabled: snapshot.enabled,
+        edgeColor: style.line?.color
+          ? parseColorLike(style.line.color, "clipping.line.color")
+          : Color.WHITE,
+        edgeWidth: style.line?.width ?? 1
+      });
+      return {
+        result: {
+          id: snapshot.id,
+          type: "plane",
+          target,
+          enabled: snapshot.enabled,
+          collection,
+          entities: [],
+          createdAt,
+          style
+        }
+      };
+    }
+
+    const positions = deserializePositions(snapshot.positions);
+    const collection = new ClippingPolygonCollection({
+      polygons: [new ClippingPolygon({ positions })],
+      enabled: snapshot.enabled,
+      inverse: snapshot.inverse,
+      quality: snapshot.quality
+    });
+    return {
+      result: {
+        id: snapshot.id,
+        type: "polygon",
+        target,
+        enabled: snapshot.enabled,
+        collection,
+        positions,
+        entities: [createPolygonBoundary(positions, style)],
+        createdAt,
+        style
+      }
+    };
+  }
+
+  private assertTransactionBase(
+    previous: ClippingRuntime[],
+    staged: PreparedClippingRuntime[],
+    clear: boolean
+  ): void {
+    if (clear && this.results.size !== previous.length) {
+      throw new Error("Clipping results changed after transactional preparation.");
+    }
+    for (const runtime of previous) {
+      if (this.results.get(runtime.result.id) !== runtime) {
+        throw new Error(
+          `Clipping result "${runtime.result.id}" changed after transactional preparation.`
+        );
+      }
+    }
+    if (!clear) {
+      for (const item of staged) {
+        if (this.results.has(item.result.id)) {
+          throw new Error(
+            `Clipping result "${item.result.id}" changed after transactional preparation.`
+          );
+        }
+      }
+    }
+  }
+
+  private prepareSnapshots(
+    snapshots: ClippingResultSnapshot[],
+    resolveTargets = true
+  ): void {
     const ids = new Set<string>();
     for (const snapshot of snapshots) {
       if (ids.has(snapshot.id)) {
@@ -432,7 +698,9 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
       ids.add(snapshot.id);
       parseSnapshotDate(snapshot.createdAt, "Clipping result createdAt");
       const target = snapshotTargetToTarget(snapshot.target);
-      this.resolveTarget(target, snapshot.type);
+      if (resolveTargets) {
+        this.resolveTarget(target, snapshot.type);
+      }
 
       if (snapshot.type === "plane") {
         normalizeNormal(deserializeVector3(snapshot.normal));
@@ -707,16 +975,36 @@ function renderPolygonBoundary(
   positions: Cartesian3[],
   style: ResultSymbolStyle
 ): Entity {
+  const entity = createPolygonBoundary(positions, style);
+  map.viewer.entities.add(entity);
+  return entity;
+}
+
+function createPolygonBoundary(
+  positions: Cartesian3[],
+  style: ResultSymbolStyle
+): Entity {
   const closed = [...positions, positions[0]];
-  return map.viewer.entities.add({
+  return new Entity({
     polyline: createLineGraphics(closed, style.line)
   });
 }
 
 function removeEntities(map: KairosMap, entities: Entity[]): void {
   for (const entity of entities) {
-    map.viewer.entities.remove(entity);
+    removeEntityIfOwned(map.viewer.entities, entity);
   }
+}
+
+function attachEntities(map: KairosMap, entities: Entity[]): void {
+  for (const entity of entities) {
+    map.viewer.entities.add(entity);
+  }
+}
+
+function detachClippingRuntime(map: KairosMap, runtime: ClippingRuntime): void {
+  runtime.target.object[runtime.target.property] = runtime.previousCollection;
+  removeEntities(map, runtime.result.entities);
 }
 
 function destroyCollection(collection: ClippingResult["collection"]): void {

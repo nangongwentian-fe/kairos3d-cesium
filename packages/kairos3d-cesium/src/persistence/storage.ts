@@ -1,4 +1,4 @@
-import type { SceneSnapshot } from "../scene";
+import { parseSceneSnapshot, type SceneSnapshot } from "../scene";
 import type { SnapshotStorageAdapter, SnapshotStorageRecord } from "./types";
 
 interface StoredSnapshot {
@@ -11,6 +11,7 @@ export function createMemorySnapshotStorage(): SnapshotStorageAdapter {
 
   return {
     async save(id, snapshot, options) {
+      const parsed = parseSceneSnapshot(snapshot);
       const existing = snapshots.get(id);
       const now = new Date().toISOString();
       snapshots.set(id, {
@@ -20,12 +21,12 @@ export function createMemorySnapshotStorage(): SnapshotStorageAdapter {
           createdAt: existing?.record.createdAt ?? now,
           updatedAt: existing ? now : undefined
         },
-        snapshot: cloneSnapshot(snapshot)
+        snapshot: parsed
       });
     },
     async load(id) {
       const item = snapshots.get(id);
-      return item ? cloneSnapshot(item.snapshot) : undefined;
+      return item ? parseSceneSnapshot(item.snapshot) : undefined;
     },
     async remove(id) {
       return snapshots.delete(id);
@@ -44,6 +45,7 @@ export function createLocalStorageSnapshotStorage(
 
   return {
     async save(id, snapshot, options) {
+      const parsed = parseSceneSnapshot(snapshot);
       const records = readIndex(storage, indexKey);
       const existing = records.find((record) => record.id === id);
       const now = new Date().toISOString();
@@ -53,12 +55,12 @@ export function createLocalStorageSnapshotStorage(
         createdAt: existing?.createdAt ?? now,
         updatedAt: existing ? now : undefined
       };
-      storage.setItem(`${keyPrefix}${id}`, JSON.stringify(snapshot));
+      storage.setItem(`${keyPrefix}${id}`, JSON.stringify(parsed));
       writeIndex(storage, indexKey, [record, ...records.filter((item) => item.id !== id)]);
     },
     async load(id) {
       const raw = storage.getItem(`${keyPrefix}${id}`);
-      return raw ? (JSON.parse(raw) as SceneSnapshot) : undefined;
+      return raw ? parseSceneSnapshot(JSON.parse(raw) as unknown) : undefined;
     },
     async remove(id) {
       const records = readIndex(storage, indexKey);
@@ -91,8 +93,4 @@ function writeIndex(
   records: SnapshotStorageRecord[]
 ): void {
   storage.setItem(indexKey, JSON.stringify(records));
-}
-
-function cloneSnapshot(snapshot: SceneSnapshot): SceneSnapshot {
-  return JSON.parse(JSON.stringify(snapshot)) as SceneSnapshot;
 }

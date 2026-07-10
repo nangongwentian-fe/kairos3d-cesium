@@ -1,6 +1,7 @@
 import type { KairosMap } from "../core";
 import { Evented } from "../core";
 import { runOrReuseOperation } from "../operations/manager";
+import type { PreparedSceneStage } from "../scene/transaction";
 import { registerDefaultLayerFactories } from "./defaults";
 import { layerRegistry, type LayerRegistry } from "./registry";
 import type { LayerAdapter, LayerConfig, LayerLoadOptions, LayerState } from "./types";
@@ -175,6 +176,176 @@ export class LayerManager extends Evented<LayerManagerEvents> {
     );
   }
 
+  /** @internal Used by SceneStateManager to stage a layer replacement without nested operations. */
+  async prepareTransaction(
+    configs: LayerConfig[],
+    options: { clear?: boolean; flyTo?: boolean } = {}
+  ): Promise<PreparedSceneStage> {
+    const clear = options.clear ?? false;
+    const oldEntries = [...this.layers.entries()];
+    const oldOrderOverrides = [...this.orderOverrides.entries()];
+    const oldOpacityOverrides = [...this.opacityOverrides.entries()];
+    const nextLayers: LayerAdapter[] = [];
+
+    try {
+      for (const config of configs) {
+        const nextConfig = options.flyTo === undefined
+          ? config
+          : { ...config, flyTo: options.flyTo };
+        nextLayers.push(await this.registry.create(nextConfig));
+      }
+
+      assertTransactionLayerIds(nextLayers, clear ? undefined : this.layers);
+      const unsupported = [
+        ...(clear ? oldEntries.map(([, layer]) => layer) : []),
+        ...nextLayers
+      ].find((layer) => !layer.transaction);
+      if (unsupported) {
+        throw new Error(
+          `Layer adapter "${unsupported.id}" (type "${unsupported.type}") does not support transactional loading.`
+        );
+      }
+
+      for (const layer of nextLayers) {
+        await layer.transaction!.prepare(this.map);
+      }
+    } catch (error) {
+      destroyLayersBestEffort(nextLayers);
+      throw error;
+    }
+
+    const oldLayers = oldEntries.map(([, layer]) => layer);
+    const attemptedOldDetach: LayerAdapter[] = [];
+    const attemptedNextAttach: LayerAdapter[] = [];
+    let commitStarted = false;
+    let committed = false;
+    let rolledBack = false;
+    let finalized = false;
+    let disposed = false;
+    let published = false;
+
+    return {
+      phase: "layers",
+      commit: async () => {
+        if (committed) {
+          return;
+        }
+        if (commitStarted || rolledBack || finalized || disposed) {
+          throw new Error("Layer transaction can no longer be committed.");
+        }
+
+        this.assertTransactionBaseUnchanged(
+          oldEntries,
+          oldOrderOverrides,
+          oldOpacityOverrides
+        );
+        commitStarted = true;
+
+        if (clear) {
+          for (const layer of [...oldLayers].reverse()) {
+            attemptedOldDetach.push(layer);
+            await layer.transaction!.detach(this.map);
+          }
+        }
+
+        for (const layer of nextLayers) {
+          attemptedNextAttach.push(layer);
+          await layer.transaction!.attach(this.map);
+        }
+
+        if (clear) {
+          this.layers.clear();
+          this.orderOverrides.clear();
+          this.opacityOverrides.clear();
+        }
+        for (const layer of nextLayers) {
+          this.layers.set(layer.id, layer);
+          if (!layer.getState) {
+            const config = layer.toConfig?.();
+            this.orderOverrides.set(layer.id, config ? getConfigOrder(config) : 0);
+          }
+        }
+        committed = true;
+      },
+      rollback: async () => {
+        if (!commitStarted || rolledBack || finalized || disposed) {
+          return;
+        }
+
+        const errors: unknown[] = [];
+        for (const layer of [...attemptedNextAttach].reverse()) {
+          try {
+            await layer.transaction!.detach(this.map);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        for (const layer of [...attemptedOldDetach].reverse()) {
+          try {
+            await layer.transaction!.attach(this.map);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+
+        replaceMapEntries(this.layers, oldEntries);
+        replaceMapEntries(this.orderOverrides, oldOrderOverrides);
+        replaceMapEntries(this.opacityOverrides, oldOpacityOverrides);
+        committed = false;
+        rolledBack = true;
+
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to roll back the layer transaction.");
+        }
+      },
+      finalize: () => {
+        if (finalized) {
+          return;
+        }
+        if (!committed || disposed) {
+          throw new Error("Layer transaction must be committed before it is finalized.");
+        }
+
+        const errors = clear ? destroyLayers(oldLayers) : [];
+        finalized = true;
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to destroy replaced layers.");
+        }
+      },
+      dispose: () => {
+        if (disposed || finalized) {
+          return;
+        }
+        if (committed && !rolledBack) {
+          throw new Error("Layer transaction must be rolled back before it is disposed.");
+        }
+
+        const errors = destroyLayers(nextLayers);
+        disposed = true;
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "Failed to dispose prepared layers.");
+        }
+      },
+      publish: () => {
+        if (published) {
+          return;
+        }
+        if (!finalized) {
+          throw new Error("Layer transaction must be finalized before events are published.");
+        }
+
+        if (clear) {
+          this.emit("clear", undefined);
+        }
+        for (const layer of nextLayers) {
+          this.emit("add", layer);
+        }
+        this.emit("load", [...nextLayers]);
+        published = true;
+      }
+    };
+  }
+
   remove(id: string): boolean {
     const layer = this.layers.get(id);
     if (!layer) {
@@ -239,6 +410,63 @@ export class LayerManager extends Evented<LayerManagerEvents> {
       config
     };
   }
+
+  private assertTransactionBaseUnchanged(
+    layers: Array<[string, LayerAdapter]>,
+    orderOverrides: Array<[string, number]>,
+    opacityOverrides: Array<[string, number]>
+  ): void {
+    if (
+      !mapEntriesEqual(this.layers, layers) ||
+      !mapEntriesEqual(this.orderOverrides, orderOverrides) ||
+      !mapEntriesEqual(this.opacityOverrides, opacityOverrides)
+    ) {
+      throw new Error("Layers changed while the transaction was being prepared.");
+    }
+  }
+}
+
+function assertTransactionLayerIds(
+  layers: LayerAdapter[],
+  existing: ReadonlyMap<string, LayerAdapter> | undefined
+): void {
+  const ids = new Set<string>();
+  for (const layer of layers) {
+    if (ids.has(layer.id) || existing?.has(layer.id)) {
+      throw new Error(`Layer id "${layer.id}" already exists.`);
+    }
+    ids.add(layer.id);
+  }
+}
+
+function mapEntriesEqual<K, V>(map: ReadonlyMap<K, V>, entries: Array<[K, V]>): boolean {
+  if (map.size !== entries.length) {
+    return false;
+  }
+  return entries.every(([key, value]) => map.get(key) === value);
+}
+
+function replaceMapEntries<K, V>(map: Map<K, V>, entries: Array<[K, V]>): void {
+  map.clear();
+  for (const [key, value] of entries) {
+    map.set(key, value);
+  }
+}
+
+function destroyLayers(layers: LayerAdapter[]): unknown[] {
+  const errors: unknown[] = [];
+  for (const layer of [...layers].reverse()) {
+    try {
+      layer.destroy();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return errors;
+}
+
+function destroyLayersBestEffort(layers: LayerAdapter[]): void {
+  destroyLayers(layers);
 }
 
 function getConfigOrder(config: LayerConfig): number {

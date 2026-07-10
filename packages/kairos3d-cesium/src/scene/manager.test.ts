@@ -267,7 +267,7 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-07T00:00:00.000Z"
     };
 
-    await manager.load(snapshot);
+    await manager.load(snapshot, { mode: "progressive" });
 
     expect(map.layers.load).toHaveBeenCalledWith(
       [layerConfig],
@@ -290,7 +290,11 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-07T00:00:00.000Z"
     };
 
-    await manager.load(snapshot, { clearLayers: false, flyToCamera: false });
+    await manager.load(snapshot, {
+      mode: "progressive",
+      clearLayers: false,
+      flyToCamera: false
+    });
 
     expect(map.layers.load).toHaveBeenCalledWith(
       [layerConfig],
@@ -317,7 +321,11 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-07T00:00:00.000Z"
     };
 
-    await manager.load(snapshot, { restoreResults: true, flyToCamera: false });
+    await manager.load(snapshot, {
+      mode: "progressive",
+      restoreResults: true,
+      flyToCamera: false
+    });
 
     expect(map.draw.clear).toHaveBeenCalledOnce();
     expect(map.analysis.measure.clear).toHaveBeenCalledOnce();
@@ -345,7 +353,11 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-07T00:00:00.000Z"
     };
 
-    await manager.load(snapshot, { restorePrimitives: true, flyToCamera: false });
+    await manager.load(snapshot, {
+      mode: "progressive",
+      restorePrimitives: true,
+      flyToCamera: false
+    });
 
     expect(map.primitives.clear).toHaveBeenCalledOnce();
     expect(map.primitives.load).toHaveBeenCalledWith([], { clear: false });
@@ -362,7 +374,11 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-07T00:00:00.000Z"
     };
 
-    await manager.load(snapshot, { restoreOverlays: true, flyToCamera: false });
+    await manager.load(snapshot, {
+      mode: "progressive",
+      restoreOverlays: true,
+      flyToCamera: false
+    });
 
     expect(map.overlays.validateSnapshots).toHaveBeenCalledWith([]);
     expect(map.overlays.clear).toHaveBeenCalledOnce();
@@ -384,7 +400,11 @@ describe("SceneStateManager", () => {
     };
 
     await expect(
-      manager.load(snapshot, { restoreOverlays: true, flyToCamera: false })
+      manager.load(snapshot, {
+        mode: "progressive",
+        restoreOverlays: true,
+        flyToCamera: false
+      })
     ).rejects.toThrow("invalid overlay");
 
     expect(map.overlays.clear).not.toHaveBeenCalled();
@@ -402,7 +422,11 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-10T00:00:00.000Z"
     };
 
-    await manager.load(snapshot, { restoreEffects: true, flyToCamera: false });
+    await manager.load(snapshot, {
+      mode: "progressive",
+      restoreEffects: true,
+      flyToCamera: false
+    });
 
     expect(map.effects.validateSnapshots).toHaveBeenCalledWith([]);
     expect(map.effects.load).toHaveBeenCalledWith(
@@ -427,7 +451,11 @@ describe("SceneStateManager", () => {
     };
 
     await expect(
-      manager.load(snapshot, { restoreEffects: true, flyToCamera: false })
+      manager.load(snapshot, {
+        mode: "progressive",
+        restoreEffects: true,
+        flyToCamera: false
+      })
     ).rejects.toThrow("invalid effect");
 
     expect(map.layers.load).not.toHaveBeenCalled();
@@ -445,7 +473,11 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-10T00:00:00.000Z"
     };
 
-    await manager.load(snapshot, { clearEffects: true, flyToCamera: false });
+    await manager.load(snapshot, {
+      mode: "progressive",
+      clearEffects: true,
+      flyToCamera: false
+    });
 
     expect(map.effects.clear).toHaveBeenCalledOnce();
     expect(map.effects.validateSnapshots).not.toHaveBeenCalled();
@@ -470,6 +502,7 @@ describe("SceneStateManager", () => {
     };
 
     await manager.load(snapshot, {
+      mode: "progressive",
       restoreEffects: true,
       flyToCamera: false,
       operationId: "scene-load"
@@ -530,7 +563,10 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-10T00:00:00.000Z"
     };
 
-    const loading = manager.load(snapshot, { operationId: "cancel-scene" });
+    const loading = manager.load(snapshot, {
+      mode: "progressive",
+      operationId: "cancel-scene"
+    });
     await vi.waitFor(() => expect(map.layers.load).toHaveBeenCalledOnce());
     expect(map.operations.cancel("cancel-scene")).toBe(true);
     await expect(loading).rejects.toBeInstanceOf(OperationCanceledError);
@@ -567,6 +603,7 @@ describe("SceneStateManager", () => {
 
     await expect(
       manager.load(snapshot, {
+        mode: "progressive",
         restoreResults: true,
         flyToCamera: false,
         operationId: "cancel-results"
@@ -596,6 +633,7 @@ describe("SceneStateManager", () => {
 
     await expect(
       manager.load(snapshot, {
+        mode: "progressive",
         restoreOverlays: true,
         restoreEffects: true,
         flyToCamera: false,
@@ -626,7 +664,10 @@ describe("SceneStateManager", () => {
       createdAt: "2026-07-10T00:00:00.000Z"
     };
 
-    const loading = manager.load(snapshot, { operationId: "cancel-camera" });
+    const loading = manager.load(snapshot, {
+      mode: "progressive",
+      operationId: "cancel-camera"
+    });
     await vi.waitFor(() => expect(map.viewer.camera.flyTo).toHaveBeenCalledOnce());
     expect(map.operations.cancel("cancel-camera")).toBe(true);
     await expect(loading).rejects.toBeInstanceOf(OperationCanceledError);
