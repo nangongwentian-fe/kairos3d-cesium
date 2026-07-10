@@ -15,7 +15,9 @@
       "@kairos3d/cesium": ["./packages/kairos3d-cesium/src/index.ts"],
       "@kairos3d/cesium/*": ["./packages/kairos3d-cesium/src/*/index.ts"],
       "@kairos3d/cesium-widget": ["./packages/kairos3d-cesium-widget/src/index.ts"],
-      "@kairos3d/cesium-widget/*": ["./packages/kairos3d-cesium-widget/src/*/index.ts"]
+      "@kairos3d/cesium-widget/*": ["./packages/kairos3d-cesium-widget/src/*/index.ts"],
+      "@kairos3d/cesium-ui-react": ["./packages/kairos3d-cesium-ui-react/src/index.ts"],
+      "@kairos3d/cesium-ui-react/*": ["./packages/kairos3d-cesium-ui-react/src/*/index.ts"]
     },
     "resolveJsonModule": true,
     "isolatedModules": true,

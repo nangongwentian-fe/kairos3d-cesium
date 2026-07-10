@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": [],
+    "paths": {
+      "@kairos3d/cesium": ["../kairos3d-cesium/dist/index.d.ts"],
+      "@kairos3d/cesium/*": ["../kairos3d-cesium/dist/*/index.d.ts"],
+      "@kairos3d/cesium-widget": ["../kairos3d-cesium-widget/dist/index.d.ts"],
+      "@kairos3d/cesium-widget/*": ["../kairos3d-cesium-widget/dist/*/index.d.ts"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test/**"]
+}
