@@ -73,6 +73,12 @@ function createMapMock() {
       load: vi.fn(async () => []),
       clear: vi.fn(),
       validateSnapshots: vi.fn()
+    },
+    effects: {
+      toJSON: vi.fn(() => []),
+      load: vi.fn(async () => []),
+      clear: vi.fn(),
+      validateSnapshots: vi.fn()
     }
   } as unknown as KairosMap;
 }
@@ -161,6 +167,8 @@ describe("SceneStateManager", () => {
       bookmarks: [expect.objectContaining({ id: "home" })],
       createdAt: expect.any(String)
     });
+    expect(snapshot.effects).toBeUndefined();
+    expect(map.effects.toJSON).not.toHaveBeenCalled();
   });
 
   it("exports runtime results when requested", () => {
@@ -201,6 +209,16 @@ describe("SceneStateManager", () => {
     expect(map.overlays.toJSON).toHaveBeenCalledOnce();
   });
 
+  it("exports effects when requested", () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+
+    const snapshot = manager.toJSON({ includeEffects: true });
+
+    expect(snapshot.effects).toEqual([]);
+    expect(map.effects.toJSON).toHaveBeenCalledOnce();
+  });
+
   it("loads snapshot layers, bookmarks, and camera by default", async () => {
     const map = createMapMock();
     const manager = new SceneStateManager(map);
@@ -226,6 +244,9 @@ describe("SceneStateManager", () => {
     });
     expect(map.viewer.camera.flyTo).toHaveBeenCalledOnce();
     expect(manager.bookmarks.list().map((bookmark) => bookmark.id)).toEqual(["home"]);
+    expect(map.effects.validateSnapshots).not.toHaveBeenCalled();
+    expect(map.effects.load).not.toHaveBeenCalled();
+    expect(map.effects.clear).not.toHaveBeenCalled();
   });
 
   it("can load a snapshot without clearing layers or moving the camera", async () => {
@@ -337,5 +358,63 @@ describe("SceneStateManager", () => {
 
     expect(map.overlays.clear).not.toHaveBeenCalled();
     expect(map.layers.load).not.toHaveBeenCalled();
+  });
+
+  it("restores effects after validating the complete effect snapshot", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [layerConfig],
+      bookmarks: [],
+      effects: [],
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    await manager.load(snapshot, { restoreEffects: true, flyToCamera: false });
+
+    expect(map.effects.validateSnapshots).toHaveBeenCalledWith([]);
+    expect(map.effects.load).toHaveBeenCalledWith([], { clear: true });
+    expect(map.effects.clear).not.toHaveBeenCalled();
+  });
+
+  it("validates effects before modifying any scene state", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    vi.mocked(map.effects.validateSnapshots).mockImplementation(() => {
+      throw new Error("invalid effect");
+    });
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [layerConfig],
+      bookmarks: [],
+      effects: [],
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    await expect(
+      manager.load(snapshot, { restoreEffects: true, flyToCamera: false })
+    ).rejects.toThrow("invalid effect");
+
+    expect(map.layers.load).not.toHaveBeenCalled();
+    expect(map.effects.load).not.toHaveBeenCalled();
+    expect(map.effects.clear).not.toHaveBeenCalled();
+  });
+
+  it("can clear effects without restoring a snapshot", async () => {
+    const map = createMapMock();
+    const manager = new SceneStateManager(map);
+    const snapshot: SceneSnapshot = {
+      version: 1,
+      layers: [layerConfig],
+      bookmarks: [],
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+
+    await manager.load(snapshot, { clearEffects: true, flyToCamera: false });
+
+    expect(map.effects.clear).toHaveBeenCalledOnce();
+    expect(map.effects.validateSnapshots).not.toHaveBeenCalled();
+    expect(map.effects.load).not.toHaveBeenCalled();
   });
 });

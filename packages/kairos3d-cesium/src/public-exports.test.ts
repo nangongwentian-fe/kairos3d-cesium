@@ -10,6 +10,8 @@ const expectedExports = [
   "./draw",
   "./height",
   "./layers",
+  "./materials",
+  "./effects",
   "./overlays",
   "./performance",
   "./persistence",

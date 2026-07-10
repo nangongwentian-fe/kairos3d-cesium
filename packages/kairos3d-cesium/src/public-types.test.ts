@@ -9,7 +9,9 @@ import type {
   ColorBlendMode,
   Entity,
   HeightReference,
-  ImageryLayerFeatureInfo
+  ImageryLayerFeatureInfo,
+  Material,
+  MaterialProperty
 } from "cesium";
 import { describe, expectTypeOf, it } from "vitest";
 import type { KairosMap, SerializablePosition, SerializableVector3 } from "./core";
@@ -187,6 +189,20 @@ import type {
   PlotGeometryKind,
   PlotType
 } from "./plotting";
+import type {
+  MaterialDefinition,
+  MaterialDefinitionInfo,
+  MaterialDescriptor,
+  MaterialTarget
+} from "./materials";
+import type {
+  EffectConfig,
+  EffectInstance,
+  EffectLoadOptions,
+  EffectSnapshot,
+  EffectType,
+  EffectUpdateOptions
+} from "./effects";
 
 describe("public SDK types", () => {
   it("exposes stable draw and measure result contracts", () => {
@@ -904,6 +920,9 @@ describe("public SDK types", () => {
       primitiveOverlayCount: number;
       layerCount: number;
       layerRuntimeObjectCount: number;
+      effectCount: number;
+      effectRuntimeObjectCount: number;
+      animatedEffectCount: number;
       warnings: PerformanceWarning[];
     }>();
     expectTypeOf<PrimitiveOptimizationCandidate>().toMatchTypeOf<{
@@ -1220,6 +1239,58 @@ describe("public SDK types", () => {
     }>();
   });
 
+  it("exposes materials and effects contracts", () => {
+    expectTypeOf<MaterialTarget>().toEqualTypeOf<"entity" | "primitive">();
+    expectTypeOf<MaterialDefinition>().toMatchTypeOf<{
+      type: string;
+      targets: readonly MaterialTarget[];
+      createProperty?: (descriptor: never) => MaterialProperty;
+      createMaterial?: (descriptor: never) => Material | Promise<Material>;
+    }>();
+    expectTypeOf<KairosMap["materials"]["list"]>().returns.toEqualTypeOf<
+      MaterialDefinitionInfo[]
+    >();
+    expectTypeOf<KairosMap["materials"]["createProperty"]>().returns.toEqualTypeOf<
+      MaterialProperty
+    >();
+    expectTypeOf<KairosMap["materials"]["createMaterial"]>().returns.toEqualTypeOf<
+      Promise<Material>
+    >();
+    expectTypeOf<MaterialDescriptor>().toHaveProperty("target");
+
+    expectTypeOf<EffectType>().toEqualTypeOf<
+      | "flow-line"
+      | "flow-wall"
+      | "pulse-circle"
+      | "radar-scan"
+      | "water-surface"
+      | "particle"
+      | "rain"
+      | "snow"
+      | "fog"
+    >();
+    expectTypeOf<EffectInstance>().toMatchTypeOf<{
+      id: string;
+      type: EffectType;
+      show: boolean;
+      group?: string;
+      metadata?: Record<string, unknown>;
+      config: EffectConfig;
+      runtimeObjects: unknown[];
+      createdAt: Date;
+      updatedAt?: Date;
+    }>();
+    expectTypeOf<KairosMap["effects"]["add"]>().parameters.toEqualTypeOf<
+      [EffectConfig]
+    >();
+    expectTypeOf<KairosMap["effects"]["update"]>().parameters.toEqualTypeOf<
+      [string, EffectUpdateOptions]
+    >();
+    expectTypeOf<KairosMap["effects"]["load"]>().parameters.toEqualTypeOf<
+      [EffectSnapshot[], EffectLoadOptions?]
+    >();
+  });
+
   it("exposes shared tool lifecycle event types", () => {
     expectTypeOf<ToolManagerEvents["cancel"]>().toEqualTypeOf<{ toolId: string }>();
     expectTypeOf<ToolManagerEvents["clear"]>().toEqualTypeOf<{
@@ -1320,6 +1391,7 @@ describe("public SDK types", () => {
       results?: RuntimeResultsSnapshot;
       primitives?: PrimitiveOverlaySnapshot[];
       overlays?: OverlaySnapshot[];
+      effects?: EffectSnapshot[];
       createdAt: string;
     }>();
 
@@ -1327,6 +1399,7 @@ describe("public SDK types", () => {
       includeResults?: boolean;
       includePrimitives?: boolean;
       includeOverlays?: boolean;
+      includeEffects?: boolean;
     }>();
 
     expectTypeOf<SceneStateLoadOptions>().toEqualTypeOf<{
@@ -1338,6 +1411,8 @@ describe("public SDK types", () => {
       clearPrimitives?: boolean;
       restoreOverlays?: boolean;
       clearOverlays?: boolean;
+      restoreEffects?: boolean;
+      clearEffects?: boolean;
     }>();
 
     expectTypeOf<RuntimeResultsSnapshot>().toEqualTypeOf<{

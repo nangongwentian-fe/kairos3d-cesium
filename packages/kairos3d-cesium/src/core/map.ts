@@ -1,8 +1,10 @@
 import type { Viewer } from "cesium";
 import { AnalysisManager } from "../analysis/manager";
 import { DrawManager } from "../draw/manager";
+import { EffectManager } from "../effects";
 import { HeightManager } from "../height";
 import { LayerManager, type LayerConfig } from "../layers";
+import { MaterialManager } from "../materials";
 import { PerformanceManager } from "../performance";
 import { PickingManager, SelectionManager } from "../picking";
 import { PrimitiveOverlayManager } from "../primitives";
@@ -34,6 +36,8 @@ export class KairosMap extends Evented<KairosMapEvents> {
   readonly picking: PickingManager;
   readonly selection: SelectionManager;
   readonly styles: StyleManager;
+  readonly materials: MaterialManager;
+  readonly effects: EffectManager;
   readonly height: HeightManager;
   readonly results: ResultManager;
   readonly performance: PerformanceManager;
@@ -46,6 +50,8 @@ export class KairosMap extends Evented<KairosMapEvents> {
     super();
     this.viewer = viewer;
     this.styles = new StyleManager();
+    this.materials = new MaterialManager();
+    this.effects = new EffectManager(this);
     this.height = new HeightManager(this);
     this.layers = new LayerManager(this);
     this.tools = new ToolManager(this);
@@ -69,6 +75,8 @@ export class KairosMap extends Evented<KairosMapEvents> {
       return;
     }
 
+    this.effects.destroy();
+    this.materials.destroy();
     this.primitives.destroy();
     this.overlays.destroy();
     this.performance.destroy();

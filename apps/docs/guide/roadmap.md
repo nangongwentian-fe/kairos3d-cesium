@@ -9,6 +9,8 @@ This page records the current development order after the first complete SDK ver
 | P0 | CI and verification guardrails | Complete first pass: GitHub Actions and local verification scripts keep the pushed first version reproducible before deeper changes. |
 | P0 | Primitive renderer integration | First stage complete for draw polyline/polygon and distance/area measurement; continue expanding only where it pays off. |
 | P0 | Runtime snapshot expansion | Complete: Primitive overlays participate in scene snapshots when requested. |
+| P0 | Materials and effects core | M8 complete: public-API materials and nine managed geometry, particle, and weather effects are available. |
+| P0 | Operations and loading core | M9 next: unify cancellation, progress, errors, and late-commit protection across async SDK work. |
 | P1 | Analysis precision upgrades | Complete first pass: terrain triangulation and scene-aware visibility are available. |
 | P1 | Interactive clipping and editing polish | Complete first pass: clipping results have programmatic edit/update/cancel lifecycle. |
 | P2 | UI and persistence adapters | Complete first pass: examples helper adapters and optional snapshot storage adapters exist. |
@@ -16,7 +18,7 @@ This page records the current development order after the first complete SDK ver
 
 ## Current Decision
 
-The next phase should prioritize SDK capability foundations over package release and hosted deployment work.
+The next milestone is M9 Operations / Loading Core. It should add one operation lifecycle for async layers, effects, scene recovery, and analysis without changing existing result shapes or moving effects into result ownership.
 
 | Lowered item | Current priority | Notes |
 | --- | --- | --- |
@@ -37,14 +39,17 @@ The next phase should prioritize SDK capability foundations over package release
 | 6 | Clipping interaction pass | Complete first pass: edit/update/cancel APIs keep result ids stable. |
 | 7 | Optional UI adapters | Complete first pass: examples consume pick/profile/snapshot helper adapters outside SDK core. |
 | 8 | Persistence adapters | Complete first pass: memory and localStorage-compatible snapshot storage adapters are available. |
-| 9 | Release/npm/deploy hardening | Remaining: only do full publish/deploy work when release priority is raised. |
+| 9 | Materials and effects core | M8 complete: Entity/Primitive material factories, nine effect types, data-only effect snapshots, and effect performance counters are available. |
+| 10 | Operations and loading core | M9 next: add cancellation, progress, errors, retention, and destroy-time late-commit guards to async SDK APIs. |
+| 11 | Transactional scene recovery | M10 planned: prepare/commit/rollback and snapshot-version migration after operation contracts are stable. |
+| 12 | Release/npm/deploy hardening | Remaining: only do full publish/deploy work when release priority is raised. |
 
 ## Guardrails
 
 | Rule | Meaning |
 | --- | --- |
 | Keep SDK core framework-free | React/Vue UI belongs in examples or a later optional package. |
-| Keep snapshots data-only | Do not serialize Cesium runtime objects, functions, materials, or picked feature identities. |
+| Keep snapshots data-only | Serialize material/effect descriptors, never Cesium runtime objects, live materials, functions, animation phases, or picked feature identities. |
 | Prefer foundations first | Improve renderer, snapshot, layer, result, and interaction contracts before adding unrelated analysis feature types. |
 | Keep deployment deferred | Do not spend the next phase on npm release, docs hosting, or examples hosting unless this priority changes again. |
 

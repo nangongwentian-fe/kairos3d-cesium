@@ -65,6 +65,14 @@ function createMapMock(records: ResultRecord[] = [], overlayCount = 0) {
     },
     overlays: {
       list: () => Array.from({ length: overlayCount }, (_, index) => ({ id: `overlay-${index}` }))
+    },
+    effects: {
+      list: () => [
+        { id: "flow-1", type: "flow-line" },
+        { id: "fog-1", type: "fog" }
+      ],
+      getRuntimeObjectCount: () => 3,
+      getAnimatedCount: () => 2
     }
   } as unknown as KairosMap;
 }
@@ -89,6 +97,9 @@ describe("PerformanceManager", () => {
     expect(stats.primitiveOverlayCount).toBe(1);
     expect(stats.layerCount).toBe(2);
     expect(stats.layerRuntimeObjectCount).toBe(3);
+    expect(stats.effectCount).toBe(2);
+    expect(stats.effectRuntimeObjectCount).toBe(3);
+    expect(stats.animatedEffectCount).toBe(2);
     expect(stats.resultBySource.draw).toMatchObject({
       count: 1,
       entityCount: 1,

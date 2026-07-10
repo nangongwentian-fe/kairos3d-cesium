@@ -48,6 +48,8 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | `@kairos3d/cesium/analysis` | Measurement tools, visibility/profile/terrain analysis, clipping, and analysis result management. |
 | `@kairos3d/cesium/scene` | Camera view capture/fly-to, camera bookmarks, and scene snapshot recovery. |
 | `@kairos3d/cesium/picking` | Object picking, normalized properties, selection state, and first-stage highlight. |
+| `@kairos3d/cesium/materials` | Target-aware material registry and factories built on public Cesium material APIs. |
+| `@kairos3d/cesium/effects` | Long-running geometry, particle, and weather effect lifecycle. |
 | `@kairos3d/cesium/style` | Shared symbol styles, style defaults, presets, and JSON-safe color serialization. |
 | `@kairos3d/cesium/height` | Height modes, terrain sampling, clamp-to-ground helpers, and surface distance helpers. |
 | `@kairos3d/cesium/results` | Aggregated SDK-managed result index, query, cleanup, and events. |
@@ -99,14 +101,15 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Feature | Current boundary |
 | --- | --- |
 | Camera view | `CameraView` stores longitude/latitude in degrees, height in meters, and heading/pitch/roll in Cesium radians. |
-| Snapshot | `SceneSnapshot` stores `camera + layers + bookmarks` by default, and can include runtime results when exported with `includeResults: true`. |
+| Snapshot | `SceneSnapshot` stores `camera + layers + bookmarks` by default, and can opt into results, primitive overlays, overlays, and effects. |
 | Layer recovery | Snapshot load delegates to `map.layers.load()`, so only recoverable layer configs are restored. |
 | Runtime results | SDK-managed draw, measure, visibility, profile, terrain, and recoverable clipping results can be serialized without Cesium runtime objects. |
 | Result styles | SDK-managed result styles are serialized as JSON-safe colors when `includeResults: true` is used. |
 | Primitive overlays | SDK-managed primitive overlays can be serialized with `includePrimitives: true`. |
+| Effects | SDK-managed effects can be serialized with `includeEffects: true` and restored or cleared with `restoreEffects` / `clearEffects`. |
 | Result index | `map.results` aggregates SDK-managed result lookup and cleanup, but it delegates entity ownership to draw and analysis managers. |
 | Clipping recovery | Clipping snapshots only restore `globe` targets and `layer` targets with a stable `layerId`; picked-object targets are skipped. |
-| Unsupported state | Custom entities, `PickResult.object`, 3D Tiles feature identities, popup/widget UI, Cesium materials, callbacks, and function styles are not serialized. |
+| Unsupported state | Custom entities, `PickResult.object`, 3D Tiles feature identities, popup/widget UI, Cesium runtime materials/objects, callbacks, functions, and intermediate animation phases are not serialized. |
 | Persistence | The SDK provides optional adapters, but apps still decide whether to use memory, localStorage, files, or a backend. |
 | Roaming | Route flight, keyboard roam, first-person roam, tracking mode, and Mars3D-style camera systems are out of scope for this milestone. |
 
@@ -131,6 +134,17 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Snapshot style | Result snapshots store serializable point, line, polygon, and label styles. |
 | Thematic styling | SLD, Cesium 3D Tiles styling DSL, function callbacks, and full thematic mapping are out of scope. |
 
+## Material And Effect Boundaries
+
+| Feature | Current boundary |
+| --- | --- |
+| Material APIs | Entity materials use public `MaterialProperty` classes; Primitive materials use public `new Material({ fabric })`. Private material caches, shader fields, and global prototype changes are forbidden. |
+| Registry | Built-in definitions cannot be replaced or unregistered. Custom definitions must be registered before restoring snapshots that reference them. |
+| Effect ownership | `map.effects` owns its Primitives, ParticleSystems, PostProcessStages, and shared animation ticker. Effects do not participate in results, picking, selection, or layer ownership. |
+| Replacement | Effect updates prepare a new runtime before replacing the old one; a failed update leaves the old effect active. |
+| Rendering | Animated effects share one ticker and request renders when Cesium request-render mode is active. |
+| Snapshot | `EffectSnapshot` stores serializable effect descriptors only. Runtime objects and the current animation phase are never serialized. |
+
 ## Height Boundaries
 
 | Feature | Current boundary |
@@ -140,13 +154,13 @@ The examples app uses `vite-plugin-static-copy` and defines `CESIUM_BASE_URL`. K
 | Surface distance | Implemented by accumulating resolved or sampled positions. |
 | Surface area | `surface` area can use sampled terrain grids and triangulated area estimates. |
 | Rendering | Lines can use Cesium `clampToGround`; points and polygons use Cesium height references where supported. |
-| Future terrain analysis | True terrain deformation, excavation wall rendering, animated water, heatmap rendering, and primitive optimization are out of scope. |
+| Future terrain analysis | True terrain deformation, excavation wall rendering, heatmap rendering, and terrain-specific Primitive optimization are out of scope. The water-surface effect is visual-only and does not deform terrain. |
 
 ## Performance Boundaries
 
 | Feature | Current boundary |
 | --- | --- |
-| Runtime stats | Counts viewer entities, SDK-managed result entities, layer runtime objects, and result records. |
+| Runtime stats | Counts viewer entities, SDK-managed result entities, layer runtime objects, result records, effects, effect runtime objects, and animated effects. |
 | Budgets | Budgets produce warnings only; they do not mutate layers, results, or viewer settings. |
 | Primitive candidates | Candidate hints identify entity-heavy Entity results. Results already using `renderMode: "primitive"` are skipped. |
 | Renderer ownership | Entity cleanup remains owned by draw and analysis managers; performance stats do not own runtime objects. |

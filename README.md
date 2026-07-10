@@ -70,6 +70,8 @@ The SDK is organized as small TypeScript modules instead of a global platform ob
 | `@kairos3d/cesium/analysis` | Distance, area, height measurement, visibility/profile/terrain analysis, volume/flood/excavation estimates, clipping, and result cleanup. |
 | `@kairos3d/cesium/scene` | Camera view capture, camera bookmarks, and scene snapshot export/load, with optional runtime results. |
 | `@kairos3d/cesium/picking` | Entity, 3D Tiles, imagery, and primitive picking with selection state. |
+| `@kairos3d/cesium/materials` | Public-API material registry and factories for Entity properties and Primitive fabric materials. |
+| `@kairos3d/cesium/effects` | SDK-managed geometry, particle, and weather effects with lifecycle and snapshot support. |
 | `@kairos3d/cesium/style` | Shared symbol styles, style defaults, presets, and JSON-safe color serialization. |
 | `@kairos3d/cesium/height` | Height modes, terrain sampling, clamp-to-ground helpers, and surface distance helpers. |
 | `@kairos3d/cesium/results` | Aggregated SDK-managed result listing, lookup, removal, clearing, and result events. |
@@ -245,9 +247,42 @@ map.analysis.clipping.clear();
 
 Polygon clipping depends on Cesium scene support for `ClippingPolygonCollection`. Clipping results can be programmatically edited with `edit/stopEdit/cancelEdit/updatePlane/updatePolygon`; popup UI and excavation widgets stay outside the SDK core.
 
+## Materials And Effects
+
+`map.materials` creates Entity `MaterialProperty` values or Primitive fabric materials through Cesium public APIs. `map.effects` owns long-running geometry, particle, and weather runtimes separately from analysis results.
+
+```ts
+const property = map.materials.createProperty({
+  target: "entity",
+  type: "polyline-glow",
+  color: "#00d4ff",
+  glowPower: 0.2
+});
+
+const effect = await map.effects.add({
+  id: "traffic-flow",
+  type: "flow-line",
+  positions,
+  width: 4,
+  group: "traffic",
+  material: {
+    type: "flow",
+    color: "#00d4ff",
+    speed: 1.5
+  }
+});
+
+await map.effects.update(effect.id, {
+  material: { type: "flow", color: "#35d07f", speed: 2 }
+});
+map.effects.setGroupShow("traffic", false);
+```
+
+Built-in Entity materials cover color, image, grid, stripe, checkerboard, polyline dash, and polyline glow. Primitive materials cover color, image, water, flow, radial wave, and radar scan. Effects cover flow line/wall, pulse circle, radar scan, water surface, particles, rain, snow, and fog.
+
 ## Scene State
 
-Scene state stores `camera + layers + bookmarks` by default. It can also include SDK-managed draw and analysis results when a business app needs to save a complete working scene.
+Scene state stores `camera + layers + bookmarks` by default. It can also include SDK-managed results, primitive overlays, and effects when a business app needs to save a complete working scene.
 
 ```ts
 const view = map.sceneState.captureCamera();
@@ -261,7 +296,8 @@ map.sceneState.bookmarks.add({
 
 const snapshot = map.sceneState.toJSON({
   includeResults: true,
-  includePrimitives: true
+  includePrimitives: true,
+  includeEffects: true
 });
 await map.sceneState.load(snapshot, {
   clearLayers: true,
@@ -269,11 +305,13 @@ await map.sceneState.load(snapshot, {
   restoreResults: true,
   clearResults: true,
   restorePrimitives: true,
-  clearPrimitives: true
+  clearPrimitives: true,
+  restoreEffects: true,
+  clearEffects: true
 });
 ```
 
-Runtime result snapshots are data-only. They restore SDK-managed draw, measure, visibility, profile, terrain, recoverable clipping results, primitive overlays when requested, and serializable SDK styles, but do not serialize custom Cesium entities, picked runtime objects, Cesium materials, callbacks, functions, or app UI state.
+Runtime snapshots are data-only. `EffectSnapshot` stores serializable effect configuration and restarts animation from its initial phase on recovery; it does not serialize Cesium `Material`, `Primitive`, `ParticleSystem`, `PostProcessStage`, callbacks, functions, or intermediate animation state. Custom material definitions must be registered before restoring effects that reference them.
 
 ## Persistence Adapters
 
@@ -305,7 +343,7 @@ map.results.clear({ source: ["measure", "visibility"] });
 
 ## Performance And Primitive Planning
 
-`map.performance` provides runtime stats for SDK-managed results, viewer entities, result Primitive runtimes, layer runtime objects, and simple budget warnings. It does not replace renderers by itself; it identifies where a Primitive renderer is likely to matter.
+`map.performance` provides runtime stats for SDK-managed results, viewer entities, result Primitive runtimes, layer runtime objects, effects, effect runtime objects, animated effects, and simple budget warnings. It does not replace renderers by itself; it identifies where a Primitive renderer is likely to matter.
 
 ```ts
 map.performance.setBudget({

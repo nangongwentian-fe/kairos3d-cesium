@@ -65,6 +65,11 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `PickResult` | Normalized result shape for Entity, 3D Tiles, imagery, and primitive picking. |
 | `PickOptions` | Options for drill picking and optional imagery feature queries. |
 | `SelectionState` | Current selected result and highlight state. |
+| `MaterialDescriptor` | Target-aware descriptor accepted by Entity and Primitive material factories. |
+| `MaterialDefinition` | Registration contract for custom material factories and validation. |
+| `EffectConfig` | Configuration union for the nine SDK-managed effect types. |
+| `EffectInstance` | Runtime effect state and owned Cesium runtime objects. |
+| `EffectSnapshot` | Data-only effect configuration used by effect and scene recovery. |
 | `ViewerContainer` | Container type accepted by `createViewer`. |
 | `ViewerOptions` | Options type accepted by `createViewer`. |
 
@@ -98,6 +103,8 @@ import type {
 } from "@kairos3d/cesium/analysis";
 import type { CameraView, RuntimeResultsSnapshot, SceneSnapshot } from "@kairos3d/cesium/scene";
 import type { PickResult, SelectionState } from "@kairos3d/cesium/picking";
+import type { MaterialDefinition, MaterialDescriptor } from "@kairos3d/cesium/materials";
+import type { EffectConfig, EffectInstance, EffectSnapshot } from "@kairos3d/cesium/effects";
 import type { ResultSymbolStyle, SDKStyleDefaults } from "@kairos3d/cesium/style";
 import type { HeightMode, HeightOptions, HeightSample } from "@kairos3d/cesium/height";
 ```
@@ -296,6 +303,41 @@ map.analysis.terrain.clear();
 
 Terrain results are SDK-managed and participate in `analysis.toJSON/load()` and scene snapshots with `includeResults: true`. `sampleStep` is meters. `maxSamples` protects the browser from accidental high-density requests. Volume, flooding, and excavation default to sampled-cell estimates and can opt into `precision: { volumeMode: "triangulated" }`. Surface area can use `precision: { areaMode: "triangulated" }`. These are still engineering estimates, not survey-grade terrain solids or real terrain deformation. When the active terrain provider has no availability, results are marked as unsampled and use deterministic zero-height grid data.
 
+## Materials And Effects
+
+```ts
+const property = map.materials.createProperty({
+  target: "entity",
+  type: "grid",
+  color: "#00d4ff",
+  lineCount: [8, 8]
+});
+
+const material = await map.materials.createMaterial({
+  target: "primitive",
+  type: "flow",
+  color: "#00d4ff",
+  speed: 1.5
+});
+
+const effect = await map.effects.add({
+  id: "flow-1",
+  type: "flow-line",
+  positions,
+  width: 4,
+  group: "traffic",
+  material: { type: "flow", color: "#00d4ff", speed: 1.5 }
+});
+
+await map.effects.update(effect.id, {
+  material: { type: "flow", color: "#35d07f", speed: 2 }
+});
+map.effects.setShow(effect.id, false);
+map.effects.setGroupShow("traffic", true);
+```
+
+Built-in material definitions cannot be replaced or unregistered. Custom definitions may be registered and removed through `map.materials`; register them before loading an effect snapshot that references them. `map.effects` owns its Cesium runtimes and does not add effects to `map.results`, picking, selection, or layer ownership.
+
 ## Scene State
 
 ```ts
@@ -310,7 +352,8 @@ map.sceneState.bookmarks.add({
 
 const snapshot = map.sceneState.toJSON({
   includeResults: true,
-  includePrimitives: true
+  includePrimitives: true,
+  includeEffects: true
 });
 await map.sceneState.load(snapshot, {
   clearLayers: true,
@@ -318,11 +361,13 @@ await map.sceneState.load(snapshot, {
   restoreResults: true,
   clearResults: true,
   restorePrimitives: true,
-  clearPrimitives: true
+  clearPrimitives: true,
+  restoreEffects: true,
+  clearEffects: true
 });
 ```
 
-Scene snapshots include camera, recoverable layer configs, and camera bookmarks by default. Pass `includeResults: true` to also include SDK-managed draw, measure, visibility, profile, terrain, recoverable clipping results, and their serializable styles. Pass `includePrimitives: true` to include SDK-managed primitive overlays. Picked-object clipping, custom entities, Cesium runtime objects, and UI state are not serialized.
+Scene snapshots include camera, recoverable layer configs, and camera bookmarks by default. Pass `includeResults: true` for SDK-managed results, `includePrimitives: true` for primitive overlays, and `includeEffects: true` for effect configuration. `EffectSnapshot` never contains Cesium `Material`, `Primitive`, `ParticleSystem`, `PostProcessStage`, or an in-progress animation phase; recovered animations restart from their initial phase.
 
 ## Persistence Adapters
 
@@ -412,7 +457,7 @@ const candidates = map.performance.recommendPrimitiveCandidates({
 });
 ```
 
-`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, result Primitive runtime counts, layer runtime object counts, and budget warnings. Primitive candidates are hints for renderer-specific work; results already using `renderMode: "primitive"` are skipped by candidate recommendations.
+`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, result Primitive runtime counts, layer runtime object counts, `effectCount`, `effectRuntimeObjectCount`, `animatedEffectCount`, and budget warnings. Primitive candidates are hints for renderer-specific work; results already using `renderMode: "primitive"` are skipped by candidate recommendations.
 
 ## Primitive Overlays
 
@@ -446,6 +491,8 @@ Draw polyline/polygon and distance/area measurement results can opt into Primiti
 | `analysis` | Distance, area, height measurement, visibility/profile/terrain analysis, volume/flood/excavation estimates, clipping, result list/remove/clear, result snapshot load/export, and opt-in Primitive rendering for distance/area. |
 | `scene` | Camera capture/fly-to, camera bookmarks, scene snapshot export/load, and optional runtime result recovery. |
 | `picking` | Entity, GeoJSON, glTF, 3D Tiles, optional imagery feature picking, selection, and first-stage highlight. |
+| `materials` | Built-in and custom Entity/Primitive material definitions using public Cesium APIs. |
+| `effects` | Geometry, particle, and weather effects with transactional update, lifecycle cleanup, grouping, and data-only snapshots. |
 | `style` | Shared color parsing, style defaults, presets, and SDK result symbol styles. |
 | `height` | Height mode normalization, terrain sampling, clamp helpers, and surface distance helpers. |
 | `results` | Aggregated SDK-managed result listing, lookup, cleanup, and events for business panels. |

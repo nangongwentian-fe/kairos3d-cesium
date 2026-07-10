@@ -87,6 +87,16 @@
       "types": "./dist/plotting/index.d.ts",
       "import": "./dist/plotting/index.js",
       "require": "./dist/plotting/index.cjs"
+    },
+    "./materials": {
+      "types": "./dist/materials/index.d.ts",
+      "import": "./dist/materials/index.js",
+      "require": "./dist/materials/index.cjs"
+    },
+    "./effects": {
+      "types": "./dist/effects/index.d.ts",
+      "import": "./dist/effects/index.js",
+      "require": "./dist/effects/index.cjs"
     }
   },
   "files": ["dist", "README.md"],

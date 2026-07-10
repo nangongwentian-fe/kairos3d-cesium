@@ -64,6 +64,9 @@ export interface PerformanceStats {
   primitiveOverlayCount: number;
   layerCount: number;
   layerRuntimeObjectCount: number;
+  effectCount: number;
+  effectRuntimeObjectCount: number;
+  animatedEffectCount: number;
   results: ResultPerformanceRecord[];
   resultBySource: Partial<Record<ResultSource, ResultPerformanceSummary>>;
   resultByType: Partial<Record<SDKManagedResult["type"], ResultPerformanceSummary>>;

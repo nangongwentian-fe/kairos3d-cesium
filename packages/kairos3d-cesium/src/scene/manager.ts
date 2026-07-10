@@ -62,14 +62,21 @@ export class SceneStateManager {
     if (options.includeOverlays) {
       snapshot.overlays = this.map.overlays.toJSON();
     }
+    if (options.includeEffects) {
+      snapshot.effects = this.map.effects.toJSON();
+    }
 
     return snapshot;
   }
 
   async load(snapshot: SceneSnapshot, options: SceneStateLoadOptions = {}): Promise<void> {
     const restoreOverlays = options.restoreOverlays ?? false;
+    const restoreEffects = options.restoreEffects ?? false;
     if (restoreOverlays && snapshot.overlays) {
       this.map.overlays.validateSnapshots(snapshot.overlays);
+    }
+    if (restoreEffects) {
+      this.map.effects.validateSnapshots(snapshot.effects ?? []);
     }
 
     await this.map.layers.load(snapshot.layers, {
@@ -118,6 +125,13 @@ export class SceneStateManager {
     }
     if (restoreOverlays && snapshot.overlays) {
       await this.map.overlays.load(snapshot.overlays, { clear: false });
+    }
+
+    const clearEffects = options.clearEffects ?? restoreEffects;
+    if (restoreEffects) {
+      await this.map.effects.load(snapshot.effects ?? [], { clear: clearEffects });
+    } else if (clearEffects) {
+      this.map.effects.clear();
     }
 
     if ((options.flyToCamera ?? true) && snapshot.camera) {

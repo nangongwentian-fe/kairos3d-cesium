@@ -13,6 +13,8 @@ export * from "./primitives";
 export * from "./overlays";
 export * from "./persistence";
 export * from "./plotting";
+export * from "./materials";
+export * from "./effects";
 export {
   createViewer,
   destroyViewer,

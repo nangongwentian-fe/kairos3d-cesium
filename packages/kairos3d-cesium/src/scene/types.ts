@@ -1,5 +1,6 @@
 import type { AnalysisResultsSnapshot } from "../analysis";
 import type { DrawResultSnapshot } from "../draw";
+import type { EffectSnapshot } from "../effects";
 import type { LayerConfig } from "../layers";
 import type { OverlaySnapshot } from "../overlays";
 import type { PrimitiveOverlaySnapshot } from "../primitives";
@@ -41,6 +42,7 @@ export interface SceneSnapshot {
   results?: RuntimeResultsSnapshot;
   primitives?: PrimitiveOverlaySnapshot[];
   overlays?: OverlaySnapshot[];
+  effects?: EffectSnapshot[];
   createdAt: string;
 }
 
@@ -57,6 +59,7 @@ export interface SceneStateSnapshotOptions {
   includeResults?: boolean;
   includePrimitives?: boolean;
   includeOverlays?: boolean;
+  includeEffects?: boolean;
 }
 
 export interface SceneStateLoadOptions {
@@ -68,4 +71,6 @@ export interface SceneStateLoadOptions {
   clearPrimitives?: boolean;
   restoreOverlays?: boolean;
   clearOverlays?: boolean;
+  restoreEffects?: boolean;
+  clearEffects?: boolean;
 }
