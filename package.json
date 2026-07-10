@@ -11,9 +11,9 @@
   "scripts": {
     "dev:docs": "pnpm --filter @kairos3d/docs dev",
     "dev:examples": "pnpm --filter @kairos3d/examples dev",
-    "build": "pnpm --filter @kairos3d/cesium build && pnpm --filter @kairos3d/examples build && pnpm --filter @kairos3d/docs build",
+    "build": "pnpm --filter @kairos3d/cesium build && pnpm --filter @kairos3d/cesium-widget build && pnpm --filter @kairos3d/examples build && pnpm --filter @kairos3d/docs build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm --filter @kairos3d/cesium test",
+    "test": "pnpm --filter @kairos3d/cesium test && pnpm --filter @kairos3d/cesium-widget test",
     "lint": "pnpm -r lint",
     "verify": "pnpm typecheck && pnpm test && pnpm lint && pnpm build",
     "verify:runtime": "node scripts/verify-runtime.mjs",

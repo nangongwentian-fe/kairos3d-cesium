@@ -13,7 +13,9 @@
     "moduleResolution": "Bundler",
     "paths": {
       "@kairos3d/cesium": ["./packages/kairos3d-cesium/src/index.ts"],
-      "@kairos3d/cesium/*": ["./packages/kairos3d-cesium/src/*/index.ts"]
+      "@kairos3d/cesium/*": ["./packages/kairos3d-cesium/src/*/index.ts"],
+      "@kairos3d/cesium-widget": ["./packages/kairos3d-cesium-widget/src/index.ts"],
+      "@kairos3d/cesium-widget/*": ["./packages/kairos3d-cesium-widget/src/*/index.ts"]
     },
     "resolveJsonModule": true,
     "isolatedModules": true,
