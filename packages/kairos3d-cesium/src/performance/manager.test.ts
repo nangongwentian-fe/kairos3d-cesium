@@ -1,5 +1,6 @@
 import { Entity } from "cesium";
 import { describe, expect, it } from "vitest";
+import { getLeaseCountsInternal } from "../concurrency/internal";
 import type { KairosMap } from "../core";
 import type { ResultRecord, ResultSource } from "../results";
 import { PerformanceManager } from "./manager";
@@ -84,6 +85,9 @@ function createMapMock(records: ResultRecord[] = [], overlayCount = 0) {
         }
         return [];
       }
+    },
+    concurrency: {
+      [getLeaseCountsInternal]: () => ({ active: 2, waiting: 3 })
     }
   } as unknown as KairosMap;
 }
@@ -113,6 +117,8 @@ describe("PerformanceManager", () => {
     expect(stats.animatedEffectCount).toBe(2);
     expect(stats.activeOperationCount).toBe(1);
     expect(stats.failedOperationCount).toBe(2);
+    expect(stats.activeMutationLeaseCount).toBe(2);
+    expect(stats.waitingMutationLeaseCount).toBe(3);
     expect(stats.resultBySource.draw).toMatchObject({
       count: 1,
       entityCount: 1,

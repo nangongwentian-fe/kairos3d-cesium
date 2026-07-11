@@ -7,6 +7,7 @@ import {
 } from "cesium";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { RuntimeConcurrencyManager } from "../concurrency";
 import type { PickResult } from "../picking";
 import { StyleManager } from "../style";
 import { ClippingManager } from "./clipping";
@@ -18,6 +19,7 @@ interface ClippingHost {
 
 function createMapMock(globe: ClippingHost = createClippingHost()) {
   return {
+    concurrency: new RuntimeConcurrencyManager(),
     viewer: {
       scene: {
         globe
@@ -254,6 +256,36 @@ describe("ClippingManager", () => {
 
     expect(manager.get(existing.id)).toBe(existing);
     expect(globe.clippingPlanes).toBe(existing.collection);
+  });
+
+  it("preflights incoming layer targets without resolving Viewer runtime", () => {
+    const map = createMapMock();
+    const manager = new ClippingManager(map);
+    const snapshot = {
+      id: "future-layer-clipping",
+      type: "plane" as const,
+      target: { type: "layer" as const, layerId: "future-layer" },
+      enabled: true,
+      normal: { x: 1, y: 0, z: 0 },
+      distance: 0,
+      createdAt: "2026-07-11T00:00:00.000Z"
+    };
+
+    expect(() => manager.preflightSceneLoad(
+      [snapshot],
+      { clear: true },
+      { availableLayerIds: new Set(["other-layer"]) }
+    )).toThrow('Clipping target layer "future-layer" is not available');
+    expect(map.layers.getRuntimeObjects).not.toHaveBeenCalled();
+
+    const token = manager.preflightSceneLoad(
+      [snapshot],
+      { clear: true },
+      { availableLayerIds: new Set(["future-layer"]) }
+    );
+    expect(Object.isFrozen(token)).toBe(true);
+    expect(Object.isFrozen(token.prepared)).toBe(true);
+    expect(map.layers.getRuntimeObjects).not.toHaveBeenCalled();
   });
 
   it("rejects duplicate clipping snapshot ids before restoring", async () => {

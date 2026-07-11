@@ -50,6 +50,7 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
   readonly type: string;
   readonly name?: string;
   readonly transaction: LayerTransactionHooks = {
+    preflight: (map) => this.preflight(map),
     prepare: (map) => this.prepare(map),
     attach: (map) => this.attach(map),
     detach: (map) => this.detach(map)
@@ -165,6 +166,10 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
   protected abstract isRuntimeAttached(map: KairosMap): boolean;
   protected abstract destroyRuntime(): void;
 
+  protected preflightRuntime(_map: KairosMap): void | Promise<void> {
+    // Built-in adapters validate configuration without creating Cesium runtime.
+  }
+
   protected afterAdd(_map: KairosMap): void | Promise<void> {
     // Subclasses with flyTo config preserve their existing addTo behavior here.
   }
@@ -194,6 +199,14 @@ abstract class BaseLayerAdapter<TConfig extends BaseLayerConfig> implements Laye
       this.map = undefined;
       throw error;
     }
+  }
+
+  private async preflight(map: KairosMap): Promise<void> {
+    if (this.map) {
+      throw new Error(`Layer "${this.id}" is already prepared.`);
+    }
+    validateBaseLayerConfig(this.config);
+    await this.preflightRuntime(map);
   }
 
   private async attach(map: KairosMap): Promise<void> {
@@ -243,6 +256,31 @@ export class ImageryConfigLayer extends BaseLayerAdapter<
     super(config);
     this.order = config.order ?? config.index ?? 0;
     this.opacity = config.alpha ?? 1;
+  }
+
+  protected override preflightRuntime(): void {
+    assertNonEmptyString(this.config.url, `${this.config.type}.url`);
+    assertOptionalUnitInterval(this.config.alpha, `${this.config.type}.alpha`);
+    assertOptionalFinite(this.config.index, `${this.config.type}.index`);
+    assertOptionalNonNegativeInteger(this.config.minimumLevel, `${this.config.type}.minimumLevel`);
+    assertOptionalNonNegativeInteger(this.config.maximumLevel, `${this.config.type}.maximumLevel`);
+    assertOptionalPositiveInteger(this.config.tileWidth, `${this.config.type}.tileWidth`);
+    assertOptionalPositiveInteger(this.config.tileHeight, `${this.config.type}.tileHeight`);
+    if (
+      this.config.minimumLevel !== undefined &&
+      this.config.maximumLevel !== undefined &&
+      this.config.minimumLevel > this.config.maximumLevel
+    ) {
+      throw new Error(`${this.config.type}.minimumLevel cannot exceed maximumLevel.`);
+    }
+    if (this.config.type === "wms") {
+      assertNonEmptyString(this.config.layers, "wms.layers");
+    }
+    if (this.config.type === "wmts") {
+      assertNonEmptyString(this.config.layer, "wmts.layer");
+      assertNonEmptyString(this.config.style, "wmts.style");
+      assertNonEmptyString(this.config.tileMatrixSetID, "wmts.tileMatrixSetID");
+    }
   }
 
   protected prepareRuntime(_map: KairosMap): void {
@@ -336,6 +374,18 @@ export class TerrainConfigLayer extends BaseLayerAdapter<TerrainLayerConfig> {
   private terrainProvider?: EllipsoidTerrainProvider | CesiumTerrainProvider;
   private hiddenTerrainProvider?: EllipsoidTerrainProvider;
 
+  protected override preflightRuntime(): void {
+    if (this.config.url !== undefined) {
+      assertNonEmptyString(this.config.url, "terrain.url");
+    }
+    if (
+      this.config.assetId !== undefined &&
+      (!Number.isInteger(this.config.assetId) || this.config.assetId < 0)
+    ) {
+      throw new Error("terrain.assetId must be a non-negative integer.");
+    }
+  }
+
   protected async prepareRuntime(_map: KairosMap): Promise<void> {
     this.terrainProvider = await createTerrainProviderFromConfig(this.config);
     this.hiddenTerrainProvider = new EllipsoidTerrainProvider();
@@ -393,6 +443,21 @@ export class TerrainConfigLayer extends BaseLayerAdapter<TerrainLayerConfig> {
 export class TilesetConfigLayer extends BaseLayerAdapter<TilesetLayerConfig> {
   private tileset?: Cesium3DTileset;
   private detachedIndex?: number;
+
+  protected override preflightRuntime(): void {
+    assertNonEmptyString(this.config.url, "3dtiles.url");
+    assertOptionalNonNegative(
+      this.config.maximumScreenSpaceError,
+      "3dtiles.maximumScreenSpaceError"
+    );
+    assertOptionalNonNegativeInteger(this.config.skipLevels, "3dtiles.skipLevels");
+    assertOptionalFinite(this.config.dynamicScreenSpaceErrorDensity, "3dtiles.dynamicScreenSpaceErrorDensity");
+    assertOptionalFinite(this.config.dynamicScreenSpaceErrorFactor, "3dtiles.dynamicScreenSpaceErrorFactor");
+    assertOptionalFinite(
+      this.config.dynamicScreenSpaceErrorHeightFalloff,
+      "3dtiles.dynamicScreenSpaceErrorHeightFalloff"
+    );
+  }
 
   protected async prepareRuntime(_map: KairosMap): Promise<void> {
     this.tileset = await Cesium3DTileset.fromUrl(
@@ -477,6 +542,17 @@ export class GeoJsonConfigLayer extends BaseLayerAdapter<GeoJsonLayerConfig> {
   private dataSource?: GeoJsonDataSource;
   private detachedIndex?: number;
 
+  protected override preflightRuntime(): void {
+    if (typeof this.config.data === "string") {
+      assertNonEmptyString(this.config.data, "geojson.data");
+    } else if (!this.config.data || typeof this.config.data !== "object") {
+      throw new Error("geojson.data must be a URL string or object.");
+    }
+    createGeoJsonLoadOptions(this.config);
+    assertOptionalNonNegative(this.config.style?.markerSize, "geojson.style.markerSize");
+    assertOptionalNonNegative(this.config.style?.strokeWidth, "geojson.style.strokeWidth");
+  }
+
   protected async prepareRuntime(_map: KairosMap): Promise<void> {
     this.dataSource = await GeoJsonDataSource.load(
       this.config.data,
@@ -556,6 +632,29 @@ export class GeoJsonConfigLayer extends BaseLayerAdapter<GeoJsonLayerConfig> {
 
 export class GltfConfigLayer extends BaseLayerAdapter<GltfLayerConfig> {
   private entity?: Entity;
+
+  protected override preflightRuntime(): void {
+    assertNonEmptyString(this.config.url, "gltf.url");
+    if (
+      !this.config.position ||
+      !Number.isFinite(this.config.position.x) ||
+      !Number.isFinite(this.config.position.y) ||
+      !Number.isFinite(this.config.position.z)
+    ) {
+      throw new Error("gltf.position must contain finite Cartesian coordinates.");
+    }
+    assertOptionalNonNegative(this.config.scale, "gltf.scale");
+    assertOptionalNonNegative(this.config.minimumPixelSize, "gltf.minimumPixelSize");
+    assertOptionalNonNegative(this.config.maximumScale, "gltf.maximumScale");
+    assertOptionalUnitInterval(this.config.colorBlendAmount, "gltf.colorBlendAmount");
+    assertOptionalNonNegative(this.config.silhouetteSize, "gltf.silhouetteSize");
+    resolveGltfPosition(this.config);
+    resolveGltfHeightReference(this.config);
+    if (this.config.color) parseColorLike(this.config.color, "gltf.color");
+    if (this.config.silhouetteColor) {
+      parseColorLike(this.config.silhouetteColor, "gltf.silhouetteColor");
+    }
+  }
 
   protected prepareRuntime(_map: KairosMap): void {
     this.entity = new Entity({
@@ -802,6 +901,50 @@ export async function createTerrainProviderFromConfig(
   }
 
   return new EllipsoidTerrainProvider();
+}
+
+function validateBaseLayerConfig(config: BaseLayerConfig): void {
+  assertNonEmptyString(config.type, "layer.type");
+  if (config.id !== undefined) assertNonEmptyString(config.id, "layer.id");
+  assertOptionalFinite(config.order, "layer.order");
+}
+
+function assertNonEmptyString(value: string, label: string): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${label} must be a non-empty string.`);
+  }
+}
+
+function assertOptionalFinite(value: number | undefined, label: string): void {
+  if (value !== undefined && !Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number.`);
+  }
+}
+
+function assertOptionalNonNegative(value: number | undefined, label: string): void {
+  assertOptionalFinite(value, label);
+  if (value !== undefined && value < 0) {
+    throw new Error(`${label} must be greater than or equal to 0.`);
+  }
+}
+
+function assertOptionalNonNegativeInteger(value: number | undefined, label: string): void {
+  if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+    throw new Error(`${label} must be a non-negative integer.`);
+  }
+}
+
+function assertOptionalPositiveInteger(value: number | undefined, label: string): void {
+  if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+}
+
+function assertOptionalUnitInterval(value: number | undefined, label: string): void {
+  assertOptionalFinite(value, label);
+  if (value !== undefined && (value < 0 || value > 1)) {
+    throw new Error(`${label} must be between 0 and 1.`);
+  }
 }
 
 function cryptoRandomId(): string {

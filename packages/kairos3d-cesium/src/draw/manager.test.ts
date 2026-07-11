@@ -1,6 +1,8 @@
 import { Cartesian3, Entity } from "cesium";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import { acquireRuntimeLease } from "../concurrency/lease";
 import { StyleManager } from "../style";
 import { DrawManager } from "./manager";
 import type { DrawResult } from "./types";
@@ -16,6 +18,7 @@ beforeAll(() => {
 function createMapMock() {
   const active = { id: "draw.edit" };
   return {
+    concurrency: new RuntimeConcurrencyManager(),
     viewer: {
       scene: {
         primitives: {
@@ -33,6 +36,7 @@ function createMapMock() {
       active,
       start: vi.fn(async () => active),
       stop: vi.fn(),
+      stopWithRuntimeLease: vi.fn(),
       cancel: vi.fn(),
       emitClear: vi.fn(),
       on: vi.fn(() => vi.fn())
@@ -64,6 +68,85 @@ function createResult(id: string): DrawResult {
 }
 
 describe("DrawManager", () => {
+  it.each(["remove", "clear"] as const)(
+    "%s stops an active edit without re-entering the draw lease",
+    async (method) => {
+      const map = createMapMock();
+      const manager = new DrawManager(map);
+      const result = createResult("editing");
+      const destroyTool = vi.fn();
+      manager.addResult(result);
+      await manager.edit(result.id);
+      vi.mocked(map.tools.cancel).mockImplementation(() => {
+        manager.update(result.id, result.positions);
+      });
+      vi.mocked(map.tools.stopWithRuntimeLease).mockImplementation(destroyTool);
+
+      if (method === "remove") {
+        expect(manager.remove(result.id)).toBe(true);
+      } else {
+        manager.clear();
+      }
+
+      expect(destroyTool).toHaveBeenCalledOnce();
+      expect(map.tools.cancel).not.toHaveBeenCalled();
+      expect(manager.get(result.id)).toBeUndefined();
+    }
+  );
+
+  it("does not claim the tools resource when removing a non-edited result", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const result = createResult("plain");
+    manager.addResult(result);
+    const toolsLease = await acquireRuntimeLease(map.concurrency, {
+      kind: "tools.external",
+      mode: "write",
+      resources: ["tools"]
+    });
+
+    expect(manager.remove(result.id)).toBe(true);
+    toolsLease.release();
+  });
+
+  it("keeps clear atomic when a remove listener attempts a reentrant add", () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const original = createResult("original");
+    const reentrant = createResult("reentrant");
+    manager.addResult(original);
+    let conflict: unknown;
+    manager.on("remove", () => {
+      try {
+        manager.addResult(reentrant);
+      } catch (error) {
+        conflict = error;
+      }
+    });
+
+    manager.clear();
+
+    expect(conflict).toMatchObject({ code: "RUNTIME_MUTATION_CONFLICT" });
+    expect(manager.list()).toEqual([]);
+    expect(manager.get("reentrant")).toBeUndefined();
+  });
+
+  it("rejects ordinary draw mutations while scene is exclusive", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const scene = await acquireRuntimeLease(map.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"]
+    });
+
+    expect(() => manager.circle({
+      center: Cartesian3.fromDegrees(114, 22),
+      radius: 100
+    })).toThrow("Runtime resource");
+    scene.release();
+  });
+
   it("emits update for every public result mutation", () => {
     const manager = new DrawManager(createMapMock());
     const result = manager.addResult(createResult("draw-events"));
@@ -313,6 +396,93 @@ describe("DrawManager", () => {
     expect(manager.get("draw-b")?.style?.line?.width).toBe(6);
     expect(manager.get("draw-c")?.style?.label?.color).toBeDefined();
   });
+
+  it.each(["setStyleMany", "setStyleWhere"] as const)(
+    "%s keeps one draw lease across all matching results",
+    async (method) => {
+      const map = createMapMock();
+      const manager = new DrawManager(map);
+      manager.circle({
+        id: "draw-a",
+        center: Cartesian3.fromDegrees(114, 22),
+        radius: 100,
+        group: "draft"
+      });
+      manager.circle({
+        id: "draw-b",
+        center: Cartesian3.fromDegrees(114.01, 22.01),
+        radius: 120,
+        group: "draft"
+      });
+      let sceneReservation: ReturnType<typeof acquireRuntimeLease> | undefined;
+      let conflict: unknown;
+      manager.on("update", () => {
+        if (sceneReservation) {
+          return;
+        }
+        try {
+          manager.setShow("draw-a", false);
+        } catch (error) {
+          conflict = error;
+        }
+        sceneReservation = acquireRuntimeLease(map.concurrency, {
+          kind: "scene.load",
+          mode: "exclusive",
+          resources: ["scene"]
+        });
+      });
+
+      const style = { line: { color: "#35d07f", width: 7 } };
+      const updated = method === "setStyleMany"
+        ? manager.setStyleMany(["draw-a", "draw-b"], style)
+        : manager.setStyleWhere({ group: "draft" }, style);
+
+      expect(conflict).toMatchObject({ code: "RUNTIME_MUTATION_CONFLICT" });
+      expect(updated.map((result) => result.id)).toEqual(["draw-a", "draw-b"]);
+      expect(manager.get("draw-a")?.style?.line?.width).toBe(7);
+      expect(manager.get("draw-b")?.style?.line?.width).toBe(7);
+      const sceneLease = await sceneReservation!;
+      sceneLease.release();
+    }
+  );
+
+  it.each(["removeGroup", "clearGroup"] as const)(
+    "%s keeps one draw lease across the whole group",
+    async (method) => {
+      const map = createMapMock();
+      const manager = new DrawManager(map);
+      manager.addResult(Object.assign(createResult("draw-a"), { group: "draft" }));
+      manager.addResult(Object.assign(createResult("draw-b"), { group: "draft" }));
+      manager.addResult(Object.assign(createResult("draw-c"), { group: "done" }));
+      let sceneReservation: ReturnType<typeof acquireRuntimeLease> | undefined;
+      let conflict: unknown;
+      manager.on("remove", () => {
+        if (sceneReservation) {
+          return;
+        }
+        try {
+          manager.addResult(createResult("reentrant"));
+        } catch (error) {
+          conflict = error;
+        }
+        sceneReservation = acquireRuntimeLease(map.concurrency, {
+          kind: "scene.load",
+          mode: "exclusive",
+          resources: ["scene"]
+        });
+      });
+
+      expect(manager[method]("draft")).toBe(2);
+
+      expect(conflict).toMatchObject({ code: "RUNTIME_MUTATION_CONFLICT" });
+      expect(manager.get("draw-a")).toBeUndefined();
+      expect(manager.get("draw-b")).toBeUndefined();
+      expect(manager.get("draw-c")).toBeDefined();
+      expect(manager.get("reentrant")).toBeUndefined();
+      const sceneLease = await sceneReservation!;
+      sceneLease.release();
+    }
+  );
 
   it("validates all draw ids before applying batch styles", () => {
     const map = createMapMock();
@@ -967,6 +1137,33 @@ describe("DrawManager", () => {
     expect(
       stagedPrimitive.type === "polyline" && stagedPrimitive.collection.isDestroyed()
     ).toBe(true);
+  });
+
+  it("prepares draw runtime from the exact preflight token without reparsing input", async () => {
+    const map = createMapMock();
+    const manager = new DrawManager(map);
+    const snapshot = {
+      id: "draw-token",
+      type: "polyline" as const,
+      positions: [
+        { longitude: 114, latitude: 22, height: 10 },
+        { longitude: 114.01, latitude: 22.01, height: 20 }
+      ],
+      createdAt: "2026-07-10T01:00:00.000Z"
+    };
+    const token = manager.preflightSceneLoad([snapshot], { clear: true });
+    snapshot.positions.length = 0;
+
+    const stage = await manager.prepareSceneLoad(
+      [snapshot],
+      { clear: true },
+      token
+    );
+
+    await stage.dispose();
+    await expect(
+      manager.prepareSceneLoad([snapshot], { clear: true }, token)
+    ).rejects.toThrow("invalid or stale");
   });
 
   it("rolls back only old entities that were actually detached", async () => {

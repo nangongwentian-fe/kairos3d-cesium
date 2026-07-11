@@ -66,6 +66,7 @@ export interface SceneStateSnapshotOptions {
 }
 
 export interface SceneStateLoadOptions extends AsyncOperationOptions {
+  conflictPolicy?: "wait" | "reject";
   mode?: SceneLoadMode;
   clearLayers?: boolean;
   flyToCamera?: boolean;
@@ -95,14 +96,22 @@ export type SceneRollbackStatus =
   | "succeeded"
   | "failed";
 
+export type SceneCleanupStatus =
+  | "not-needed"
+  | "running"
+  | "succeeded"
+  | "failed";
+
 export interface SceneTransactionState {
   operationId: string;
   mode: SceneLoadMode;
   status: SceneTransactionStatus;
   stage?: string;
   rollbackStatus: SceneRollbackStatus;
+  cleanupStatus: SceneCleanupStatus;
   error?: OperationErrorInfo;
   rollbackErrors?: OperationErrorInfo[];
+  cleanupErrors?: OperationErrorInfo[];
   startedAt: Date;
   finishedAt?: Date;
 }

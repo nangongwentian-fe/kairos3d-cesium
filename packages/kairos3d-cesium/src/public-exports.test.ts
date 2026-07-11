@@ -7,6 +7,7 @@ const expectedExports = [
   ".",
   "./analysis",
   "./core",
+  "./concurrency",
   "./draw",
   "./height",
   "./layers",

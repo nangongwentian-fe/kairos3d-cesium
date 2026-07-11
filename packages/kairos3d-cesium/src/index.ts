@@ -16,6 +16,7 @@ export * from "./plotting";
 export * from "./materials";
 export * from "./effects";
 export * from "./operations";
+export * from "./concurrency";
 export {
   createViewer,
   destroyViewer,

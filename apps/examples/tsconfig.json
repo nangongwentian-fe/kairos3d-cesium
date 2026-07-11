@@ -11,6 +11,9 @@
       "@kairos3d/cesium/draw": ["../../packages/kairos3d-cesium/src/draw/index.ts"],
       "@kairos3d/cesium/analysis": ["../../packages/kairos3d-cesium/src/analysis/index.ts"],
       "@kairos3d/cesium/scene": ["../../packages/kairos3d-cesium/src/scene/index.ts"],
+      "@kairos3d/cesium/concurrency": [
+        "../../packages/kairos3d-cesium/src/concurrency/index.ts"
+      ],
       "@kairos3d/cesium/picking": ["../../packages/kairos3d-cesium/src/picking/index.ts"],
       "@kairos3d/cesium/style": ["../../packages/kairos3d-cesium/src/style/index.ts"],
       "@kairos3d/cesium/height": ["../../packages/kairos3d-cesium/src/height/index.ts"],

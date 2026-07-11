@@ -1,5 +1,6 @@
 import type { Viewer } from "cesium";
 import { describe, expect, it, vi } from "vitest";
+import { acquireRuntimeLease } from "../concurrency/lease";
 import { KairosMap } from "./map";
 
 function createViewerMock(destroyed = false): Viewer {
@@ -101,5 +102,29 @@ describe("KairosMap", () => {
       expect(spy).toHaveBeenCalledOnce();
     }
     expect(destroyListener).toHaveBeenCalledOnce();
+  });
+
+  it("waits for active mutation work after preventing new leases", async () => {
+    const viewer = createViewerMock(true);
+    const map = new KairosMap(viewer);
+    const lease = await acquireRuntimeLease(map.concurrency, {
+      kind: "late-work",
+      mode: "write",
+      resources: ["effects"]
+    });
+    const managerDestroySpies = spyOnManagerDestroy(map, () => undefined);
+
+    map.destroy();
+
+    await expect(
+      acquireRuntimeLease(map.concurrency, {
+        kind: "too-late",
+        mode: "write",
+        resources: ["effects"]
+      })
+    ).rejects.toThrow("destroyed");
+    expect(managerDestroySpies[2]).not.toHaveBeenCalled();
+    lease.release();
+    await vi.waitFor(() => expect(managerDestroySpies[2]).toHaveBeenCalledOnce());
   });
 });

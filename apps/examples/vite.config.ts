@@ -29,6 +29,12 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: "@kairos3d/cesium/concurrency",
+        replacement: fileURLToPath(
+          new URL("../../packages/kairos3d-cesium/src/concurrency/index.ts", import.meta.url)
+        )
+      },
+      {
         find: "@kairos3d/cesium/core",
         replacement: fileURLToPath(
           new URL("../../packages/kairos3d-cesium/src/core/index.ts", import.meta.url)

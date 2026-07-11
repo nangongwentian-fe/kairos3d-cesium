@@ -5,6 +5,14 @@ import {
 } from "cesium";
 import type { KairosMap } from "../core";
 import {
+  assertRuntimeMutationAllowed,
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  withRuntimeLeaseOwner,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
+import {
   removeEntityIfOwned,
   removeEntityIfOwnedTracked
 } from "../core/entity-collection";
@@ -49,9 +57,19 @@ import {
   type ResultPrimitiveRuntime,
   type ResultRenderMode
 } from "../primitives";
-import type { PreparedSceneStage } from "../scene/transaction";
-import { ClippingManager } from "./clipping";
-import { TerrainAnalysisManager } from "./terrain";
+import type {
+  PreparedSceneStage,
+  ScenePreflightResult
+} from "../scene/transaction";
+import {
+  ClippingManager,
+  type ClippingScenePreflightContext,
+  type ClippingScenePreflightToken
+} from "./clipping";
+import {
+  TerrainAnalysisManager,
+  type TerrainScenePreflightToken
+} from "./terrain";
 import {
   chooseNearestVisibilityBlock,
   classifySceneVisibility,
@@ -65,6 +83,22 @@ import {
   interpolateProfilePoints,
   sampleGroundCartographics
 } from "./profile-utils";
+import {
+  assertFiniteSnapshotNumber,
+  assertNonEmptySnapshotId,
+  assertNonNegativeSnapshotNumber,
+  assertOptionalSnapshotEnum,
+  assertOptionalSnapshotString,
+  assertSerializablePosition,
+  assertSerializablePositions,
+  assertSnapshotArray,
+  assertSnapshotBoolean,
+  assertSnapshotDate,
+  assertSnapshotEnum,
+  assertSnapshotRecord,
+  cloneAndFreezeSnapshot,
+  freezePreparedArray
+} from "./snapshot-validation";
 import type {
   AnalysisResultLoadOptions,
   AnalysisResultsSnapshot,
@@ -81,6 +115,22 @@ import type {
   VisibilityResult,
   VisibilityResultSnapshot
 } from "./types";
+
+export interface AnalysisScenePreflightContext {
+  readonly availableLayerIds?: ReadonlySet<string>;
+}
+
+/** @internal Parsed, validation-only state for one Scene analysis prepare. */
+export interface AnalysisScenePreflightToken {
+  readonly owner: AnalysisManager;
+  readonly measure: readonly PreparedMeasureSnapshot[];
+  readonly visibility: readonly PreparedVisibilitySnapshot[];
+  readonly profile: readonly PreparedProfileSnapshot[];
+  readonly terrain: TerrainScenePreflightToken;
+  readonly clipping: ClippingScenePreflightToken;
+}
+
+const consumedAnalysisPreflightTokens = new WeakSet<AnalysisScenePreflightToken>();
 
 export class AnalysisManager {
   readonly measure: MeasureManager;
@@ -119,33 +169,93 @@ export class AnalysisManager {
     snapshot: AnalysisResultsSnapshot,
     options: AnalysisResultLoadOptions = {}
   ): Promise<void> {
-    if (options.clear) {
-      this.measure.clear();
-      this.visibility.clear();
-      this.profile.clear();
-      this.clipping.clear();
-      this.terrain.clear();
-    }
+    await runWithRuntimeLease(
+      this.map.concurrency,
+      analysisLeaseRequest("analysis.load", options),
+      async (lease) => {
+        const childOptions = withRuntimeLeaseOwner(
+          { clear: options.clear ?? false },
+          lease.ownerToken
+        );
+        await this.measure.load(snapshot.measure, childOptions);
+        await this.visibility.load(snapshot.visibility, childOptions);
+        await this.profile.load(snapshot.profile, childOptions);
+        await this.clipping.load(snapshot.clipping, childOptions);
+        await this.terrain.load(snapshot.terrain ?? [], childOptions);
+      }
+    );
+  }
 
-    await this.measure.load(snapshot.measure, { clear: false });
-    await this.visibility.load(snapshot.visibility, { clear: false });
-    await this.profile.load(snapshot.profile, { clear: false });
-    await this.clipping.load(snapshot.clipping, { clear: false });
-    await this.terrain.load(snapshot.terrain ?? [], { clear: false });
+  /** @internal */
+  preflightSceneLoad(
+    snapshot: AnalysisResultsSnapshot,
+    options: AnalysisResultLoadOptions = {},
+    context: AnalysisScenePreflightContext = {}
+  ): ScenePreflightResult {
+    assertAnalysisMutation(
+      this.map,
+      "scene.analysis.preflight",
+      getRuntimeLeaseOwner(options)
+    );
+    assertAnalysisSnapshotStructure(snapshot);
+    const clippingContext: ClippingScenePreflightContext = {
+      availableLayerIds: context.availableLayerIds
+    };
+    const token: AnalysisScenePreflightToken = Object.freeze({
+      owner: this,
+      measure: this.measure.preflightSceneLoad(snapshot.measure, options),
+      visibility: this.visibility.preflightSceneLoad(snapshot.visibility, options),
+      profile: this.profile.preflightSceneLoad(snapshot.profile, options),
+      terrain: this.terrain.preflightSceneLoad(snapshot.terrain ?? [], options),
+      clipping: this.clipping.preflightSceneLoad(
+        snapshot.clipping,
+        options,
+        clippingContext
+      )
+    });
+    return { phase: "analysis", value: token };
   }
 
   /** @internal */
   async prepareSceneLoad(
     snapshot: AnalysisResultsSnapshot,
-    options: AnalysisResultLoadOptions = {}
+    options: AnalysisResultLoadOptions = {},
+    preflight?: AnalysisScenePreflightToken
   ): Promise<PreparedSceneStage> {
+    assertAnalysisMutation(
+      this.map,
+      "scene.analysis.prepare",
+      getRuntimeLeaseOwner(options)
+    );
+    const token = preflight ?? this.preflightSceneLoad(snapshot, options).value as
+      | AnalysisScenePreflightToken
+      | undefined;
+    if (!token || token.owner !== this) {
+      throw new Error("Analysis Scene preflight token belongs to another manager.");
+    }
+    if (consumedAnalysisPreflightTokens.has(token)) {
+      throw new Error("Analysis Scene preflight token has already been consumed.");
+    }
+    consumedAnalysisPreflightTokens.add(token);
     const stages: PreparedSceneStage[] = [];
     try {
-      stages.push(await this.measure.prepareSceneLoad(snapshot.measure, options));
-      stages.push(await this.visibility.prepareSceneLoad(snapshot.visibility, options));
-      stages.push(await this.profile.prepareSceneLoad(snapshot.profile, options));
-      stages.push(await this.terrain.prepareSceneLoad(snapshot.terrain ?? [], options));
-      stages.push(await this.clipping.prepareSceneLoad(snapshot.clipping, options));
+      stages.push(await this.measure.prepareSceneLoad(snapshot.measure, options, token.measure));
+      stages.push(await this.visibility.prepareSceneLoad(
+        snapshot.visibility,
+        options,
+        token.visibility
+      ));
+      stages.push(await this.profile.prepareSceneLoad(snapshot.profile, options, token.profile));
+      stages.push(await this.terrain.prepareSceneLoad(
+        snapshot.terrain ?? [],
+        options,
+        token.terrain
+      ));
+      stages.push(await this.clipping.prepareSceneLoad(
+        snapshot.clipping,
+        options,
+        token.clipping
+      ));
     } catch (error) {
       await runStagesBestEffort([...stages].reverse(), "dispose");
       throw error;
@@ -185,12 +295,12 @@ export interface MeasureManagerEvents {
 }
 
 interface PreparedMeasureSnapshot {
-  snapshot: MeasureResultSnapshot;
-  positions: Cartesian3[];
-  createdAt: Date;
-  style: ResultSymbolStyle;
-  height?: MeasureResult["height"];
-  renderMode: NonNullable<MeasureResult["renderMode"]>;
+  readonly snapshot: MeasureResultSnapshot;
+  readonly positions: Cartesian3[];
+  readonly createdAt: Date;
+  readonly style: ResultSymbolStyle;
+  readonly height?: MeasureResult["height"];
+  readonly renderMode: NonNullable<MeasureResult["renderMode"]>;
 }
 
 export class MeasureManager extends Evented<MeasureManagerEvents> {
@@ -213,12 +323,18 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   }
 
   addResult(result: MeasureResult): MeasureResult {
+    return runAnalysisMutation(this.map, "analysis.measure.addResult", () =>
+      this.addResultInternal(result)
+    );
+  }
+
+  private addResultInternal(result: MeasureResult): MeasureResult {
     const existing = this.results.get(result.id);
     if (existing === result) {
       return result;
     }
     if (existing) {
-      this.remove(result.id);
+      this.removeInternal(result.id);
     }
     this.results.set(result.id, result);
     this.emit("add", result);
@@ -253,22 +369,39 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
     snapshots: MeasureResultSnapshot[],
     options: AnalysisResultLoadOptions = {}
   ): Promise<MeasureResult[]> {
-    const prepared = this.prepareSnapshots(snapshots);
-    if (options.clear) {
-      this.clear();
-    }
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      analysisLeaseRequest("analysis.measure.load", options),
+      () => {
+        const prepared = this.prepareSnapshots(snapshots);
+        if (options.clear) this.clearInternal();
+        return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+      }
+    );
+  }
 
-    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+  /** @internal */
+  preflightSceneLoad(
+    snapshots: MeasureResultSnapshot[],
+    options: AnalysisResultLoadOptions = {}
+  ): readonly PreparedMeasureSnapshot[] {
+    const prepared = this.prepareSnapshots(snapshots);
+    if (!options.clear) {
+      assertNoResultConflicts(this.results, prepared.map((item) => item.snapshot.id), "Measure");
+    }
+    return freezePreparedArray(prepared);
   }
 
   /** @internal */
   async prepareSceneLoad(
     snapshots: MeasureResultSnapshot[],
-    options: AnalysisResultLoadOptions = {}
+    options: AnalysisResultLoadOptions = {},
+    preflight?: readonly PreparedMeasureSnapshot[]
   ): Promise<PreparedSceneStage> {
+    const prepared = preflight ?? this.preflightSceneLoad(snapshots, options);
     const staged: MeasureResult[] = [];
     try {
-      for (const item of this.prepareSnapshots(snapshots)) {
+      for (const item of prepared) {
         staged.push(this.createPreparedResult(item));
       }
     } catch (error) {
@@ -294,6 +427,7 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   }
 
   setStyle(id: string, style: ResultSymbolStyle): MeasureResult {
+    return runAnalysisMutation(this.map, "analysis.measure.setStyle", () => {
     const result = this.results.get(id);
     if (!result) {
       throw new Error(`Measure result "${id}" does not exist.`);
@@ -313,9 +447,16 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
     result.primitives = rendered.primitives;
     result.entityIds = result.entities.map((entity) => entity.id);
     return result;
+    });
   }
 
   remove(id: string): boolean {
+    return runAnalysisMutation(this.map, "analysis.measure.remove", () =>
+      this.removeInternal(id)
+    );
+  }
+
+  private removeInternal(id: string): boolean {
     const result = this.results.get(id);
     if (!result) {
       return false;
@@ -329,6 +470,10 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   }
 
   clear(): void {
+    runAnalysisMutation(this.map, "analysis.measure.clear", () => this.clearInternal());
+  }
+
+  private clearInternal(): void {
     const removed = [...this.results.values()];
     for (const result of removed) {
       removeMeasureRuntime(this.map, result);
@@ -345,23 +490,36 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 
   private prepareSnapshots(snapshots: MeasureResultSnapshot[]): PreparedMeasureSnapshot[] {
+    assertSnapshotArray(snapshots, "Measure result snapshots");
     const ids = new Set<string>();
     return snapshots.map((snapshot) => {
+      assertSnapshotRecord(snapshot, "Measure result snapshot");
+      assertNonEmptySnapshotId(snapshot.id, "Measure result snapshot id");
       if (ids.has(snapshot.id)) {
         throw new Error(`Measure result snapshot id "${snapshot.id}" is duplicated.`);
       }
       ids.add(snapshot.id);
-
+      assertSnapshotEnum(snapshot.type, ["distance", "area", "height"], "Measure result type");
+      assertSerializablePositions(
+        snapshot.positions,
+        "Measure result positions",
+        0
+      );
+      assertFiniteSnapshotNumber(snapshot.value, "Measure result value");
+      assertOptionalSnapshotString(snapshot.label, "Measure result label");
+      assertSnapshotDate(snapshot.createdAt, "Measure result createdAt");
+      assertOptionalSnapshotEnum(snapshot.renderMode, ["entity", "primitive"], "Measure renderMode");
+      validateMeasureUnitAndMode(snapshot);
       const positions = deserializePositions(snapshot.positions);
       validateMeasurePositions(snapshot.type, positions);
 
       return {
-        snapshot,
+        snapshot: cloneAndFreezeSnapshot(snapshot),
         positions,
         createdAt: parseSnapshotDate(snapshot.createdAt, "Measure result createdAt"),
         style: this.map.styles.resolveMeasureStyle(snapshot.type, snapshot.style),
@@ -374,10 +532,10 @@ export class MeasureManager extends Evented<MeasureManagerEvents> {
   private restoreSnapshot(prepared: PreparedMeasureSnapshot): MeasureResult {
     const result = this.createPreparedResult(prepared);
     if (this.results.has(result.id)) {
-      this.remove(result.id);
+      this.removeInternal(result.id);
     }
     attachEntityResultRuntime(this.map, result.entities, result.primitives);
-    return this.addResult(result);
+    return this.addResultInternal(result);
   }
 
   private createPreparedResult(prepared: PreparedMeasureSnapshot): MeasureResult {
@@ -415,13 +573,13 @@ export interface VisibilityManagerEvents {
 }
 
 interface PreparedVisibilitySnapshot {
-  snapshot: VisibilityResultSnapshot;
-  start: Cartesian3;
-  end: Cartesian3;
-  blockedPosition?: Cartesian3;
-  createdAt: Date;
-  style: ResultSymbolStyle;
-  height?: VisibilityResult["height"];
+  readonly snapshot: VisibilityResultSnapshot;
+  readonly start: Cartesian3;
+  readonly end: Cartesian3;
+  readonly blockedPosition?: Cartesian3;
+  readonly createdAt: Date;
+  readonly style: ResultSymbolStyle;
+  readonly height?: VisibilityResult["height"];
 }
 
 export class VisibilityManager extends Evented<VisibilityManagerEvents> {
@@ -445,6 +603,11 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
       { kind: "analysis.visibility" },
       operationOptions,
       async (operation) => {
+        return runWithRuntimeLease(
+          this.map.concurrency,
+          analysisLeaseRequest("analysis.visibility", operationOptions, operation),
+          async () => {
+            try {
         reportOperationProgress(operation, 0.05, "height");
         const [start, end] = options.height
           ? await this.map.height.resolvePositions([options.start, options.end], options.height)
@@ -483,9 +646,23 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
         const result = this.createResult(options, classification, [start, end]);
         renderedResult = result;
         operation.throwIfAborted();
-        const added = this.addResult(result);
+        const added = this.addResultInternal(result);
+        await Promise.resolve();
         operation.throwIfAborted();
         return added;
+            } catch (error) {
+              if (renderedResult) {
+                if (this.results.get(renderedResult.id) === renderedResult) {
+                  this.removeInternal(renderedResult.id);
+                } else {
+                  removeEntities(this.map, renderedResult.entities);
+                }
+                renderedResult = undefined;
+              }
+              throw error;
+            }
+          }
+        );
       }
     ).catch((error) => {
       if (renderedResult) {
@@ -500,12 +677,18 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
   }
 
   addResult(result: VisibilityResult): VisibilityResult {
+    return runAnalysisMutation(this.map, "analysis.visibility.addResult", () =>
+      this.addResultInternal(result)
+    );
+  }
+
+  private addResultInternal(result: VisibilityResult): VisibilityResult {
     const existing = this.results.get(result.id);
     if (existing === result) {
       return result;
     }
     if (existing) {
-      this.remove(result.id);
+      this.removeInternal(result.id);
     }
     this.results.set(result.id, result);
     this.emit("add", result);
@@ -544,20 +727,37 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
     snapshots: VisibilityResultSnapshot[],
     options: AnalysisResultLoadOptions = {}
   ): Promise<VisibilityResult[]> {
-    const prepared = this.prepareSnapshots(snapshots);
-    if (options.clear) {
-      this.clear();
-    }
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      analysisLeaseRequest("analysis.visibility.load", options),
+      () => {
+        const prepared = this.prepareSnapshots(snapshots);
+        if (options.clear) this.clearInternal();
+        return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+      }
+    );
+  }
 
-    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+  /** @internal */
+  preflightSceneLoad(
+    snapshots: VisibilityResultSnapshot[],
+    options: AnalysisResultLoadOptions = {}
+  ): readonly PreparedVisibilitySnapshot[] {
+    const prepared = this.prepareSnapshots(snapshots);
+    if (!options.clear) {
+      assertNoResultConflicts(this.results, prepared.map((item) => item.snapshot.id), "Visibility");
+    }
+    return freezePreparedArray(prepared);
   }
 
   /** @internal */
   async prepareSceneLoad(
     snapshots: VisibilityResultSnapshot[],
-    options: AnalysisResultLoadOptions = {}
+    options: AnalysisResultLoadOptions = {},
+    preflight?: readonly PreparedVisibilitySnapshot[]
   ): Promise<PreparedSceneStage> {
-    const staged = this.prepareSnapshots(snapshots).map((item) =>
+    const prepared = preflight ?? this.preflightSceneLoad(snapshots, options);
+    const staged = prepared.map((item) =>
       this.createPreparedResult(item)
     );
     return createEntityResultStage({
@@ -576,6 +776,7 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
   }
 
   setStyle(id: string, style: ResultSymbolStyle): VisibilityResult {
+    return runAnalysisMutation(this.map, "analysis.visibility.setStyle", () => {
     const result = this.results.get(id);
     if (!result) {
       throw new Error(`Visibility result "${id}" does not exist.`);
@@ -592,9 +793,16 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
       result.height
     );
     return result;
+    });
   }
 
   remove(id: string): boolean {
+    return runAnalysisMutation(this.map, "analysis.visibility.remove", () =>
+      this.removeInternal(id)
+    );
+  }
+
+  private removeInternal(id: string): boolean {
     const result = this.results.get(id);
     if (!result) {
       return false;
@@ -608,6 +816,10 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
   }
 
   clear(): void {
+    runAnalysisMutation(this.map, "analysis.visibility.clear", () => this.clearInternal());
+  }
+
+  private clearInternal(): void {
     const removed = [...this.results.values()];
     for (const result of removed) {
       removeEntities(this.map, result.entities);
@@ -623,21 +835,39 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 
   private prepareSnapshots(snapshots: VisibilityResultSnapshot[]): PreparedVisibilitySnapshot[] {
+    assertSnapshotArray(snapshots, "Visibility result snapshots");
     const ids = new Set<string>();
     return snapshots.map((snapshot) => {
+      assertSnapshotRecord(snapshot, "Visibility result snapshot");
+      assertNonEmptySnapshotId(snapshot.id, "Visibility result snapshot id");
       if (ids.has(snapshot.id)) {
         throw new Error(`Visibility result snapshot id "${snapshot.id}" is duplicated.`);
       }
       ids.add(snapshot.id);
-      assertFiniteSnapshotNumber(snapshot.distance, "Visibility result distance");
+      assertSnapshotEnum(snapshot.type, ["visibility"], "Visibility result type");
+      assertSerializablePositions(snapshot.positions, "Visibility result positions", 2, 2);
+      assertSnapshotBoolean(snapshot.visible, "Visibility result visible");
+      assertNonNegativeSnapshotNumber(snapshot.distance, "Visibility result distance");
+      if (snapshot.blockedPosition !== undefined) {
+        assertSerializablePosition(snapshot.blockedPosition, "Visibility blockedPosition");
+      }
+      assertOptionalSnapshotEnum(
+        snapshot.blockedBy,
+        ["terrain", "scene"],
+        "Visibility blockedBy"
+      );
+      if (snapshot.visible && (snapshot.blockedPosition || snapshot.blockedBy)) {
+        throw new Error("Visible visibility snapshots cannot contain blockedPosition or blockedBy.");
+      }
+      assertSnapshotDate(snapshot.createdAt, "Visibility result createdAt");
 
       return {
-        snapshot,
+        snapshot: cloneAndFreezeSnapshot(snapshot),
         start: deserializePosition(snapshot.positions[0]),
         end: deserializePosition(snapshot.positions[1]),
         blockedPosition: snapshot.blockedPosition
@@ -653,10 +883,10 @@ export class VisibilityManager extends Evented<VisibilityManagerEvents> {
   private restoreSnapshot(prepared: PreparedVisibilitySnapshot): VisibilityResult {
     const result = this.createPreparedResult(prepared);
     if (this.results.has(result.id)) {
-      this.remove(result.id);
+      this.removeInternal(result.id);
     }
     attachEntities(this.map, result.entities);
-    return this.addResult(result);
+    return this.addResultInternal(result);
   }
 
   private createPreparedResult(prepared: PreparedVisibilitySnapshot): VisibilityResult {
@@ -722,12 +952,12 @@ export interface ProfileManagerEvents {
 }
 
 interface PreparedProfileSnapshot {
-  snapshot: ProfileResultSnapshot;
-  positions: Cartesian3[];
-  samples: ReturnType<typeof deserializeProfileSample>[];
-  createdAt: Date;
-  style: ResultSymbolStyle;
-  height?: ProfileResult["height"];
+  readonly snapshot: ProfileResultSnapshot;
+  readonly positions: Cartesian3[];
+  readonly samples: ReturnType<typeof deserializeProfileSample>[];
+  readonly createdAt: Date;
+  readonly style: ResultSymbolStyle;
+  readonly height?: ProfileResult["height"];
 }
 
 export class ProfileManager extends Evented<ProfileManagerEvents> {
@@ -751,6 +981,11 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
       { kind: "analysis.profile" },
       operationOptions,
       async (operation) => {
+        return runWithRuntimeLease(
+          this.map.concurrency,
+          analysisLeaseRequest("analysis.profile", operationOptions, operation),
+          async () => {
+            try {
         reportOperationProgress(operation, 0.05, "height");
         const positions = options.height
           ? await this.map.height.resolvePositions(options.positions, options.height)
@@ -787,9 +1022,23 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
         renderedResult = result;
 
         operation.throwIfAborted();
-        const added = this.addResult(result);
+        const added = this.addResultInternal(result);
+        await Promise.resolve();
         operation.throwIfAborted();
         return added;
+            } catch (error) {
+              if (renderedResult) {
+                if (this.results.get(renderedResult.id) === renderedResult) {
+                  this.removeInternal(renderedResult.id);
+                } else {
+                  removeEntities(this.map, renderedResult.entities);
+                }
+                renderedResult = undefined;
+              }
+              throw error;
+            }
+          }
+        );
       }
     ).catch((error) => {
       if (renderedResult) {
@@ -804,12 +1053,18 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
   }
 
   addResult(result: ProfileResult): ProfileResult {
+    return runAnalysisMutation(this.map, "analysis.profile.addResult", () =>
+      this.addResultInternal(result)
+    );
+  }
+
+  private addResultInternal(result: ProfileResult): ProfileResult {
     const existing = this.results.get(result.id);
     if (existing === result) {
       return result;
     }
     if (existing) {
-      this.remove(result.id);
+      this.removeInternal(result.id);
     }
     this.results.set(result.id, result);
     this.emit("add", result);
@@ -847,20 +1102,37 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
     snapshots: ProfileResultSnapshot[],
     options: AnalysisResultLoadOptions = {}
   ): Promise<ProfileResult[]> {
-    const prepared = this.prepareSnapshots(snapshots);
-    if (options.clear) {
-      this.clear();
-    }
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      analysisLeaseRequest("analysis.profile.load", options),
+      () => {
+        const prepared = this.prepareSnapshots(snapshots);
+        if (options.clear) this.clearInternal();
+        return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+      }
+    );
+  }
 
-    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+  /** @internal */
+  preflightSceneLoad(
+    snapshots: ProfileResultSnapshot[],
+    options: AnalysisResultLoadOptions = {}
+  ): readonly PreparedProfileSnapshot[] {
+    const prepared = this.prepareSnapshots(snapshots);
+    if (!options.clear) {
+      assertNoResultConflicts(this.results, prepared.map((item) => item.snapshot.id), "Profile");
+    }
+    return freezePreparedArray(prepared);
   }
 
   /** @internal */
   async prepareSceneLoad(
     snapshots: ProfileResultSnapshot[],
-    options: AnalysisResultLoadOptions = {}
+    options: AnalysisResultLoadOptions = {},
+    preflight?: readonly PreparedProfileSnapshot[]
   ): Promise<PreparedSceneStage> {
-    const staged = this.prepareSnapshots(snapshots).map((item) =>
+    const prepared = preflight ?? this.preflightSceneLoad(snapshots, options);
+    const staged = prepared.map((item) =>
       this.createPreparedResult(item)
     );
     return createEntityResultStage({
@@ -879,6 +1151,7 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
   }
 
   setStyle(id: string, style: ResultSymbolStyle): ProfileResult {
+    return runAnalysisMutation(this.map, "analysis.profile.setStyle", () => {
     const result = this.results.get(id);
     if (!result) {
       throw new Error(`Profile result "${id}" does not exist.`);
@@ -888,9 +1161,16 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
     result.style = this.map.styles.resolveProfileStyle(style);
     result.entities = renderProfileEntities(this.map, result.samples, result.style, result.height);
     return result;
+    });
   }
 
   remove(id: string): boolean {
+    return runAnalysisMutation(this.map, "analysis.profile.remove", () =>
+      this.removeInternal(id)
+    );
+  }
+
+  private removeInternal(id: string): boolean {
     const result = this.results.get(id);
     if (!result) {
       return false;
@@ -904,6 +1184,10 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
   }
 
   clear(): void {
+    runAnalysisMutation(this.map, "analysis.profile.clear", () => this.clearInternal());
+  }
+
+  private clearInternal(): void {
     const removed = [...this.results.values()];
     for (const result of removed) {
       removeEntities(this.map, result.entities);
@@ -919,23 +1203,37 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 
   private prepareSnapshots(snapshots: ProfileResultSnapshot[]): PreparedProfileSnapshot[] {
+    assertSnapshotArray(snapshots, "Profile result snapshots");
     const ids = new Set<string>();
     return snapshots.map((snapshot) => {
+      assertSnapshotRecord(snapshot, "Profile result snapshot");
+      assertNonEmptySnapshotId(snapshot.id, "Profile result snapshot id");
       if (ids.has(snapshot.id)) {
         throw new Error(`Profile result snapshot id "${snapshot.id}" is duplicated.`);
       }
       ids.add(snapshot.id);
-      assertFiniteSnapshotNumber(snapshot.totalDistance, "Profile result totalDistance");
+      assertSnapshotEnum(snapshot.type, ["profile"], "Profile result type");
+      assertSerializablePositions(snapshot.positions, "Profile result positions", 2);
+      assertSnapshotArray(snapshot.samples, "Profile result samples");
+      assertNonNegativeSnapshotNumber(snapshot.totalDistance, "Profile result totalDistance");
       assertFiniteSnapshotNumber(snapshot.minHeight, "Profile result minHeight");
       assertFiniteSnapshotNumber(snapshot.maxHeight, "Profile result maxHeight");
+      if (snapshot.minHeight > snapshot.maxHeight) {
+        throw new Error("Profile result minHeight cannot exceed maxHeight.");
+      }
+      assertSnapshotDate(snapshot.createdAt, "Profile result createdAt");
+      validateProfileSampleRange(snapshot);
+      if (snapshot.samples.length < 2) {
+        throw new Error("Profile result samples must contain at least 2 samples.");
+      }
 
       return {
-        snapshot,
+        snapshot: cloneAndFreezeSnapshot(snapshot),
         positions: deserializePositions(snapshot.positions),
         samples: snapshot.samples.map(deserializeProfileSample),
         createdAt: parseSnapshotDate(snapshot.createdAt, "Profile result createdAt"),
@@ -948,10 +1246,10 @@ export class ProfileManager extends Evented<ProfileManagerEvents> {
   private restoreSnapshot(prepared: PreparedProfileSnapshot): ProfileResult {
     const result = this.createPreparedResult(prepared);
     if (this.results.has(result.id)) {
-      this.remove(result.id);
+      this.removeInternal(result.id);
     }
     attachEntities(this.map, result.entities);
-    return this.addResult(result);
+    return this.addResultInternal(result);
   }
 
   private createPreparedResult(prepared: PreparedProfileSnapshot): ProfileResult {
@@ -1144,7 +1442,54 @@ function validateMeasurePositions(type: MeasureResult["type"], positions: Cartes
   }
 }
 
+function validateMeasureUnitAndMode(snapshot: MeasureResultSnapshot): void {
+  if (snapshot.type === "area") {
+    assertSnapshotEnum(snapshot.unit, ["m2", "km2"], "Area measure unit");
+    assertOptionalSnapshotEnum(
+      snapshot.mode,
+      ["projected", "surface"],
+      "Area measure mode"
+    );
+    return;
+  }
+
+  assertSnapshotEnum(snapshot.unit, ["m", "km"], "Measure unit");
+  if (snapshot.type === "distance") {
+    assertOptionalSnapshotEnum(snapshot.mode, ["space", "surface"], "Distance measure mode");
+  } else if (snapshot.mode !== undefined) {
+    throw new Error("Height measure snapshots cannot define mode.");
+  }
+}
+
+function validateProfileSampleRange(snapshot: ProfileResultSnapshot): void {
+  let previousDistance = -Infinity;
+  for (let index = 0; index < snapshot.samples.length; index += 1) {
+    const sample = snapshot.samples[index];
+    assertSnapshotRecord(sample, `Profile sample[${index}]`);
+    assertSerializablePosition(sample.position, `Profile sample[${index}] position`);
+    assertNonNegativeSnapshotNumber(sample.distance, "Profile sample distance");
+    assertFiniteSnapshotNumber(sample.height, "Profile sample height");
+    if (sample.distance < previousDistance) {
+      throw new Error("Profile sample distances must be monotonically increasing.");
+    }
+    if (sample.distance > snapshot.totalDistance) {
+      throw new Error("Profile sample distance cannot exceed totalDistance.");
+    }
+    if (sample.height < snapshot.minHeight || sample.height > snapshot.maxHeight) {
+      throw new Error("Profile sample height must be within minHeight and maxHeight.");
+    }
+    previousDistance = sample.distance;
+  }
+
+  const finalDistance = snapshot.samples[snapshot.samples.length - 1]?.distance;
+  if (finalDistance !== snapshot.totalDistance) {
+    throw new Error("Profile final sample distance must equal totalDistance.");
+  }
+}
+
 function deserializeProfileSample(sample: ProfileSampleSnapshot) {
+  assertSnapshotRecord(sample, "Profile sample");
+  assertSerializablePosition(sample.position, "Profile sample position");
   assertFiniteSnapshotNumber(sample.distance, "Profile sample distance");
   assertFiniteSnapshotNumber(sample.height, "Profile sample height");
 
@@ -1155,10 +1500,65 @@ function deserializeProfileSample(sample: ProfileSampleSnapshot) {
   };
 }
 
-function assertFiniteSnapshotNumber(value: number, label: string): void {
-  if (!Number.isFinite(value)) {
-    throw new Error(`${label} must be a finite number.`);
+function assertAnalysisSnapshotStructure(snapshot: AnalysisResultsSnapshot): void {
+  assertSnapshotRecord(snapshot, "Analysis results snapshot");
+  assertSnapshotArray(snapshot.measure, "Analysis measure snapshots");
+  assertSnapshotArray(snapshot.visibility, "Analysis visibility snapshots");
+  assertSnapshotArray(snapshot.profile, "Analysis profile snapshots");
+  assertSnapshotArray(snapshot.clipping, "Analysis clipping snapshots");
+  if (snapshot.terrain !== undefined) {
+    assertSnapshotArray(snapshot.terrain, "Analysis terrain snapshots");
   }
+}
+
+function assertNoResultConflicts<T>(
+  results: ReadonlyMap<string, T>,
+  ids: readonly string[],
+  label: string
+): void {
+  for (const id of ids) {
+    if (results.has(id)) {
+      throw new Error(`${label} result "${id}" already exists during transactional merge.`);
+    }
+  }
+}
+
+function assertAnalysisMutation(
+  map: KairosMap,
+  kind: string,
+  ownerToken?: RuntimeLeaseOwnerToken
+): void {
+  assertRuntimeMutationAllowed(map.concurrency, "analysis", kind, ownerToken);
+}
+
+function runAnalysisMutation<T>(
+  map: KairosMap,
+  kind: string,
+  task: () => T,
+  ownerToken?: RuntimeLeaseOwnerToken
+): T {
+  return runWithRuntimeWriteLease(
+    map.concurrency,
+    { kind, resources: ["analysis"], ownerToken },
+    () => task()
+  );
+}
+
+function analysisLeaseRequest(
+  kind: string,
+  options: unknown,
+  operation?: OperationContext
+) {
+  const asyncOptions = options as AsyncOperationOptions | undefined;
+  return {
+    kind,
+    mode: "write" as const,
+    resources: ["analysis"] as const,
+    conflictPolicy: "reject" as const,
+    operationId: operation?.id ?? asyncOptions?.operationId,
+    signal: operation?.signal ?? asyncOptions?.signal,
+    ownerToken: getRuntimeLeaseOwner(options)
+  };
 }
 
 function renderProfileEntities(

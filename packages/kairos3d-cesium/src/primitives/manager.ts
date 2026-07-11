@@ -3,6 +3,11 @@ import {
   Material,
   PolylineCollection
 } from "cesium";
+import {
+  getRuntimeLeaseOwner,
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
 import type { KairosMap } from "../core";
 import {
   deserializePositions,
@@ -34,10 +39,24 @@ export class PrimitiveOverlayManager {
   private readonly overlays = new Map<string, PrimitiveOverlay>();
   private polylineCollection?: PolylineCollection;
   private readonly polylineCollections = new Set<PolylineCollection>();
+  private readonly scenePreflights = new WeakMap<
+    object,
+    { clear: boolean; prepared: PreparedPrimitivePolylineSnapshot[] }
+  >();
 
   constructor(private readonly map: KairosMap) {}
 
   addPolyline(options: PrimitivePolylineOptions): PrimitivePolylineOverlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "primitives.add-polyline", resources: ["primitives"] },
+      () => this.addPolylineInternal(options)
+    );
+  }
+
+  private addPolylineInternal(
+    options: PrimitivePolylineOptions
+  ): PrimitivePolylineOverlay {
     validatePositions(options.positions);
     const width = normalizePolylineWidth(options.width);
     const id = options.id ?? createPrimitiveOverlayId("polyline");
@@ -83,6 +102,14 @@ export class PrimitiveOverlayManager {
   }
 
   setShow(id: string, show: boolean): PrimitiveOverlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "primitives.set-show", resources: ["primitives"] },
+      () => this.setShowInternal(id, show)
+    );
+  }
+
+  private setShowInternal(id: string, show: boolean): PrimitiveOverlay {
     const overlay = this.requireOverlay(id);
     overlay.show = show;
     if (overlay.type === "polyline") {
@@ -92,6 +119,14 @@ export class PrimitiveOverlayManager {
   }
 
   remove(id: string): boolean {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "primitives.remove", resources: ["primitives"] },
+      () => this.removeInternal(id)
+    );
+  }
+
+  private removeInternal(id: string): boolean {
     const overlay = this.overlays.get(id);
     if (!overlay) {
       return false;
@@ -106,6 +141,23 @@ export class PrimitiveOverlayManager {
   }
 
   clear(): void {
+    runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "primitives.clear", resources: ["primitives"] },
+      () => this.clearInternal()
+    );
+  }
+
+  /** @internal */
+  clearWithRuntimeLease(ownerToken: RuntimeLeaseOwnerToken): void {
+    runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "primitives.clear", resources: ["primitives"], ownerToken },
+      () => this.clearInternal()
+    );
+  }
+
+  private clearInternal(): void {
     this.overlays.clear();
     for (const collection of [...this.polylineCollections]) {
       this.map.viewer.scene.primitives.remove(collection);
@@ -125,18 +177,33 @@ export class PrimitiveOverlayManager {
     snapshots: PrimitiveOverlaySnapshot[],
     options: { clear?: boolean } = {}
   ): PrimitiveOverlay[] {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      {
+        kind: "primitives.load",
+        resources: ["primitives"],
+        ownerToken: getRuntimeLeaseOwner(options)
+      },
+      () => this.loadInternal(snapshots, options)
+    );
+  }
+
+  private loadInternal(
+    snapshots: PrimitiveOverlaySnapshot[],
+    options: { clear?: boolean }
+  ): PrimitiveOverlay[] {
     const prepared = preparePrimitiveSnapshots(snapshots);
     if (options.clear) {
-      this.clear();
+      this.clearInternal();
     }
     return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
   }
 
   /** @internal */
-  async prepareSceneLoad(
+  preflightSceneLoad(
     snapshots: PrimitiveOverlaySnapshot[],
     options: { clear?: boolean } = {}
-  ): Promise<PreparedSceneStage> {
+  ): object {
     const prepared = preparePrimitiveSnapshots(snapshots);
     if (!options.clear) {
       for (const item of prepared) {
@@ -147,11 +214,33 @@ export class PrimitiveOverlayManager {
         }
       }
     }
+    const token = Object.freeze({ phase: "primitives" });
+    this.scenePreflights.set(token, {
+      clear: options.clear ?? false,
+      prepared
+    });
+    return token;
+  }
+
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: PrimitiveOverlaySnapshot[],
+    options: { clear?: boolean } = {},
+    preflightToken?: object
+  ): Promise<PreparedSceneStage> {
+    const clear = options.clear ?? false;
+    const token = preflightToken ?? this.preflightSceneLoad(snapshots, options);
+    const preflight = this.scenePreflights.get(token);
+    if (!preflight || preflight.clear !== clear) {
+      throw new Error("Primitive scene preflight token is invalid or stale.");
+    }
+    this.scenePreflights.delete(token);
+    const prepared = preflight.prepared;
 
     const stagedCollection = new PolylineCollection();
     const staged = prepared.map((item) => createPreparedPrimitiveOverlay(stagedCollection, item));
-    const previous = options.clear ? this.list() : [];
-    const previousCollections = options.clear ? [...this.polylineCollections] : [];
+    const previous = clear ? this.list() : [];
+    const previousCollections = clear ? [...this.polylineCollections] : [];
     let stagedAttached = false;
     let mapsSwapped = false;
     let previousDetached = false;
@@ -160,7 +249,7 @@ export class PrimitiveOverlayManager {
     return {
       phase: "primitives",
       commit: () => {
-        if (options.clear) {
+        if (clear) {
           for (const collection of previousCollections) {
             detachPrimitiveCollection(this.map, collection);
           }
@@ -172,7 +261,7 @@ export class PrimitiveOverlayManager {
           this.polylineCollection = stagedCollection;
           stagedAttached = true;
         }
-        if (options.clear) {
+        if (clear) {
           this.overlays.clear();
           for (const collection of previousCollections) {
             this.polylineCollections.delete(collection);
@@ -194,7 +283,7 @@ export class PrimitiveOverlayManager {
             this.overlays.delete(overlay.id);
           }
         }
-        if (options.clear) {
+        if (clear) {
           for (const overlay of previous) {
             this.overlays.set(overlay.id, overlay);
           }
@@ -212,7 +301,7 @@ export class PrimitiveOverlayManager {
           return;
         }
         finalized = true;
-        if (options.clear && previousDetached) {
+        if (clear && previousDetached) {
           for (const collection of previousCollections) {
             if (!collection.isDestroyed()) {
               collection.destroy();
@@ -236,23 +325,15 @@ export class PrimitiveOverlayManager {
   }
 
   destroy(): void {
-    this.overlays.clear();
-    for (const collection of [...this.polylineCollections]) {
-      this.map.viewer.scene.primitives.remove(collection);
-      if (!collection.isDestroyed()) {
-        collection.destroy();
-      }
-    }
-    this.polylineCollections.clear();
-    this.polylineCollection = undefined;
+    this.clearInternal();
   }
 
   private restoreSnapshot(snapshot: PreparedPrimitivePolylineSnapshot): PrimitiveOverlay {
     if (this.overlays.has(snapshot.options.id)) {
-      this.remove(snapshot.options.id);
+      this.removeInternal(snapshot.options.id);
     }
 
-    const overlay = this.addPolyline(snapshot.options);
+    const overlay = this.addPolylineInternal(snapshot.options);
     overlay.createdAt = snapshot.createdAt;
     return overlay;
   }
@@ -378,11 +459,11 @@ function preparePrimitiveSnapshots(
       options: {
         id: snapshot.id,
         positions,
-        color: snapshot.color,
+        color: serializeColor(snapshot.color),
         width,
         show: snapshot.show,
         loop: snapshot.loop,
-        metadata: snapshot.metadata
+        metadata: snapshot.metadata ? { ...snapshot.metadata } : undefined
       },
       createdAt: parseSnapshotDate(snapshot.createdAt, "Primitive overlay createdAt")
     };

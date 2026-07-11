@@ -1,5 +1,12 @@
 import type { KairosMap } from "../core";
 import { Evented } from "../core";
+import {
+  assertRuntimeMutationAllowed,
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
 import { runOrReuseOperation } from "../operations/manager";
 import type { PreparedSceneStage } from "../scene/transaction";
 import { registerDefaultLayerFactories } from "./defaults";
@@ -13,6 +20,17 @@ export interface LayerManagerEvents {
   update: LayerState;
   move: LayerState;
   load: LayerAdapter[];
+}
+
+/** @internal Detached adapter set validated for one transactional layer load. */
+export interface LayerTransactionPreflight {
+  readonly owner: LayerManager;
+  readonly clear: boolean;
+  readonly oldEntries: Array<[string, LayerAdapter]>;
+  readonly oldOrderOverrides: Array<[string, number]>;
+  readonly oldOpacityOverrides: Array<[string, number]>;
+  readonly nextLayers: LayerAdapter[];
+  consumed: boolean;
 }
 
 export class LayerManager extends Evented<LayerManagerEvents> {
@@ -29,6 +47,19 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   }
 
   async add(config: LayerConfig): Promise<LayerAdapter> {
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      {
+        kind: "layers.add",
+        mode: "write",
+        resources: ["layers"],
+        conflictPolicy: "reject"
+      },
+      () => this.addInternal(config)
+    );
+  }
+
+  private async addInternal(config: LayerConfig): Promise<LayerAdapter> {
     const layer = await this.registry.create(config);
     if (this.layers.has(layer.id)) {
       layer.destroy();
@@ -40,6 +71,10 @@ export class LayerManager extends Evented<LayerManagerEvents> {
     } catch (error) {
       layer.destroy();
       throw error;
+    }
+    if (this.map.isDestroyed()) {
+      layer.destroy();
+      throw new Error(`Layer "${layer.id}" finished loading after the map was destroyed.`);
     }
     this.layers.set(layer.id, layer);
     if (!layer.getState) {
@@ -76,6 +111,10 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   }
 
   setShow(id: string, show: boolean): LayerState {
+    return this.runMutation("layers.setShow", () => this.setShowInternal(id, show));
+  }
+
+  private setShowInternal(id: string, show: boolean): LayerState {
     const layer = this.requireLayer(id);
     layer.show = show;
     const state = this.getLayerState(layer);
@@ -89,10 +128,13 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   }
 
   setGroupShow(group: string, show: boolean): LayerState[] {
-    return this.listByGroup(group).map((layer) => this.setShow(layer.id, show));
+    return this.runMutation("layers.setGroupShow", () =>
+      this.listByGroup(group).map((layer) => this.setShowInternal(layer.id, show))
+    );
   }
 
   setOpacity(id: string, alpha: number): LayerState {
+    return this.runMutation("layers.setOpacity", () => {
     const opacity = normalizeOpacity(alpha);
     const layer = this.requireLayer(id);
     layer.setOpacity?.(opacity);
@@ -100,9 +142,11 @@ export class LayerManager extends Evented<LayerManagerEvents> {
     const state = this.getLayerState(layer);
     this.emit("update", state);
     return state;
+    });
   }
 
   move(id: string, order: number): LayerState {
+    return this.runMutation("layers.move", () => {
     const nextOrder = normalizeOrder(order);
     const layer = this.requireLayer(id);
     layer.setOrder?.(nextOrder);
@@ -110,18 +154,30 @@ export class LayerManager extends Evented<LayerManagerEvents> {
     const state = this.getLayerState(layer);
     this.emit("move", state);
     return state;
+    });
   }
 
   async flyTo(id: string): Promise<boolean> {
-    const layer = this.requireLayer(id);
-    if (layer.flyTo) {
-      return layer.flyTo();
-    }
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      {
+        kind: "layers.flyTo",
+        mode: "write",
+        resources: ["camera"],
+        conflictPolicy: "reject"
+      },
+      async () => {
+        const layer = this.requireLayer(id);
+        if (layer.flyTo) {
+          return layer.flyTo();
+        }
 
-    const target = this.getRuntimeObjects(id)[0] as Parameters<
-      typeof this.map.viewer.flyTo
-    >[0] | undefined;
-    return target ? this.map.viewer.flyTo(target) : false;
+        const target = this.getRuntimeObjects(id)[0] as Parameters<
+          typeof this.map.viewer.flyTo
+        >[0] | undefined;
+        return target ? this.map.viewer.flyTo(target) : false;
+      }
+    );
   }
 
   toJSON(): LayerConfig[] {
@@ -136,51 +192,69 @@ export class LayerManager extends Evented<LayerManagerEvents> {
       { kind: "layers.load", label: "Load layers" },
       options,
       async (context) => {
-        context.throwIfAborted();
-        if (options.clear) {
-          this.clear();
-        }
+        return runWithRuntimeLease(
+          this.map.concurrency,
+          {
+            kind: "layers.load",
+            mode: "write",
+            resources: ["layers"],
+            operationId: context.id,
+            signal: context.signal,
+            conflictPolicy: "reject",
+            ownerToken: getRuntimeLeaseOwner(options)
+          },
+          async () => {
+            context.throwIfAborted();
+            if (options.clear) {
+              this.clearInternal();
+            }
 
-        const layers: LayerAdapter[] = [];
-        try {
-          if (configs.length === 0) {
-            context.reportProgress(1, "layers");
-            context.throwIfAborted();
-          }
-          for (let index = 0; index < configs.length; index += 1) {
-            context.throwIfAborted();
-            const config = configs[index];
-            const nextConfig = options.flyTo === undefined
-              ? config
-              : { ...config, flyTo: options.flyTo };
-            const layer = await this.add(nextConfig);
-            layers.push(layer);
-            context.throwIfAborted();
-            context.reportProgress((index + 1) / configs.length, "layers");
-            context.throwIfAborted();
-          }
+            const layers: LayerAdapter[] = [];
+            try {
+              if (configs.length === 0) {
+                context.reportProgress(1, "layers");
+                context.throwIfAborted();
+              }
+              for (let index = 0; index < configs.length; index += 1) {
+                context.throwIfAborted();
+                const config = configs[index];
+                const nextConfig = options.flyTo === undefined
+                  ? config
+                  : { ...config, flyTo: options.flyTo };
+                const layer = await this.addInternal(nextConfig);
+                layers.push(layer);
+                context.throwIfAborted();
+                context.reportProgress((index + 1) / configs.length, "layers");
+                context.throwIfAborted();
+              }
 
-          context.throwIfAborted();
-          this.emit("load", layers);
-          context.throwIfAborted();
-          return layers;
-        } catch (error) {
-          for (const layer of [...layers].reverse()) {
-            if (this.layers.get(layer.id) === layer) {
-              this.remove(layer.id);
+              context.throwIfAborted();
+              this.emit("load", layers);
+              context.throwIfAborted();
+              return layers;
+            } catch (error) {
+              for (const layer of [...layers].reverse()) {
+                if (this.layers.get(layer.id) === layer) {
+                  this.removeInternal(layer.id);
+                }
+              }
+              throw error;
             }
           }
-          throw error;
-        }
+        );
       }
     );
   }
 
-  /** @internal Used by SceneStateManager to stage a layer replacement without nested operations. */
-  async prepareTransaction(
+  /** @internal Validates transactional adapters without creating Cesium runtime. */
+  async preflightTransaction(
     configs: LayerConfig[],
     options: { clear?: boolean; flyTo?: boolean } = {}
-  ): Promise<PreparedSceneStage> {
+  ): Promise<LayerTransactionPreflight> {
+    this.assertMutationAllowed(
+      "scene.layers.preflight",
+      getRuntimeLeaseOwner(options)
+    );
     const clear = options.clear ?? false;
     const oldEntries = [...this.layers.entries()];
     const oldOrderOverrides = [...this.orderOverrides.entries()];
@@ -206,6 +280,49 @@ export class LayerManager extends Evented<LayerManagerEvents> {
         );
       }
 
+      for (const layer of nextLayers) {
+        await layer.transaction!.preflight?.(this.map);
+      }
+    } catch (error) {
+      destroyLayersBestEffort(nextLayers);
+      throw error;
+    }
+
+    return {
+      owner: this,
+      clear,
+      oldEntries,
+      oldOrderOverrides,
+      oldOpacityOverrides,
+      nextLayers,
+      consumed: false
+    };
+  }
+
+  /** @internal Used by SceneStateManager to stage a layer replacement without nested operations. */
+  async prepareTransaction(
+    configs: LayerConfig[],
+    options: { clear?: boolean; flyTo?: boolean } = {},
+    preflight?: LayerTransactionPreflight
+  ): Promise<PreparedSceneStage> {
+    this.assertMutationAllowed(
+      "scene.layers.prepare",
+      getRuntimeLeaseOwner(options)
+    );
+    const validated = preflight ?? await this.preflightTransaction(configs, options);
+    const clear = options.clear ?? false;
+    if (validated.owner !== this || validated.clear !== clear || validated.consumed) {
+      throw new Error("Layer transaction preflight is invalid or has already been consumed.");
+    }
+    validated.consumed = true;
+    const {
+      oldEntries,
+      oldOrderOverrides,
+      oldOpacityOverrides,
+      nextLayers
+    } = validated;
+
+    try {
       for (const layer of nextLayers) {
         await layer.transaction!.prepare(this.map);
       }
@@ -347,6 +464,10 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   }
 
   remove(id: string): boolean {
+    return this.runMutation("layers.remove", () => this.removeInternal(id));
+  }
+
+  private removeInternal(id: string): boolean {
     const layer = this.layers.get(id);
     if (!layer) {
       return false;
@@ -361,6 +482,10 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   }
 
   clear(): void {
+    this.runMutation("layers.clear", () => this.clearInternal());
+  }
+
+  private clearInternal(): void {
     for (const layer of [...this.layers.values()].reverse()) {
       layer.destroy();
     }
@@ -371,7 +496,7 @@ export class LayerManager extends Evented<LayerManagerEvents> {
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 
@@ -423,6 +548,26 @@ export class LayerManager extends Evented<LayerManagerEvents> {
     ) {
       throw new Error("Layers changed while the transaction was being prepared.");
     }
+  }
+
+  private assertMutationAllowed(
+    kind: string,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): void {
+    assertRuntimeMutationAllowed(
+      this.map.concurrency,
+      "layers",
+      kind,
+      ownerToken
+    );
+  }
+
+  private runMutation<T>(kind: string, task: () => T): T {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind, resources: ["layers"] },
+      () => task()
+    );
   }
 }
 

@@ -1,5 +1,10 @@
 import { Cartesian3, PolylineCollection } from "cesium";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import {
+  acquireRuntimeLease,
+  withRuntimeLeaseOwner
+} from "../concurrency/lease";
 import type { KairosMap } from "../core";
 import { PrimitiveOverlayManager } from "./manager";
 import type { PrimitivePolylineSnapshot } from "./types";
@@ -17,6 +22,7 @@ function createMapMock() {
   return {
     collections,
     map: {
+      concurrency: new RuntimeConcurrencyManager(),
       viewer: {
         scene: {
           primitives: {
@@ -47,6 +53,31 @@ function createPositions(): Cartesian3[] {
 }
 
 describe("PrimitiveOverlayManager", () => {
+  it("rejects ordinary mutations while primitives are leased", async () => {
+    const { map } = createMapMock();
+    const manager = new PrimitiveOverlayManager(map);
+    const lease = await acquireRuntimeLease(map.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"]
+    });
+
+    expect(() =>
+      manager.addPolyline({ id: "blocked", positions: createPositions() })
+    ).toThrow("Runtime resource");
+    expect(() => manager.load([], { clear: true })).toThrow("Runtime resource");
+    expect(
+      manager.load(
+        [],
+        withRuntimeLeaseOwner({ clear: true }, lease.ownerToken)
+      )
+    ).toEqual([]);
+    expect(() => manager.clear()).toThrow("Runtime resource");
+    expect(() => manager.clearWithRuntimeLease(lease.ownerToken)).not.toThrow();
+
+    lease.release();
+  });
+
   it("adds, lists, and toggles primitive polyline overlays", () => {
     const { map, collections } = createMapMock();
     const manager = new PrimitiveOverlayManager(map);
@@ -226,5 +257,35 @@ describe("PrimitiveOverlayManager", () => {
     expect(manager.get("old")?.collection).toBe(originalCollection);
     expect(collections).toEqual([originalCollection]);
     await stage.dispose();
+  });
+
+  it("consumes the exact primitive preflight token without reparsing input", async () => {
+    const { map } = createMapMock();
+    const manager = new PrimitiveOverlayManager(map);
+    const snapshot: PrimitivePolylineSnapshot = {
+      id: "token-line",
+      type: "polyline",
+      positions: [
+        { longitude: 114, latitude: 22, height: 10 },
+        { longitude: 114.01, latitude: 22.01, height: 20 }
+      ],
+      color: { red: 0, green: 1, blue: 1, alpha: 1 },
+      width: 3,
+      show: true,
+      loop: false,
+      createdAt: "2026-07-10T00:00:00.000Z"
+    };
+    const token = manager.preflightSceneLoad([snapshot], { clear: true });
+    snapshot.positions.length = 0;
+
+    const stage = await manager.prepareSceneLoad(
+      [snapshot],
+      { clear: true },
+      token
+    );
+    await stage.dispose();
+    await expect(
+      manager.prepareSceneLoad([snapshot], { clear: true }, token)
+    ).rejects.toThrow("invalid or stale");
   });
 });

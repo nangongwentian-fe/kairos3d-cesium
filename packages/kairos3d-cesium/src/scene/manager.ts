@@ -1,6 +1,17 @@
 import type { KairosMap } from "../core";
 import { Evented } from "../core/events";
 import {
+  acquireRuntimeLease,
+  assertRuntimeMutationAllowed,
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  withRuntimeLeaseOwner,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
+import type { AnalysisScenePreflightToken } from "../analysis/manager";
+import type { LayerTransactionPreflight } from "../layers/manager";
+import {
   isOperationCanceledError,
   OperationCanceledError,
   type OperationErrorInfo
@@ -14,7 +25,11 @@ import {
 import { cameraViewFromCartographic, cameraViewToCartesian, cloneCameraView } from "./camera";
 import { SceneTransactionError } from "./errors";
 import { parseSceneSnapshot } from "./parser";
-import type { PreparedSceneStage } from "./transaction";
+import {
+  prepareSceneStagePlans,
+  type PreparedSceneStage,
+  type SceneStagePlan
+} from "./transaction";
 import type {
   CameraBookmark,
   CameraBookmarkInput,
@@ -41,7 +56,7 @@ const emptyResultsSnapshot = (): RuntimeResultsSnapshot => ({
 });
 
 export class SceneStateManager extends Evented<SceneStateManagerEvents> {
-  readonly bookmarks = new CameraBookmarkManager();
+  readonly bookmarks: CameraBookmarkManager;
 
   private transactionState?: SceneTransactionState;
   private transactionReserved = false;
@@ -54,6 +69,7 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
 
   constructor(private readonly map: KairosMap) {
     super();
+    this.bookmarks = new CameraBookmarkManager(map);
   }
 
   captureCamera(): CameraView {
@@ -67,6 +83,22 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
   }
 
   flyToCamera(view: CameraView, options: CameraFlightOptions = {}): Promise<boolean> {
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      {
+        kind: "camera.flyTo",
+        mode: "write",
+        resources: ["camera"],
+        conflictPolicy: "reject"
+      },
+      () => this.flyToCameraInternal(view, options)
+    );
+  }
+
+  private flyToCameraInternal(
+    view: CameraView,
+    options: CameraFlightOptions = {}
+  ): Promise<boolean> {
     return new Promise((resolve) => {
       this.map.viewer.camera.flyTo({
         ...options,
@@ -87,7 +119,13 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
   }
 
   whenIdle(): Promise<void> {
-    return this.transactionReserved ? this.idlePromise : Promise.resolve();
+    const transactionIdle = this.transactionReserved
+      ? this.idlePromise
+      : Promise.resolve();
+    return Promise.all([
+      transactionIdle,
+      this.map.concurrency.whenIdle({ kind: "scene.load" })
+    ]).then(() => undefined);
   }
 
   toJSON(options: SceneStateSnapshotOptions = {}): SceneSnapshot {
@@ -131,6 +169,15 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     }
 
     this.reserveTransaction();
+    const leaseController = new AbortController();
+    const leasePromise = acquireRuntimeLease(this.map.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"],
+      operationId: options.operationId,
+      signal: leaseController.signal,
+      conflictPolicy: options.conflictPolicy ?? "wait"
+    });
     let loading: Promise<void>;
     try {
       loading = runOrReuseOperation(
@@ -138,22 +185,37 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
         { kind: "scene.load", label: "Load scene" },
         options,
         async (context) => {
-          this.transactionTaskStarted = true;
-          const mode = options.mode ?? "transactional";
-          if (mode === "progressive") {
-            await this.loadProgressive(snapshot, options, context);
-          } else {
-            await this.loadTransactional(snapshot, options, context);
+          const cancelLeaseWait = () => leaseController.abort(context.signal.reason);
+          context.signal.addEventListener("abort", cancelLeaseWait, { once: true });
+          let lease: Awaited<typeof leasePromise> | undefined;
+          try {
+            if (context.signal.aborted) cancelLeaseWait();
+            lease = await leasePromise;
+            this.transactionTaskStarted = true;
+            const leasedOptions = withRuntimeLeaseOwner(options, lease.ownerToken);
+            const mode = options.mode ?? "transactional";
+            if (mode === "progressive") {
+              await this.loadProgressive(snapshot, leasedOptions, context);
+            } else {
+              await this.loadTransactional(snapshot, leasedOptions, context);
+            }
+          } finally {
+            context.signal.removeEventListener("abort", cancelLeaseWait);
+            lease?.release();
           }
         }
       );
     } catch (error) {
+      leaseController.abort(error);
+      void leasePromise.then((lease) => lease.release(), () => undefined);
       this.releaseTransaction();
       return Promise.reject(error);
     }
 
     void loading.finally(() => {
       if (!this.transactionTaskStarted && this.transactionReserved) {
+        leaseController.abort();
+        void leasePromise.then((lease) => lease.release(), () => undefined);
         this.releaseTransaction();
       }
     }).catch(() => undefined);
@@ -166,6 +228,7 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     context: OperationContext
   ): Promise<void> {
     this.beginTransaction(context.id, "transactional", "preparing", "validate");
+    const ownerToken = requireRuntimeLeaseOwner(options);
     const cameraBaseline = this.captureCamera();
     const prepared: PreparedSceneStage[] = [];
     const attempted: PreparedSceneStage[] = [];
@@ -177,30 +240,52 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
       context.reportProgress(0.02, "validate");
       context.throwIfAborted();
 
-      const factories = this.createStageFactories(
+      const plans = this.createStagePlans(
         snapshot,
         options,
         context,
         cameraBaseline
       );
-      for (let index = 0; index < factories.length; index += 1) {
-        const factory = factories[index];
-        currentStage = factory.phase;
-        this.updateTransaction({ status: "preparing", stage: currentStage });
-        const stage = await factory.prepare();
-        prepared.push(stage);
-        this.activeStages = [...prepared];
-        context.reportProgress(
-          0.05 + ((index + 1) / Math.max(factories.length, 1)) * 0.4,
-          `prepare.${currentStage}`
-        );
-        context.throwIfAborted();
-        this.assertActive();
-      }
+      const planCount = Math.max(plans.length, 1);
+      const instrumentedPlans = plans.map((plan, index): SceneStagePlan => ({
+        phase: plan.phase,
+        preflight: plan.preflight
+          ? async () => {
+              currentStage = plan.phase;
+              this.updateTransaction({ status: "preparing", stage: `preflight.${plan.phase}` });
+              context.throwIfAborted();
+              this.assertActive();
+              const result = await plan.preflight!();
+              context.reportProgress(
+                0.02 + ((index + 1) / planCount) * 0.08,
+                `preflight.${plan.phase}`
+              );
+              context.throwIfAborted();
+              this.assertActive();
+              return result;
+            }
+          : undefined,
+        prepare: async (preflight) => {
+          currentStage = plan.phase;
+          this.updateTransaction({ status: "preparing", stage: plan.phase });
+          context.throwIfAborted();
+          this.assertActive();
+          const stage = await plan.prepare(preflight);
+          context.reportProgress(
+            0.1 + ((index + 1) / planCount) * 0.35,
+            `prepare.${plan.phase}`
+          );
+          return stage;
+        }
+      }));
+      prepared.push(...await prepareSceneStagePlans(instrumentedPlans));
+      this.activeStages = [...prepared];
+      context.throwIfAborted();
+      this.assertActive();
 
       commitStarted = true;
-      this.map.tools.stop();
-      this.map.selection.clear();
+      this.map.tools.stopWithRuntimeLease(ownerToken);
+      this.map.selection.clearWithRuntimeLease(ownerToken);
       this.updateTransaction({ status: "committing", stage: prepared[0]?.phase });
 
       for (let index = 0; index < prepared.length; index += 1) {
@@ -217,7 +302,17 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
         this.assertActive();
       }
 
-      await this.finalizeStagesBestEffort(prepared);
+      this.updateTransaction({
+        stage: "finalize",
+        cleanupStatus: "running",
+        cleanupErrors: undefined
+      });
+      const cleanupErrors = await this.finalizeStagesBestEffort(prepared);
+      this.updateTransaction({
+        stage: "finalize",
+        cleanupStatus: cleanupErrors.length === 0 ? "succeeded" : "failed",
+        cleanupErrors: cleanupErrors.length > 0 ? cleanupErrors : undefined
+      });
       for (const stage of prepared) {
         try {
           stage.publish();
@@ -271,23 +366,44 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     }
   }
 
-  private createStageFactories(
+  private createStagePlans(
     snapshot: SceneSnapshot,
     options: SceneStateLoadOptions,
     context: OperationContext,
     cameraBaseline: CameraView
-  ): SceneStageFactory[] {
-    const factories: SceneStageFactory[] = [
+  ): SceneStagePlan[] {
+    const ownerToken = requireRuntimeLeaseOwner(options);
+    let layerPreflight: LayerTransactionPreflight | undefined;
+    const plans: SceneStagePlan[] = [
       {
         phase: "layers",
-        prepare: () => this.map.layers.prepareTransaction(snapshot.layers, {
-          clear: options.clearLayers ?? true,
-          flyTo: false
-        })
+        preflight: async () => {
+          layerPreflight = await this.map.layers.preflightTransaction(
+            snapshot.layers,
+            withRuntimeLeaseOwner(
+              { clear: options.clearLayers ?? true, flyTo: false },
+              ownerToken
+            )
+          );
+          return {
+            phase: "layers",
+            value: layerPreflight
+          };
+        },
+        prepare: (preflight) => this.map.layers.prepareTransaction(
+          snapshot.layers,
+          withRuntimeLeaseOwner(
+            { clear: options.clearLayers ?? true, flyTo: false },
+            ownerToken
+          ),
+          preflight?.value as LayerTransactionPreflight | undefined
+        )
       },
       {
         phase: "bookmarks",
-        prepare: () => Promise.resolve(this.createBookmarkStage(snapshot.bookmarks))
+        prepare: () => Promise.resolve(
+          this.createBookmarkStage(snapshot.bookmarks, ownerToken)
+        )
       }
     ];
 
@@ -297,14 +413,41 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
       const results = restoreResults && snapshot.results
         ? snapshot.results
         : emptyResultsSnapshot();
-      factories.push(
+      plans.push(
         {
           phase: "draw",
-          prepare: () => this.map.draw.prepareSceneLoad(results.draw, { clear: clearResults })
+          preflight: () => ({
+            phase: "draw",
+            value: this.map.draw.preflightSceneLoad(
+              results.draw,
+              withRuntimeLeaseOwner({ clear: clearResults }, ownerToken)
+            )
+          }),
+          prepare: (preflight) => this.map.draw.prepareSceneLoad(
+            results.draw,
+            withRuntimeLeaseOwner({ clear: clearResults }, ownerToken),
+            preflight?.value as object | undefined
+          )
         },
         {
           phase: "analysis",
-          prepare: () => this.map.analysis.prepareSceneLoad(
+          preflight: () => {
+            if (!layerPreflight) {
+              throw new Error("Layer Scene preflight must run before analysis preflight.");
+            }
+            return this.map.analysis.preflightSceneLoad(
+              {
+                measure: results.measure,
+                visibility: results.visibility,
+                profile: results.profile,
+                clipping: results.clipping,
+                terrain: results.terrain ?? []
+              },
+              withRuntimeLeaseOwner({ clear: clearResults }, ownerToken),
+              { availableLayerIds: collectAvailableLayerIds(layerPreflight) }
+            );
+          },
+          prepare: (preflight) => this.map.analysis.prepareSceneLoad(
             {
               measure: results.measure,
               visibility: results.visibility,
@@ -312,7 +455,8 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
               clipping: results.clipping,
               terrain: results.terrain ?? []
             },
-            { clear: clearResults }
+            withRuntimeLeaseOwner({ clear: clearResults }, ownerToken),
+            preflight?.value as AnalysisScenePreflightToken | undefined
           )
         }
       );
@@ -321,11 +465,19 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     const restorePrimitives = options.restorePrimitives ?? false;
     const clearPrimitives = options.clearPrimitives ?? restorePrimitives;
     if (clearPrimitives || restorePrimitives) {
-      factories.push({
+      plans.push({
         phase: "primitives",
-        prepare: () => this.map.primitives.prepareSceneLoad(
+        preflight: () => ({
+          phase: "primitives",
+          value: this.map.primitives.preflightSceneLoad(
+            restorePrimitives ? snapshot.primitives ?? [] : [],
+            withRuntimeLeaseOwner({ clear: clearPrimitives }, ownerToken)
+          )
+        }),
+        prepare: (preflight) => this.map.primitives.prepareSceneLoad(
           restorePrimitives ? snapshot.primitives ?? [] : [],
-          { clear: clearPrimitives }
+          withRuntimeLeaseOwner({ clear: clearPrimitives }, ownerToken),
+          preflight?.value as object | undefined
         )
       });
     }
@@ -333,11 +485,19 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     const restoreOverlays = options.restoreOverlays ?? false;
     const clearOverlays = options.clearOverlays ?? restoreOverlays;
     if (clearOverlays || restoreOverlays) {
-      factories.push({
+      plans.push({
         phase: "overlays",
-        prepare: () => this.map.overlays.prepareSceneLoad(
+        preflight: () => ({
+          phase: "overlays",
+          value: this.map.overlays.preflightSceneLoad(
+            restoreOverlays ? snapshot.overlays ?? [] : [],
+            withRuntimeLeaseOwner({ clear: clearOverlays }, ownerToken)
+          )
+        }),
+        prepare: (preflight) => this.map.overlays.prepareSceneLoad(
           restoreOverlays ? snapshot.overlays ?? [] : [],
-          { clear: clearOverlays }
+          withRuntimeLeaseOwner({ clear: clearOverlays }, ownerToken),
+          preflight?.value as object | undefined
         )
       });
     }
@@ -345,39 +505,55 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     const restoreEffects = options.restoreEffects ?? false;
     const clearEffects = options.clearEffects ?? restoreEffects;
     if (clearEffects || restoreEffects) {
-      factories.push({
+      plans.push({
         phase: "effects",
-        prepare: () => this.map.effects.prepareSceneLoad(
+        preflight: () => ({
+          phase: "effects",
+          value: this.map.effects.preflightSceneLoad(
+            restoreEffects ? snapshot.effects ?? [] : [],
+            withRuntimeLeaseOwner({ clear: clearEffects }, ownerToken)
+          )
+        }),
+        prepare: (preflight) => this.map.effects.prepareSceneLoad(
           restoreEffects ? snapshot.effects ?? [] : [],
-          { clear: clearEffects }
+          withRuntimeLeaseOwner({ clear: clearEffects }, ownerToken),
+          preflight?.value as object | undefined
         )
       });
     }
 
     if ((options.flyToCamera ?? true) && snapshot.camera) {
-      factories.push({
+      plans.push({
         phase: "camera",
         prepare: () => Promise.resolve(
-          this.createCameraStage(snapshot.camera!, cameraBaseline, context)
+          this.createCameraStage(
+            snapshot.camera!,
+            cameraBaseline,
+            context,
+            ownerToken
+          )
         )
       });
     }
-    return factories;
+    return plans;
   }
 
-  private createBookmarkStage(bookmarks: CameraBookmark[]): PreparedSceneStage {
+  private createBookmarkStage(
+    bookmarks: CameraBookmark[],
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): PreparedSceneStage {
     const previous = this.bookmarks.list();
     const next = bookmarks.map(cloneBookmark);
     let committed = false;
     return {
       phase: "bookmarks",
       commit: () => {
-        this.bookmarks.replace(next);
+        this.bookmarks.replaceWithOwner(next, ownerToken);
         committed = true;
       },
       rollback: () => {
         if (committed) {
-          this.bookmarks.replace(previous);
+          this.bookmarks.replaceWithOwner(previous, ownerToken);
           committed = false;
         }
       },
@@ -390,7 +566,8 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
   private createCameraStage(
     view: CameraView,
     baseline: CameraView,
-    context: OperationContext
+    context: OperationContext,
+    ownerToken: RuntimeLeaseOwnerToken
   ): PreparedSceneStage {
     const previous = cloneCameraView(baseline);
     let commitStarted = false;
@@ -399,7 +576,7 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
       commit: async () => {
         commitStarted = true;
         this.map.viewer.camera.cancelFlight();
-        const completed = await this.flyToCameraWithOperation(view, context);
+        const completed = await this.flyToCameraWithOperation(view, context, ownerToken);
         if (!completed) {
           throw new Error("Camera flight was canceled before completion.");
         }
@@ -464,15 +641,22 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     return errors;
   }
 
-  private async finalizeStagesBestEffort(stages: PreparedSceneStage[]): Promise<void> {
+  private async finalizeStagesBestEffort(
+    stages: PreparedSceneStage[]
+  ): Promise<OperationErrorInfo[]> {
+    const errors: OperationErrorInfo[] = [];
     for (const stage of stages) {
+      this.updateTransaction({ stage: `finalize.${stage.phase}` });
       try {
         await stage.finalize();
-      } catch {
+      } catch (error) {
         // Commit is already complete. Finalization only retires old runtime and
         // must not turn an applied scene into a transaction rollback.
+        const info = toErrorInfo(error);
+        errors.push({ ...info, message: `${stage.phase}: ${info.message}` });
       }
     }
+    return errors;
   }
 
   private async loadProgressive(
@@ -492,6 +676,9 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
         this.map.effects.validateSnapshots(snapshot.effects ?? []);
       }
       context.throwIfAborted();
+      const ownerToken = requireRuntimeLeaseOwner(options);
+      this.map.tools.stopWithRuntimeLease(ownerToken);
+      this.map.selection.clearWithRuntimeLease(ownerToken);
       this.updateTransaction({ status: "committing", stage: "layers" });
       await this.loadProgressiveSnapshot(snapshot, options, context);
       this.completeTransaction("succeeded", "not-needed");
@@ -514,6 +701,7 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     options: SceneStateLoadOptions,
     context: OperationContext
   ): Promise<void> {
+    const ownerToken = requireRuntimeLeaseOwner(options);
     const restoreResults = options.restoreResults ?? false;
     const clearResults = options.clearResults ?? restoreResults;
     const restorePrimitives = options.restorePrimitives ?? false;
@@ -528,40 +716,42 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
         run: (scope) => this.map.layers.load(
           snapshot.layers,
           withOperationContext(
-            { clear: options.clearLayers ?? true, flyTo: false },
+            withRuntimeLeaseOwner(
+              { clear: options.clearLayers ?? true, flyTo: false },
+              ownerToken
+            ),
             scope
           )
         )
       },
-      { phase: "bookmarks", run: () => this.bookmarks.replace(snapshot.bookmarks) }
+      {
+        phase: "bookmarks",
+        run: () => this.bookmarks.replaceWithOwner(snapshot.bookmarks, ownerToken)
+      }
     ];
 
     if (clearResults || restoreResults) {
       stages.push({
         phase: "results",
         run: async (scope) => {
-          if (clearResults) {
-            this.map.draw.clear();
-            this.map.analysis.measure.clear();
-            this.map.analysis.visibility.clear();
-            this.map.analysis.profile.clear();
-            this.map.analysis.clipping.clear();
-            this.map.analysis.terrain.clear();
-          }
-          if (restoreResults && snapshot.results) {
-            await this.map.draw.load(snapshot.results.draw, { clear: false });
-            scope.throwIfAborted();
-            await this.map.analysis.load(
-              {
-                measure: snapshot.results.measure,
-                visibility: snapshot.results.visibility,
-                profile: snapshot.results.profile,
-                clipping: snapshot.results.clipping,
-                terrain: snapshot.results.terrain ?? []
-              },
-              { clear: false }
-            );
-          }
+          const results = restoreResults && snapshot.results
+            ? snapshot.results
+            : emptyResultsSnapshot();
+          await this.map.draw.load(
+            results.draw,
+            withRuntimeLeaseOwner({ clear: clearResults }, ownerToken)
+          );
+          scope.throwIfAborted();
+          await this.map.analysis.load(
+            {
+              measure: results.measure,
+              visibility: results.visibility,
+              profile: results.profile,
+              clipping: results.clipping,
+              terrain: results.terrain ?? []
+            },
+            withRuntimeLeaseOwner({ clear: clearResults }, ownerToken)
+          );
         }
       });
     }
@@ -569,23 +759,21 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
     if (clearPrimitives || restorePrimitives) {
       stages.push({
         phase: "primitives",
-        run: () => {
-          if (clearPrimitives) this.map.primitives.clear();
-          if (restorePrimitives && snapshot.primitives) {
-            this.map.primitives.load(snapshot.primitives, { clear: false });
-          }
-        }
+        run: () => this.map.primitives.load(
+          restorePrimitives ? snapshot.primitives ?? [] : [],
+          withRuntimeLeaseOwner({ clear: clearPrimitives }, ownerToken)
+        )
       });
     }
     if (clearOverlays || restoreOverlays) {
       stages.push({
         phase: "overlays",
         run: async (scope) => {
-          if (clearOverlays) this.map.overlays.clear();
-          if (restoreOverlays && snapshot.overlays) {
-            await this.map.overlays.load(snapshot.overlays, { clear: false });
-            scope.throwIfAborted();
-          }
+          await this.map.overlays.load(
+            restoreOverlays ? snapshot.overlays ?? [] : [],
+            withRuntimeLeaseOwner({ clear: clearOverlays }, ownerToken)
+          );
+          scope.throwIfAborted();
         }
       });
     }
@@ -596,17 +784,30 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
           if (restoreEffects) {
             return this.map.effects.load(
               snapshot.effects ?? [],
-              withOperationContext({ clear: clearEffects }, scope)
+              withOperationContext(
+                withRuntimeLeaseOwner({ clear: clearEffects }, ownerToken),
+                scope
+              )
             );
           }
-          this.map.effects.clear();
+          return this.map.effects.load(
+            [],
+            withOperationContext(
+              withRuntimeLeaseOwner({ clear: true }, ownerToken),
+              scope
+            )
+          );
         }
       });
     }
     if ((options.flyToCamera ?? true) && snapshot.camera) {
       stages.push({
         phase: "camera",
-        run: (scope) => this.flyToCameraWithOperation(snapshot.camera!, scope)
+        run: (scope) => this.flyToCameraWithOperation(
+          snapshot.camera!,
+          scope,
+          ownerToken
+        )
       });
     }
 
@@ -628,14 +829,21 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
 
   private async flyToCameraWithOperation(
     view: CameraView,
-    context: OperationContext
+    context: OperationContext,
+    ownerToken: RuntimeLeaseOwnerToken
   ): Promise<boolean> {
+    assertRuntimeMutationAllowed(
+      this.map.concurrency,
+      "camera",
+      "scene.camera",
+      ownerToken
+    );
     const camera = this.map.viewer.camera;
     const cancelFlight = () => camera.cancelFlight();
     context.signal.addEventListener("abort", cancelFlight, { once: true });
     try {
       context.throwIfAborted();
-      const completed = await this.flyToCamera(view);
+      const completed = await this.flyToCameraInternal(view);
       context.throwIfAborted();
       return completed;
     } finally {
@@ -663,6 +871,7 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
       status,
       stage,
       rollbackStatus: "not-needed",
+      cleanupStatus: "not-needed",
       startedAt: new Date()
     };
     this.emitTransaction();
@@ -755,7 +964,7 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
 
     const finish = () => {
       this.activeStages = [];
-      this.bookmarks.clear();
+      this.bookmarks.destroy();
       this.off();
     };
     if (!this.transactionReserved) {
@@ -770,18 +979,19 @@ export class SceneStateManager extends Evented<SceneStateManagerEvents> {
 
 interface SceneLoadStage {
   phase: string;
-  run(context: OperationContext): void | Promise<unknown>;
-}
-
-interface SceneStageFactory {
-  phase: string;
-  prepare(): Promise<PreparedSceneStage>;
+  run(context: OperationContext): unknown | Promise<unknown>;
 }
 
 export class CameraBookmarkManager {
   private readonly items = new Map<string, CameraBookmark>();
 
+  constructor(private readonly map?: KairosMap) {}
+
   add(bookmark: CameraBookmarkInput): CameraBookmark {
+    return this.runMutation("bookmarks.add", () => this.addInternal(bookmark));
+  }
+
+  private addInternal(bookmark: CameraBookmarkInput): CameraBookmark {
     const next: CameraBookmark = {
       ...bookmark,
       view: cloneCameraView(bookmark.view),
@@ -802,19 +1012,72 @@ export class CameraBookmarkManager {
   }
 
   remove(id: string): boolean {
-    return this.items.delete(id);
+    return this.runMutation("bookmarks.remove", () => this.items.delete(id));
   }
 
   clear(): void {
+    this.runMutation("bookmarks.clear", () => this.clearInternal());
+  }
+
+  private clearInternal(): void {
     this.items.clear();
   }
 
   replace(bookmarks: CameraBookmark[]): void {
-    this.clear();
+    this.runMutation("bookmarks.replace", () => this.replaceInternal(bookmarks));
+  }
+
+  /** @internal */
+  replaceWithOwner(
+    bookmarks: CameraBookmark[],
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): void {
+    this.runMutation(
+      "scene.bookmarks.replace",
+      () => this.replaceInternal(bookmarks),
+      ownerToken
+    );
+  }
+
+  private replaceInternal(bookmarks: CameraBookmark[]): void {
+    this.clearInternal();
     for (const bookmark of bookmarks) {
-      this.add(bookmark);
+      this.addInternal(bookmark);
     }
   }
+
+  /** @internal */
+  destroy(): void {
+    this.clearInternal();
+  }
+
+  private runMutation<T>(
+    kind: string,
+    task: () => T,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): T {
+    if (!this.map) return task();
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind, resources: ["bookmarks"], ownerToken },
+      () => task()
+    );
+  }
+}
+
+function collectAvailableLayerIds(
+  preflight: LayerTransactionPreflight
+): ReadonlySet<string> {
+  const ids = new Set<string>();
+  if (!preflight.clear) {
+    for (const [id] of preflight.oldEntries) {
+      ids.add(id);
+    }
+  }
+  for (const layer of preflight.nextLayers) {
+    ids.add(layer.id);
+  }
+  return ids;
 }
 
 function cloneBookmark(bookmark: CameraBookmark): CameraBookmark {
@@ -824,11 +1087,20 @@ function cloneBookmark(bookmark: CameraBookmark): CameraBookmark {
   };
 }
 
+function requireRuntimeLeaseOwner(options: SceneStateLoadOptions): RuntimeLeaseOwnerToken {
+  const ownerToken = getRuntimeLeaseOwner(options);
+  if (!ownerToken) {
+    throw new Error("Scene load requires an active runtime lease owner.");
+  }
+  return ownerToken;
+}
+
 function cloneTransactionState(state: SceneTransactionState): SceneTransactionState {
   return Object.freeze({
     ...state,
     error: state.error ? Object.freeze({ ...state.error }) : undefined,
     rollbackErrors: state.rollbackErrors?.map((error) => Object.freeze({ ...error })),
+    cleanupErrors: state.cleanupErrors?.map((error) => Object.freeze({ ...error })),
     startedAt: new Date(state.startedAt),
     finishedAt: state.finishedAt ? new Date(state.finishedAt) : undefined
   });

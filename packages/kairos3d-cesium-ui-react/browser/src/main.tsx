@@ -1,4 +1,5 @@
 import type { KairosMap } from "@kairos3d/cesium/core";
+import { RuntimeMutationConflictError } from "@kairos3d/cesium/concurrency";
 import type { EffectConfig, EffectType } from "@kairos3d/cesium/effects";
 import {
   layerRegistry,
@@ -185,10 +186,10 @@ function BrowserSmoke() {
         data-k3d-animated-count={currentCounts?.animatedEffects ?? 0}
         data-k3d-scene-primitive-count={currentCounts?.scenePrimitives ?? 0}
         data-k3d-stage-count={currentCounts?.postProcessStages ?? 0}
-        aria-label={`M8 Effects, M9 Operations, and M10 Scene Transactions smoke report: ${report.status}; ${Object.values(report.checks).filter(Boolean).length}/${Object.keys(report.checks).length} checks`}
+        aria-label={`M8 Effects, M9 Operations, M10 Scene Transactions, and M11 Runtime Concurrency smoke report: ${report.status}; ${Object.values(report.checks).filter(Boolean).length}/${Object.keys(report.checks).length} checks`}
       >
         <header>
-          <strong>M8 Effects / M9 Operations / M10 Transactions</strong>
+          <strong>M8 Effects / M9 Operations / M10 Transactions / M11 Concurrency</strong>
           <span className={`effects-smoke__badge effects-smoke__badge--${report.status}`}>
             {report.status}
           </span>
@@ -302,6 +303,8 @@ async function runEffectsSmoke(map: KairosMap): Promise<{
   checks.restoreRuntimeCount = restored.runtimeObjects === expectedTypes.length;
   markSmokeStep("operations");
   Object.assign(checks, await runOperationChecks(map, restored));
+  markSmokeStep("runtime-concurrency");
+  Object.assign(checks, await runRuntimeConcurrencyChecks(map));
   markSmokeStep("scene-transactions");
   Object.assign(checks, await runSceneTransactionChecks(map));
   markSmokeStep("complete");
@@ -450,6 +453,219 @@ async function runOperationChecks(
       map.operations.get(failedId)?.error?.message === "browser operation failure",
     operationPerformanceCounts:
       operationCounts.activeOperationCount === 0 && operationCounts.failedOperationCount === 1
+  };
+}
+
+async function runRuntimeConcurrencyChecks(
+  map: KairosMap
+): Promise<Record<string, boolean>> {
+  const checks: Record<string, boolean> = {};
+  const baselineSnapshot = map.sceneState.toJSON({ includeEffects: true });
+  const baselineCounts = captureCounts(map);
+  const operationCountBefore = map.operations.list().length;
+  const baselineEffect = map.effects.list()[0];
+  if (!baselineEffect) {
+    throw new Error("Browser concurrency fixture requires an existing effect.");
+  }
+
+  let waitingEventObserved = false;
+  let activeEventObserved = false;
+  const offConcurrency = map.concurrency.on("change", (event) => {
+    waitingEventObserved ||= event.data.leases.some(
+      (lease) => lease.kind === "scene.load" && lease.status === "waiting"
+    );
+    activeEventObserved ||= event.data.leases.some(
+      (lease) => lease.kind === "effects.add" && lease.status === "active"
+    );
+  });
+
+  const waitMaterial = createDelayedBrowserMaterial(map, "browser-concurrency-wait-material");
+  const waitEffectId = "browser-concurrency-wait-effect";
+  const waitWriter = map.effects.add(
+    createDelayedPulseEffect(waitEffectId, waitMaterial.type),
+    { operationId: "browser-concurrency-writer-wait" }
+  );
+  await waitMaterial.started;
+  const waitLoadId = "browser-concurrency-scene-wait";
+  const waitingScene = map.sceneState.load(baselineSnapshot, {
+    clearLayers: true,
+    restoreEffects: true,
+    clearEffects: true,
+    flyToCamera: false,
+    operationId: waitLoadId
+  });
+  const waitingLeaseVisible = map.concurrency.list({
+    kind: "scene.load",
+    status: "waiting"
+  }).length === 1;
+  const waitingStats = map.performance.getStats();
+  let reservedMutationRejected = false;
+  try {
+    map.effects.setShow(baselineEffect.id, !baselineEffect.show);
+  } catch (error) {
+    reservedMutationRejected = error instanceof RuntimeMutationConflictError;
+  }
+  waitMaterial.resolve();
+  await waitWriter;
+  await waitingScene;
+  await map.sceneState.whenIdle();
+  waitMaterial.unregister();
+  const afterWait = captureCounts(map);
+  checks.sceneWaitsForActiveMutation =
+    waitingLeaseVisible &&
+    waitingStats.activeMutationLeaseCount >= 1 &&
+    waitingStats.waitingMutationLeaseCount >= 1 &&
+    map.operations.get(waitLoadId)?.status === "succeeded";
+  checks.sceneReservationRejectsLaterMutation = reservedMutationRejected;
+  checks.concurrencyChangeEventsObserved = waitingEventObserved && activeEventObserved;
+  checks.waitingRestoreDoesNotAccumulateRuntime =
+    afterWait.effects === baselineCounts.effects &&
+    afterWait.runtimeObjects === baselineCounts.runtimeObjects &&
+    afterWait.scenePrimitives === baselineCounts.scenePrimitives &&
+    afterWait.postProcessStages === baselineCounts.postProcessStages;
+
+  const rejectMaterial = createDelayedBrowserMaterial(map, "browser-concurrency-reject-material");
+  const rejectEffectId = "browser-concurrency-reject-effect";
+  const rejectWriter = map.effects.add(
+    createDelayedPulseEffect(rejectEffectId, rejectMaterial.type),
+    { operationId: "browser-concurrency-writer-reject" }
+  );
+  await rejectMaterial.started;
+  let rejectConflict = false;
+  try {
+    await map.sceneState.load(baselineSnapshot, {
+      conflictPolicy: "reject",
+      operationId: "browser-concurrency-scene-reject"
+    });
+  } catch (error) {
+    rejectConflict = error instanceof RuntimeMutationConflictError;
+  }
+  rejectMaterial.resolve();
+  await rejectWriter;
+  map.effects.remove(rejectEffectId);
+  rejectMaterial.unregister();
+  checks.sceneRejectPolicyFailsImmediately =
+    rejectConflict &&
+    map.operations.get("browser-concurrency-scene-reject")?.status === "failed";
+
+  let fixtureCreated = 0;
+  let fixturePreflighted = 0;
+  const cancelLayerType = "browser-concurrency-cancel-layer";
+  const unregisterCancelLayer = registerFixtureLayer(cancelLayerType, {
+    create: () => {
+      fixtureCreated += 1;
+    },
+    preflight: () => {
+      fixturePreflighted += 1;
+    }
+  });
+  const cancelSnapshot = snapshotWithFixtureLayer(
+    baselineSnapshot,
+    cancelLayerType,
+    "waiting-cancel"
+  );
+  const cancelMaterial = createDelayedBrowserMaterial(map, "browser-concurrency-cancel-material");
+  const cancelEffectId = "browser-concurrency-cancel-effect";
+  const cancelWriter = map.effects.add(
+    createDelayedPulseEffect(cancelEffectId, cancelMaterial.type),
+    { operationId: "browser-concurrency-writer-cancel" }
+  );
+  await cancelMaterial.started;
+  const cancelController = new AbortController();
+  const cancelLoadId = "browser-concurrency-scene-cancel";
+  const canceledLoad = map.sceneState.load(cancelSnapshot, {
+    signal: cancelController.signal,
+    operationId: cancelLoadId
+  });
+  const cancelWaitVisible = map.concurrency.list({
+    kind: "scene.load",
+    status: "waiting"
+  }).length === 1;
+  cancelController.abort();
+  let waitCanceled = false;
+  try {
+    await canceledLoad;
+  } catch (error) {
+    waitCanceled = isOperationCanceledError(error);
+  }
+  cancelMaterial.resolve();
+  await cancelWriter;
+  map.effects.remove(cancelEffectId);
+  cancelMaterial.unregister();
+  unregisterCancelLayer();
+  await map.sceneState.whenIdle();
+  await map.concurrency.whenIdle();
+  offConcurrency();
+
+  const finalStats = map.performance.getStats();
+  const finalCounts = captureCounts(map);
+  checks.sceneWaitCancellationSkipsPreflight =
+    cancelWaitVisible &&
+    waitCanceled &&
+    fixtureCreated === 0 &&
+    fixturePreflighted === 0 &&
+    map.operations.get(cancelLoadId)?.status === "canceled";
+  checks.concurrencyReturnsIdle =
+    map.concurrency.list().length === 0 &&
+    finalStats.activeMutationLeaseCount === 0 &&
+    finalStats.waitingMutationLeaseCount === 0;
+  checks.concurrencyCleansRuntime =
+    finalCounts.effects === baselineCounts.effects &&
+    finalCounts.runtimeObjects === baselineCounts.runtimeObjects &&
+    finalCounts.animatedEffects === baselineCounts.animatedEffects &&
+    finalCounts.scenePrimitives === baselineCounts.scenePrimitives &&
+    finalCounts.postProcessStages === baselineCounts.postProcessStages;
+  const operationIds = [
+    "browser-concurrency-writer-wait",
+    waitLoadId,
+    "browser-concurrency-writer-reject",
+    "browser-concurrency-scene-reject",
+    "browser-concurrency-writer-cancel",
+    cancelLoadId
+  ];
+  checks.sceneConcurrencyUsesSingleOperations =
+    map.operations.list().length === operationCountBefore + operationIds.length &&
+    operationIds.every(
+      (id) => map.operations.list().filter((operation) => operation.id === id).length === 1
+    ) &&
+    [waitLoadId, "browser-concurrency-scene-reject", cancelLoadId].every(
+      (id) => map.operations.get(id)?.kind === "scene.load"
+    );
+  return checks;
+}
+
+function createDelayedBrowserMaterial(map: KairosMap, type: string) {
+  let markStarted!: () => void;
+  let resolveMaterial!: (material: Material) => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const material = new Promise<Material>((resolve) => {
+    resolveMaterial = resolve;
+  });
+  map.materials.register({
+    type,
+    targets: ["primitive"],
+    createMaterial: async () => {
+      markStarted();
+      return material;
+    }
+  });
+  return {
+    type,
+    started,
+    resolve: () => resolveMaterial(Material.fromType(Material.ColorType)),
+    unregister: () => map.materials.unregister(type)
+  };
+}
+
+function createDelayedPulseEffect(id: string, materialType: string): EffectConfig {
+  return {
+    id,
+    type: "pulse-circle",
+    position: Cartesian3.fromDegrees(114.17, 22.3),
+    radius: 100,
+    material: { type: materialType, options: {} }
   };
 }
 
@@ -985,6 +1201,8 @@ function sameFingerprint(left: SceneFingerprint, right: SceneFingerprint): boole
 }
 
 interface FixtureLayerBehavior {
+  create?: () => void;
+  preflight?: () => void | Promise<void>;
   prepare?: () => void | Promise<void>;
   attach?: () => void | Promise<void>;
   detach?: () => void | Promise<void>;
@@ -1002,6 +1220,7 @@ function createFixtureLayer(
   config: BaseLayerConfig,
   behavior: FixtureLayerBehavior
 ): LayerAdapter {
+  behavior.create?.();
   const id = config.id ?? `${config.type}-fixture`;
   const runtime = { id, type: config.type };
   let show = config.show ?? true;
@@ -1016,6 +1235,7 @@ function createFixtureLayer(
       show = value;
     },
     transaction: {
+      preflight: () => behavior.preflight?.(),
       prepare: () => behavior.prepare?.(),
       attach: () => behavior.attach?.(),
       detach: () => behavior.detach?.()

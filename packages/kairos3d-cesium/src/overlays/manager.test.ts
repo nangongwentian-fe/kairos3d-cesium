@@ -1,5 +1,10 @@
 import { Cartesian3, Entity } from "cesium";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import {
+  acquireRuntimeLease,
+  withRuntimeLeaseOwner
+} from "../concurrency/lease";
 import type { KairosMap } from "../core";
 import { StyleManager } from "../style";
 import { OverlayManager } from "./manager";
@@ -14,6 +19,7 @@ beforeAll(() => {
 
 function createMapMock() {
   return {
+    concurrency: new RuntimeConcurrencyManager(),
     viewer: {
       entities: {
         add: vi.fn((options) => new Entity(options)),
@@ -29,6 +35,58 @@ function position(longitude: number, latitude: number, height = 0): Cartesian3 {
 }
 
 describe("OverlayManager", () => {
+  it("holds the overlays lease through clear events and leaves no leaked state", () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    manager.addPoint({ id: "existing", position: position(114, 22) });
+    let conflict: unknown;
+    manager.on("remove", () => {
+      try {
+        manager.addPoint({ id: "reentrant", position: position(115, 23) });
+      } catch (error) {
+        conflict = error;
+      }
+    });
+
+    manager.clear();
+
+    expect(conflict).toMatchObject({
+      name: "RuntimeMutationConflictError",
+      code: "RUNTIME_MUTATION_CONFLICT",
+      resource: "overlays"
+    });
+    expect(manager.list()).toEqual([]);
+    expect(map.viewer.entities.add).toHaveBeenCalledOnce();
+    expect(map.concurrency.isBusy()).toBe(false);
+  });
+
+  it("rejects ordinary mutations while overlays are leased", async () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    const lease = await acquireRuntimeLease(map.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"]
+    });
+
+    expect(() =>
+      manager.addPoint({ id: "blocked", position: position(114, 22) })
+    ).toThrow("Runtime resource");
+    await expect(manager.load([], { clear: true })).rejects.toThrow(
+      "Runtime resource"
+    );
+    await expect(
+      manager.load(
+        [],
+        withRuntimeLeaseOwner({ clear: true }, lease.ownerToken)
+      )
+    ).resolves.toEqual([]);
+    expect(() => manager.clear()).toThrow("Runtime resource");
+    expect(() => manager.clearWithRuntimeLease(lease.ownerToken)).not.toThrow();
+
+    lease.release();
+  });
+
   it("creates entity overlays for supported types", () => {
     const map = createMapMock();
     const manager = new OverlayManager(map);
@@ -555,5 +613,30 @@ describe("OverlayManager", () => {
     expect(manager.get("old")?.entity).toBe(original.entity);
     expect(manager.get("new")).toBeUndefined();
     await stage.dispose();
+  });
+
+  it("consumes the exact overlay preflight token without reparsing input", async () => {
+    const map = createMapMock();
+    const manager = new OverlayManager(map);
+    const snapshot = [{
+      id: "token-label",
+      type: "label" as const,
+      positions: [{ longitude: 114.01, latitude: 22.01, height: 10 }],
+      data: { text: "Token" },
+      show: true,
+      createdAt: "2026-07-10T00:00:00.000Z"
+    }];
+    const token = manager.preflightSceneLoad(snapshot, { clear: true });
+    snapshot[0].positions.length = 0;
+
+    const stage = await manager.prepareSceneLoad(
+      snapshot,
+      { clear: true },
+      token
+    );
+    await stage.dispose();
+    await expect(
+      manager.prepareSceneLoad(snapshot, { clear: true }, token)
+    ).rejects.toThrow("invalid or stale");
   });
 });

@@ -1,6 +1,11 @@
 import { Cartographic } from "cesium";
 import { describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import {
+  acquireRuntimeLease,
+  assertRuntimeMutationAllowed
+} from "../concurrency/lease";
 import { OperationCanceledError, OperationManager } from "../operations";
 import { SceneTransactionError } from "./errors";
 import { SceneStateManager } from "./manager";
@@ -26,6 +31,7 @@ function createDeferred<T>() {
 
 function createStageHarness(phase: string) {
   const lifecycle: string[] = [];
+  const preflight = vi.fn((..._args: unknown[]): unknown => undefined);
   const stage = {
     phase,
     commit: vi.fn(() => {
@@ -44,19 +50,33 @@ function createStageHarness(phase: string) {
       lifecycle.push("publish");
     })
   } satisfies PreparedSceneStage;
-  const prepare = vi.fn(async () => {
+  const prepare = vi.fn(async (..._args: unknown[]) => {
     lifecycle.push("prepare");
     return stage;
   });
 
-  return { lifecycle, prepare, stage };
+  return { lifecycle, preflight, prepare, stage };
 }
 
 function createMapMock() {
   const operations = new OperationManager();
+  const concurrency = new RuntimeConcurrencyManager();
   const layers = createStageHarness("layers");
   const draw = createStageHarness("draw");
   const analysis = createStageHarness("analysis");
+  const primitives = createStageHarness("primitives");
+  const overlays = createStageHarness("overlays");
+  const effects = createStageHarness("effects");
+  const layerPreflight = {
+    owner: undefined,
+    clear: true,
+    oldEntries: [],
+    oldOrderOverrides: [],
+    oldOpacityOverrides: [],
+    nextLayers: [],
+    consumed: false
+  };
+  layers.preflight.mockReturnValue(layerPreflight);
   const stopTools = vi.fn();
   const clearSelection = vi.fn();
   const requestRender = vi.fn();
@@ -73,16 +93,39 @@ function createMapMock() {
   };
   const layersToJSON = vi.fn(() => []);
   const map = {
+    concurrency,
     operations,
     viewer: { camera, scene: { requestRender } },
     layers: {
+      preflightTransaction: layers.preflight,
       prepareTransaction: layers.prepare,
+      setShow: vi.fn(() =>
+        assertRuntimeMutationAllowed(concurrency, "layers", "layers.setShow")
+      ),
       toJSON: layersToJSON
     },
-    draw: { prepareSceneLoad: draw.prepare },
-    analysis: { prepareSceneLoad: analysis.prepare },
-    tools: { stop: stopTools },
-    selection: { clear: clearSelection }
+    draw: {
+      preflightSceneLoad: draw.preflight,
+      prepareSceneLoad: draw.prepare
+    },
+    analysis: {
+      preflightSceneLoad: analysis.preflight,
+      prepareSceneLoad: analysis.prepare
+    },
+    primitives: {
+      preflightSceneLoad: primitives.preflight,
+      prepareSceneLoad: primitives.prepare
+    },
+    overlays: {
+      preflightSceneLoad: overlays.preflight,
+      prepareSceneLoad: overlays.prepare
+    },
+    effects: {
+      preflightSceneLoad: effects.preflight,
+      prepareSceneLoad: effects.prepare
+    },
+    tools: { stopWithRuntimeLease: stopTools },
+    selection: { clearWithRuntimeLease: clearSelection }
   } as unknown as KairosMap;
 
   return {
@@ -90,18 +133,217 @@ function createMapMock() {
     camera,
     clearSelection,
     draw,
+    effects,
     layers,
+    layerPreflight,
     layersToJSON,
     map,
     operations,
+    overlays,
+    primitives,
     requestRender,
     stopTools
   };
 }
 
 describe("SceneStateManager transactional loading", () => {
+  it("reserves the exclusive scene lease before load returns", async () => {
+    const { map } = createMapMock();
+    const manager = new SceneStateManager(map);
+
+    const loading = manager.load(createSnapshot(), { flyToCamera: false });
+    expect(map.concurrency.list({ kind: "scene.load" })).toHaveLength(1);
+    expect(() => map.layers.setShow("missing", false)).toThrow(
+      "Runtime resource"
+    );
+    expect(() => manager.bookmarks.add({
+      id: "blocked",
+      view: {
+        longitude: 114,
+        latitude: 22,
+        height: 100,
+        heading: 0,
+        pitch: -1,
+        roll: 0
+      }
+    })).toThrow("Runtime resource");
+    await expect(manager.flyToCamera({
+      longitude: 114,
+      latitude: 22,
+      height: 100,
+      heading: 0,
+      pitch: -1,
+      roll: 0
+    })).rejects.toMatchObject({ code: "RUNTIME_MUTATION_CONFLICT" });
+
+    await loading;
+  });
+
+  it("waits for an active writer before running scene preflight", async () => {
+    const { layers, map } = createMapMock();
+    const manager = new SceneStateManager(map);
+    const writer = await acquireRuntimeLease(map.concurrency, {
+      kind: "test.layers",
+      mode: "write",
+      resources: ["layers"]
+    });
+
+    const loading = manager.load(createSnapshot(), { flyToCamera: false });
+    await vi.waitFor(() => expect(map.concurrency.list({ status: "waiting" })).toHaveLength(1));
+    expect(layers.preflight).not.toHaveBeenCalled();
+
+    writer.release();
+    await expect(loading).resolves.toBeUndefined();
+    expect(layers.preflight).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a scene load conflict without running preflight", async () => {
+    const { layers, map } = createMapMock();
+    const manager = new SceneStateManager(map);
+    const writer = await acquireRuntimeLease(map.concurrency, {
+      kind: "test.layers",
+      mode: "write",
+      resources: ["layers"]
+    });
+
+    await expect(manager.load(createSnapshot(), {
+      conflictPolicy: "reject",
+      flyToCamera: false
+    })).rejects.toMatchObject({ code: "RUNTIME_MUTATION_CONFLICT" });
+    expect(layers.preflight).not.toHaveBeenCalled();
+    writer.release();
+  });
+
+  it("cancels while waiting for the exclusive lease without preflight", async () => {
+    const { layers, map, operations } = createMapMock();
+    const manager = new SceneStateManager(map);
+    const writer = await acquireRuntimeLease(map.concurrency, {
+      kind: "test.layers",
+      mode: "write",
+      resources: ["layers"]
+    });
+    const loading = manager.load(createSnapshot(), {
+      flyToCamera: false,
+      operationId: "scene-wait-cancel"
+    });
+    await vi.waitFor(() => expect(map.concurrency.list({ status: "waiting" })).toHaveLength(1));
+
+    operations.cancel("scene-wait-cancel");
+    await expect(loading).rejects.toBeInstanceOf(OperationCanceledError);
+    expect(layers.preflight).not.toHaveBeenCalled();
+    writer.release();
+    await map.concurrency.whenIdle();
+  });
+
+  it.each([
+    {
+      phase: "analysis",
+      configure: (fixture: ReturnType<typeof createMapMock>) => {
+        fixture.analysis.preflight.mockRejectedValueOnce(new Error("invalid analysis snapshot"));
+      },
+      snapshot: {
+        ...createSnapshot(),
+        results: {
+          draw: [],
+          measure: [],
+          visibility: [],
+          profile: [],
+          clipping: [],
+          terrain: []
+        }
+      } satisfies SceneSnapshot,
+      options: { flyToCamera: false, restoreResults: true }
+    },
+    {
+      phase: "overlays",
+      configure: (fixture: ReturnType<typeof createMapMock>) => {
+        fixture.overlays.preflight.mockImplementationOnce(() => {
+          throw new Error("invalid overlay snapshot");
+        });
+      },
+      snapshot: {
+        ...createSnapshot(),
+        overlays: []
+      } satisfies SceneSnapshot,
+      options: { flyToCamera: false, restoreOverlays: true }
+    },
+    {
+      phase: "effects",
+      configure: (fixture: ReturnType<typeof createMapMock>) => {
+        fixture.effects.preflight.mockImplementationOnce(() => {
+          throw new Error("invalid effect snapshot");
+        });
+      },
+      snapshot: {
+        ...createSnapshot(),
+        effects: []
+      } satisfies SceneSnapshot,
+      options: { flyToCamera: false, restoreEffects: true }
+    }
+  ])("does not prepare layer runtime when $phase preflight fails", async ({
+    configure,
+    options,
+    snapshot
+  }) => {
+    const fixture = createMapMock();
+    configure(fixture);
+    const manager = new SceneStateManager(fixture.map);
+
+    await expect(manager.load(snapshot, options)).rejects.toMatchObject({
+      phase: "prepare"
+    });
+    expect(fixture.layers.preflight).toHaveBeenCalledOnce();
+    expect(fixture.layers.prepare).not.toHaveBeenCalled();
+    expect(fixture.draw.prepare).not.toHaveBeenCalled();
+    expect(fixture.analysis.prepare).not.toHaveBeenCalled();
+    expect(fixture.overlays.prepare).not.toHaveBeenCalled();
+    expect(fixture.effects.prepare).not.toHaveBeenCalled();
+  });
+
+  it("passes the final layer ids and the same analysis preflight token to prepare", async () => {
+    const fixture = createMapMock();
+    const analysisToken = { token: "analysis" };
+    fixture.layers.preflight.mockReturnValueOnce({
+      ...fixture.layerPreflight,
+      clear: false,
+      oldEntries: [["old-layer", {}]],
+      nextLayers: [{ id: "next-layer" }]
+    });
+    fixture.analysis.preflight.mockReturnValueOnce({
+      phase: "analysis",
+      value: analysisToken
+    });
+    const manager = new SceneStateManager(fixture.map);
+    const snapshot = {
+      ...createSnapshot(),
+      results: {
+        draw: [],
+        measure: [],
+        visibility: [],
+        profile: [],
+        clipping: [],
+        terrain: []
+      }
+    } satisfies SceneSnapshot;
+
+    await manager.load(snapshot, {
+      clearLayers: false,
+      flyToCamera: false,
+      restoreResults: true
+    });
+
+    const analysisContext = fixture.analysis.preflight.mock.calls[0][2] as {
+      availableLayerIds: ReadonlySet<string>;
+    };
+    expect([...analysisContext.availableLayerIds]).toEqual([
+      "old-layer",
+      "next-layer"
+    ]);
+    expect(fixture.analysis.prepare.mock.calls[0][2]).toBe(analysisToken);
+  });
+
   it("uses transactional lifecycle by default and records one scene.load operation", async () => {
-    const { layers, map, operations, requestRender } = createMapMock();
+    const { layerPreflight, layers, map, operations, requestRender } = createMapMock();
     const manager = new SceneStateManager(map);
 
     await manager.load(createSnapshot(), {
@@ -109,12 +351,17 @@ describe("SceneStateManager transactional loading", () => {
       operationId: "transaction-success"
     });
 
-    expect(layers.prepare).toHaveBeenCalledWith([], { clear: true, flyTo: false });
+    expect(layers.prepare).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ clear: true, flyTo: false }),
+      layerPreflight
+    );
     expect(layers.lifecycle).toEqual(["prepare", "commit", "finalize", "publish"]);
     expect(layers.stage.rollback).not.toHaveBeenCalled();
     expect(layers.stage.dispose).not.toHaveBeenCalled();
     expect(requestRender).toHaveBeenCalledOnce();
     expect(manager.getTransactionState()).toMatchObject({
+      cleanupStatus: "succeeded",
       mode: "transactional",
       operationId: "transaction-success",
       rollbackStatus: "not-needed",
@@ -182,8 +429,10 @@ describe("SceneStateManager transactional loading", () => {
   });
 
   it("treats finalize failures as best-effort cleanup after a successful commit", async () => {
-    const { analysis, draw, layers, map } = createMapMock();
+    const { analysis, draw, layers, map, operations } = createMapMock();
     const manager = new SceneStateManager(map);
+    const states: ReturnType<SceneStateManager["getTransactionState"]>[] = [];
+    manager.on("transaction-change", (event) => states.push(event.data));
     layers.stage.finalize.mockImplementationOnce(() => {
       layers.lifecycle.push("finalize");
       throw new Error("retired layer cleanup failed");
@@ -200,7 +449,58 @@ describe("SceneStateManager transactional loading", () => {
     expect(layers.stage.rollback).not.toHaveBeenCalled();
     expect(layers.stage.dispose).not.toHaveBeenCalled();
     expect(manager.getTransactionState()).toMatchObject({
+      cleanupErrors: [expect.objectContaining({
+        message: "layers: retired layer cleanup failed"
+      })],
+      cleanupStatus: "failed",
       rollbackStatus: "not-needed",
+      status: "succeeded"
+    });
+    expect(operations.list()).toEqual([
+      expect.objectContaining({ kind: "scene.load", status: "succeeded" })
+    ]);
+    expect(states).toEqual(expect.arrayContaining([
+      expect.objectContaining({ cleanupStatus: "running", status: "committing" }),
+      expect.objectContaining({ cleanupStatus: "failed", status: "committing" }),
+      expect.objectContaining({ cleanupStatus: "failed", status: "succeeded" })
+    ]));
+    expect(states.every((state) => state && Object.isFrozen(state))).toBe(true);
+
+    const first = manager.getTransactionState()!;
+    const second = manager.getTransactionState()!;
+    expect(Object.isFrozen(first.cleanupErrors?.[0])).toBe(true);
+    expect(second.cleanupErrors?.[0]).not.toBe(first.cleanupErrors?.[0]);
+  });
+
+  it("keeps whenIdle pending until asynchronous finalization completes", async () => {
+    const { layers, map } = createMapMock();
+    const manager = new SceneStateManager(map);
+    const finalize = createDeferred<void>();
+    layers.stage.finalize.mockImplementationOnce(async () => {
+      layers.lifecycle.push("finalize");
+      await finalize.promise;
+    });
+
+    const loading = manager.load(createSnapshot(), { flyToCamera: false });
+    await vi.waitFor(() => expect(layers.stage.finalize).toHaveBeenCalledOnce());
+    const idle = manager.whenIdle();
+    let idleFinished = false;
+    void idle.then(() => {
+      idleFinished = true;
+    });
+
+    expect(idleFinished).toBe(false);
+    expect(manager.getTransactionState()).toMatchObject({
+      cleanupStatus: "running",
+      status: "committing"
+    });
+
+    finalize.resolve(undefined);
+    await loading;
+    await idle;
+
+    expect(manager.getTransactionState()).toMatchObject({
+      cleanupStatus: "succeeded",
       status: "succeeded"
     });
   });

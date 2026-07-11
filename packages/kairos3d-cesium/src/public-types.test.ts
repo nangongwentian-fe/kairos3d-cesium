@@ -47,6 +47,7 @@ import type {
   CameraBookmark,
   CameraView,
   RuntimeResultsSnapshot,
+  SceneCleanupStatus,
   SceneLoadMode,
   SceneRollbackStatus,
   SceneSnapshot,
@@ -216,6 +217,16 @@ import type {
   OperationState,
   OperationStatus
 } from "./operations";
+import type {
+  RuntimeConcurrencyManagerEvents,
+  RuntimeConcurrencyQuery,
+  RuntimeLeaseMode,
+  RuntimeLeaseState,
+  RuntimeLeaseStatus,
+  RuntimeMutationConflictError,
+  RuntimeResource,
+  RuntimeWhenIdleOptions
+} from "./concurrency";
 
 describe("public SDK types", () => {
   it("exposes operations contracts", () => {
@@ -246,6 +257,58 @@ describe("public SDK types", () => {
     >();
     expectTypeOf<KairosMap["operations"]["list"]>().returns.toEqualTypeOf<
       OperationState[]
+    >();
+  });
+
+  it("exposes runtime concurrency diagnostics without a public acquire API", () => {
+    expectTypeOf<RuntimeResource>().toEqualTypeOf<
+      | "scene"
+      | "camera"
+      | "bookmarks"
+      | "layers"
+      | "materials"
+      | "tools"
+      | "selection"
+      | "draw"
+      | "analysis"
+      | "primitives"
+      | "overlays"
+      | "effects"
+    >();
+    expectTypeOf<RuntimeLeaseMode>().toEqualTypeOf<"write" | "exclusive">();
+    expectTypeOf<RuntimeLeaseStatus>().toEqualTypeOf<"waiting" | "active">();
+    expectTypeOf<RuntimeLeaseState>().toEqualTypeOf<{
+      id: string;
+      kind: string;
+      mode: RuntimeLeaseMode;
+      status: RuntimeLeaseStatus;
+      resources: readonly RuntimeResource[];
+      operationId?: string;
+      startedAt: Date;
+      activatedAt?: Date;
+    }>();
+    expectTypeOf<RuntimeConcurrencyQuery>().toEqualTypeOf<{
+      resource?: RuntimeResource;
+      kind?: string;
+      mode?: RuntimeLeaseMode;
+      status?: RuntimeLeaseStatus;
+    }>();
+    expectTypeOf<RuntimeWhenIdleOptions>().toEqualTypeOf<{ signal?: AbortSignal }>();
+    expectTypeOf<RuntimeConcurrencyManagerEvents["change"]>().toEqualTypeOf<{
+      leases: RuntimeLeaseState[];
+    }>();
+    expectTypeOf<RuntimeMutationConflictError>().toMatchTypeOf<Error & {
+      resource: RuntimeResource;
+      holder?: RuntimeLeaseState;
+    }>();
+    expectTypeOf<KairosMap["concurrency"]["isBusy"]>().toEqualTypeOf<
+      (resource?: RuntimeResource) => boolean
+    >();
+    expectTypeOf<KairosMap["concurrency"]["list"]>().toEqualTypeOf<
+      (query?: RuntimeConcurrencyQuery) => RuntimeLeaseState[]
+    >();
+    expectTypeOf<KairosMap["concurrency"]["whenIdle"]>().toEqualTypeOf<
+      (query?: RuntimeConcurrencyQuery, options?: RuntimeWhenIdleOptions) => Promise<void>
     >();
   });
 
@@ -969,6 +1032,8 @@ describe("public SDK types", () => {
       animatedEffectCount: number;
       activeOperationCount: number;
       failedOperationCount: number;
+      activeMutationLeaseCount: number;
+      waitingMutationLeaseCount: number;
       warnings: PerformanceWarning[];
     }>();
     expectTypeOf<PrimitiveOptimizationCandidate>().toMatchTypeOf<{
@@ -1389,6 +1454,7 @@ describe("public SDK types", () => {
     }>();
 
     expectTypeOf<LayerTransactionHooks>().toEqualTypeOf<{
+      preflight?: (map: KairosMap) => void | Promise<void>;
       prepare: (map: KairosMap) => void | Promise<void>;
       attach: (map: KairosMap) => void | Promise<void>;
       detach: (map: KairosMap) => void | Promise<void>;
@@ -1458,6 +1524,7 @@ describe("public SDK types", () => {
     }>();
 
     expectTypeOf<SceneStateLoadOptions>().toEqualTypeOf<{
+      conflictPolicy?: "wait" | "reject";
       mode?: SceneLoadMode;
       clearLayers?: boolean;
       flyToCamera?: boolean;
@@ -1485,12 +1552,17 @@ describe("public SDK types", () => {
     expectTypeOf<SceneRollbackStatus>().toEqualTypeOf<
       "not-needed" | "running" | "succeeded" | "failed"
     >();
+    expectTypeOf<SceneCleanupStatus>().toEqualTypeOf<
+      "not-needed" | "running" | "succeeded" | "failed"
+    >();
     expectTypeOf<SceneTransactionState>().toMatchTypeOf<{
       operationId: string;
       mode: SceneLoadMode;
       status: SceneTransactionStatus;
       stage?: string;
       rollbackStatus: SceneRollbackStatus;
+      cleanupStatus: SceneCleanupStatus;
+      cleanupErrors?: OperationErrorInfo[];
       startedAt: Date;
       finishedAt?: Date;
     }>();

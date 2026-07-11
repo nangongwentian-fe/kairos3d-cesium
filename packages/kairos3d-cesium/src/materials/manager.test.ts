@@ -7,6 +7,8 @@ import {
   PolylineGlowMaterialProperty
 } from "cesium";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import { acquireRuntimeLease } from "../concurrency/lease";
 import {
   MaterialManager,
   flowMaterialSource,
@@ -28,6 +30,25 @@ beforeAll(() => {
 });
 
 describe("MaterialManager registry", () => {
+  it("rejects registry mutations while materials are leased", async () => {
+    const concurrency = new RuntimeConcurrencyManager();
+    const manager = new MaterialManager(concurrency);
+    manager.register(primitiveDefinition("custom-leased"));
+    const lease = await acquireRuntimeLease(concurrency, {
+      kind: "test.materials",
+      mode: "write",
+      resources: ["materials"]
+    });
+
+    expect(() => manager.register(primitiveDefinition("custom-blocked"))).toThrow(
+      "Runtime resource"
+    );
+    expect(() => manager.unregister("custom-leased")).toThrow("Runtime resource");
+
+    lease.release();
+    expect(manager.unregister("custom-leased")).toBe(true);
+  });
+
   it("lists immutable summaries for built-in definitions", () => {
     const manager = new MaterialManager();
     const definitions = manager.list();

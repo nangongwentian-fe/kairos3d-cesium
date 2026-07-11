@@ -5,6 +5,13 @@ import {
 } from "cesium";
 import type { KairosMap } from "../core";
 import {
+  assertRuntimeMutationAllowed,
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
+import {
   removeEntityIfOwned,
   removeEntityIfOwnedTracked
 } from "../core/entity-collection";
@@ -45,6 +52,23 @@ import {
   resolveTerrainAreaMode,
   resolveTerrainVolumeMode
 } from "./terrain-utils";
+import {
+  assertFiniteSnapshotNumber,
+  assertNonEmptySnapshotId,
+  assertNonNegativeSnapshotNumber,
+  assertOptionalFiniteSnapshotNumber,
+  assertOptionalSnapshotEnum,
+  assertPositiveSnapshotNumber,
+  assertSerializablePosition,
+  assertSerializablePositions,
+  assertSnapshotArray,
+  assertSnapshotBoolean,
+  assertSnapshotDate,
+  assertSnapshotEnum,
+  assertSnapshotInteger,
+  assertSnapshotRecord,
+  freezePreparedArray
+} from "./snapshot-validation";
 import type {
   ContourDrawOptions,
   ContourLine,
@@ -78,6 +102,14 @@ export interface TerrainAnalysisManagerEvents {
   remove: TerrainResult;
   clear: TerrainResult[];
 }
+
+/** @internal Parsed terrain results without Viewer-attached runtime. */
+export interface TerrainScenePreflightToken {
+  readonly owner: TerrainAnalysisManager;
+  readonly prepared: readonly TerrainResult[];
+}
+
+const consumedTerrainPreflightTokens = new WeakSet<TerrainScenePreflightToken>();
 
 export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents> {
   private readonly results = new Map<string, TerrainResult>();
@@ -285,12 +317,18 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
   }
 
   addResult(result: TerrainResult): TerrainResult {
+    return this.runMutation("analysis.terrain.addResult", () =>
+      this.addResultInternal(result)
+    );
+  }
+
+  private addResultInternal(result: TerrainResult): TerrainResult {
     const existing = this.results.get(result.id);
     if (existing === result) {
       return result;
     }
     if (existing) {
-      this.remove(result.id);
+      this.removeInternal(result.id);
     }
     this.results.set(result.id, result);
     this.emit("add", result);
@@ -313,22 +351,28 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
     snapshots: TerrainResultSnapshot[],
     options: RuntimeResultLoadOptions = {}
   ): Promise<TerrainResult[]> {
-    validateTerrainSnapshots(this.map, snapshots);
-    if (options.clear) {
-      this.clear();
-    }
-
-    return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      terrainLeaseRequest("analysis.terrain.load", options),
+      () => {
+        const prepared = validateTerrainSnapshots(this.map, snapshots);
+        if (options.clear) this.clearInternal();
+        return prepared.map((result) => this.restorePreparedSnapshot(result));
+      }
+    );
   }
 
   /** @internal */
-  async prepareSceneLoad(
+  preflightSceneLoad(
     snapshots: TerrainResultSnapshot[],
     options: RuntimeResultLoadOptions = {}
-  ): Promise<PreparedSceneStage> {
-    validateTerrainSnapshots(this.map, snapshots);
-    const clear = options.clear ?? false;
-    if (!clear) {
+  ): TerrainScenePreflightToken {
+    this.assertMutationAllowed(
+      "scene.analysis.terrain.preflight",
+      getRuntimeLeaseOwner(options)
+    );
+    const prepared = validateTerrainSnapshots(this.map, snapshots);
+    if (!options.clear) {
       for (const snapshot of snapshots) {
         if (this.results.has(snapshot.id)) {
           throw new Error(
@@ -337,8 +381,30 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
         }
       }
     }
-    const staged = snapshots.map((snapshot) =>
-      restoreTerrainSnapshot(this.map, snapshot, true)
+    return Object.freeze({ owner: this, prepared });
+  }
+
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: TerrainResultSnapshot[],
+    options: RuntimeResultLoadOptions = {},
+    preflight?: TerrainScenePreflightToken
+  ): Promise<PreparedSceneStage> {
+    this.assertMutationAllowed(
+      "scene.analysis.terrain.prepare",
+      getRuntimeLeaseOwner(options)
+    );
+    const token = preflight ?? this.preflightSceneLoad(snapshots, options);
+    if (token.owner !== this) {
+      throw new Error("Terrain Scene preflight token belongs to another manager.");
+    }
+    if (consumedTerrainPreflightTokens.has(token)) {
+      throw new Error("Terrain Scene preflight token has already been consumed.");
+    }
+    consumedTerrainPreflightTokens.add(token);
+    const clear = options.clear ?? false;
+    const staged = token.prepared.map((result) =>
+      createPreparedTerrainRuntime(this.map, result)
     );
     const previous = clear ? this.list() : [];
     let commitStarted = false;
@@ -406,14 +472,20 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
   }
 
   setStyle(id: string, style: ResultSymbolStyle): TerrainResult {
+    return this.runMutation("analysis.terrain.setStyle", () => {
     const result = this.requireResult(id);
     removeEntities(this.map, result.entities);
     result.style = this.map.styles.resolveTerrainStyle(result.type, style);
     result.entities = renderTerrainResultEntities(this.map, result);
     return result;
+    });
   }
 
   remove(id: string): boolean {
+    return this.runMutation("analysis.terrain.remove", () => this.removeInternal(id));
+  }
+
+  private removeInternal(id: string): boolean {
     const result = this.results.get(id);
     if (!result) {
       return false;
@@ -427,6 +499,10 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
   }
 
   clear(): void {
+    this.runMutation("analysis.terrain.clear", () => this.clearInternal());
+  }
+
+  private clearInternal(): void {
     const removed = [...this.results.values()];
     for (const result of removed) {
       removeEntities(this.map, result.entities);
@@ -442,7 +518,7 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 
@@ -459,27 +535,38 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
       this.map.operations,
       { kind: `analysis.terrain.${type}` },
       operationOptions,
-      (operation) =>
-        task(operation, (result) => {
-          renderedResult = result;
-          operation.throwIfAborted();
-          this.addResult(result);
-          operation.throwIfAborted();
-          return result;
-        })
-    ).catch((error) => {
-      rollbackTerrainResult(this, this.map, renderedResult);
-      throw error;
-    });
+      (operation) => runWithRuntimeLease(
+        this.map.concurrency,
+        terrainLeaseRequest(`analysis.terrain.${type}`, operationOptions, operation),
+        async () => {
+          try {
+            const result = await task(operation, (next) => {
+              renderedResult = next;
+              operation.throwIfAborted();
+              this.addResultInternal(next);
+              operation.throwIfAborted();
+              return next;
+            });
+            await Promise.resolve();
+            operation.throwIfAborted();
+            return result;
+          } catch (error) {
+            this.rollbackResult(renderedResult);
+            renderedResult = undefined;
+            throw error;
+          }
+        }
+      )
+    );
   }
 
-  private restoreSnapshot(snapshot: TerrainResultSnapshot): TerrainResult {
-    if (this.results.has(snapshot.id)) {
-      this.remove(snapshot.id);
+  private restorePreparedSnapshot(prepared: TerrainResult): TerrainResult {
+    if (this.results.has(prepared.id)) {
+      this.removeInternal(prepared.id);
     }
 
-    const result = restoreTerrainSnapshot(this.map, snapshot);
-    return this.addResult(result);
+    const result = createPreparedTerrainRuntime(this.map, prepared, false);
+    return this.addResultInternal(result);
   }
 
   private requireResult(id: string): TerrainResult {
@@ -488,6 +575,29 @@ export class TerrainAnalysisManager extends Evented<TerrainAnalysisManagerEvents
       throw new Error(`Terrain analysis result "${id}" does not exist.`);
     }
     return result;
+  }
+
+  private rollbackResult(result: TerrainResult | undefined): void {
+    if (!result) return;
+    removeEntities(this.map, result.entities);
+    if (this.results.get(result.id) === result) {
+      this.results.delete(result.id);
+    }
+  }
+
+  private assertMutationAllowed(
+    kind: string,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): void {
+    assertRuntimeMutationAllowed(this.map.concurrency, "analysis", kind, ownerToken);
+  }
+
+  private runMutation<T>(kind: string, task: () => T): T {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind, resources: ["analysis"] },
+      () => task()
+    );
   }
 }
 
@@ -665,7 +775,8 @@ function terrainResultToSnapshot(result: TerrainResult): TerrainResultSnapshot {
 function restoreSlopeAspect(
   map: KairosMap,
   snapshot: SlopeAspectResultSnapshot,
-  detached = false
+  detached = false,
+  createRuntime = true
 ): SlopeAspectResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
@@ -679,7 +790,9 @@ function restoreSlopeAspect(
     minSlope: snapshot.minSlope,
     maxSlope: snapshot.maxSlope,
     averageSlope: snapshot.averageSlope,
-    entities: detached
+    entities: !createRuntime
+      ? []
+      : detached
       ? createAreaEntities(area, style, height)
       : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
@@ -691,7 +804,8 @@ function restoreSlopeAspect(
 function restoreContour(
   map: KairosMap,
   snapshot: ContourResultSnapshot,
-  detached = false
+  detached = false,
+  createRuntime = true
 ): ContourResult {
   const area = deserializePositions(snapshot.area);
   const lines = snapshot.lines.map(deserializeContourLine);
@@ -706,7 +820,9 @@ function restoreContour(
     lines,
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: detached
+    entities: !createRuntime
+      ? []
+      : detached
       ? createContourEntities(lines, style, height)
       : renderContourEntities(map, lines, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
@@ -718,7 +834,8 @@ function restoreContour(
 function restoreVolume(
   map: KairosMap,
   snapshot: VolumeResultSnapshot,
-  detached = false
+  detached = false,
+  createRuntime = true
 ): VolumeResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
@@ -738,7 +855,9 @@ function restoreVolume(
     calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: detached
+    entities: !createRuntime
+      ? []
+      : detached
       ? createAreaEntities(area, style, height)
       : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
@@ -750,7 +869,8 @@ function restoreVolume(
 function restoreFlood(
   map: KairosMap,
   snapshot: FloodResultSnapshot,
-  detached = false
+  detached = false,
+  createRuntime = true
 ): FloodResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
@@ -769,7 +889,9 @@ function restoreFlood(
     calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: detached
+    entities: !createRuntime
+      ? []
+      : detached
       ? createAreaEntities(area, style, height)
       : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
@@ -781,7 +903,8 @@ function restoreFlood(
 function restoreExcavation(
   map: KairosMap,
   snapshot: ExcavationResultSnapshot,
-  detached = false
+  detached = false,
+  createRuntime = true
 ): ExcavationResult {
   const area = deserializePositions(snapshot.area);
   const grid = deserializeGrid(snapshot.grid);
@@ -800,7 +923,9 @@ function restoreExcavation(
     calculationMode: snapshot.calculationMode ?? "sample-cell",
     minHeight: snapshot.minHeight,
     maxHeight: snapshot.maxHeight,
-    entities: detached
+    entities: !createRuntime
+      ? []
+      : detached
       ? createAreaEntities(area, style, height)
       : renderAreaEntities(map, area, style, height),
     createdAt: parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt"),
@@ -812,95 +937,207 @@ function restoreExcavation(
 function restoreTerrainSnapshot(
   map: KairosMap,
   snapshot: TerrainResultSnapshot,
-  detached = false
+  detached = false,
+  createRuntime = true
 ): TerrainResult {
   switch (snapshot.type) {
     case "slope-aspect":
-      return restoreSlopeAspect(map, snapshot, detached);
+      return restoreSlopeAspect(map, snapshot, detached, createRuntime);
     case "contour":
-      return restoreContour(map, snapshot, detached);
+      return restoreContour(map, snapshot, detached, createRuntime);
     case "volume":
-      return restoreVolume(map, snapshot, detached);
+      return restoreVolume(map, snapshot, detached, createRuntime);
     case "flood":
-      return restoreFlood(map, snapshot, detached);
+      return restoreFlood(map, snapshot, detached, createRuntime);
     case "excavation":
-      return restoreExcavation(map, snapshot, detached);
+      return restoreExcavation(map, snapshot, detached, createRuntime);
   }
+}
+
+function createPreparedTerrainRuntime(
+  map: KairosMap,
+  prepared: TerrainResult,
+  detached = true
+): TerrainResult {
+  const entities = prepared.type === "contour"
+    ? detached
+      ? createContourEntities(prepared.lines, prepared.style ?? {}, prepared.height)
+      : renderContourEntities(map, prepared.lines, prepared.style ?? {}, prepared.height)
+    : detached
+      ? createAreaEntities(prepared.area, prepared.style ?? {}, prepared.height)
+      : renderAreaEntities(map, prepared.area, prepared.style ?? {}, prepared.height);
+  return { ...prepared, entities } as TerrainResult;
 }
 
 function validateTerrainSnapshots(
   map: KairosMap,
   snapshots: TerrainResultSnapshot[]
-): void {
+): readonly TerrainResult[] {
+  assertSnapshotArray(snapshots, "Terrain result snapshots");
   const ids = new Set<string>();
+  const prepared: TerrainResult[] = [];
   for (const snapshot of snapshots) {
+    assertSnapshotRecord(snapshot, "Terrain result snapshot");
+    assertNonEmptySnapshotId(snapshot.id, "Terrain result snapshot id");
     if (ids.has(snapshot.id)) {
       throw new Error(`Terrain result snapshot id "${snapshot.id}" is duplicated.`);
     }
     ids.add(snapshot.id);
     validateTerrainSnapshot(map, snapshot);
+    prepared.push(restoreTerrainSnapshot(map, snapshot, true, false));
   }
+  return freezePreparedArray(prepared);
 }
 
 function validateTerrainSnapshot(map: KairosMap, snapshot: TerrainResultSnapshot): void {
-  parseSnapshotDate(snapshot.createdAt, "Terrain result createdAt");
+  assertSnapshotEnum(
+    snapshot.type,
+    ["slope-aspect", "contour", "volume", "flood", "excavation"],
+    "Terrain result type"
+  );
+  assertSnapshotDate(snapshot.createdAt, "Terrain result createdAt");
   serializeHeightOptions(snapshot.height);
+  assertSerializablePositions(snapshot.area, "Terrain result area", 3);
 
   switch (snapshot.type) {
     case "slope-aspect":
-      deserializePositions(snapshot.area);
-      deserializeGrid(snapshot.grid);
+      validateGridSnapshot(snapshot.grid);
       map.styles.resolveTerrainStyle("slope-aspect", snapshot.style);
       assertFiniteTerrainSnapshotNumber(snapshot.minSlope, "Terrain minSlope");
       assertFiniteTerrainSnapshotNumber(snapshot.maxSlope, "Terrain maxSlope");
       assertFiniteTerrainSnapshotNumber(snapshot.averageSlope, "Terrain averageSlope");
+      assertOrderedRange(snapshot.minSlope, snapshot.maxSlope, "Terrain slope");
+      if (snapshot.averageSlope < snapshot.minSlope || snapshot.averageSlope > snapshot.maxSlope) {
+        throw new Error("Terrain averageSlope must be within minSlope and maxSlope.");
+      }
       return;
     case "contour":
-      deserializePositions(snapshot.area);
-      snapshot.lines.map(deserializeContourLine);
+      assertSnapshotArray(snapshot.lines, "Terrain contour lines");
+      snapshot.lines.forEach((line, index) => validateContourLineSnapshot(line, index));
       map.styles.resolveTerrainStyle("contour", snapshot.style);
-      assertFiniteTerrainSnapshotNumber(snapshot.interval, "Terrain contour interval");
-      assertFiniteTerrainSnapshotNumber(snapshot.sampleStep, "Terrain contour sampleStep");
+      assertPositiveSnapshotNumber(snapshot.interval, "Terrain contour interval");
+      assertPositiveSnapshotNumber(snapshot.sampleStep, "Terrain contour sampleStep");
       assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
       assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      assertOrderedRange(snapshot.minHeight, snapshot.maxHeight, "Terrain height");
       return;
     case "volume":
-      deserializePositions(snapshot.area);
-      deserializeGrid(snapshot.grid);
+      validateGridSnapshot(snapshot.grid);
       map.styles.resolveTerrainStyle("volume", snapshot.style);
       assertFiniteTerrainSnapshotNumber(snapshot.baseHeight, "Terrain baseHeight");
-      assertFiniteTerrainSnapshotNumber(snapshot.cutVolume, "Terrain cutVolume");
-      assertFiniteTerrainSnapshotNumber(snapshot.fillVolume, "Terrain fillVolume");
+      assertNonNegativeSnapshotNumber(snapshot.cutVolume, "Terrain cutVolume");
+      assertNonNegativeSnapshotNumber(snapshot.fillVolume, "Terrain fillVolume");
       assertFiniteTerrainSnapshotNumber(snapshot.netVolume, "Terrain netVolume");
-      assertFiniteTerrainSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
-      assertOptionalFiniteTerrainSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertNonNegativeSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
+      assertOptionalNonNegativeSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertOptionalSnapshotEnum(
+        snapshot.calculationMode,
+        ["sample-cell", "triangulated"],
+        "Terrain calculationMode"
+      );
       assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
       assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      assertOrderedRange(snapshot.minHeight, snapshot.maxHeight, "Terrain height");
       return;
     case "flood":
-      deserializePositions(snapshot.area);
-      deserializeGrid(snapshot.grid);
+      validateGridSnapshot(snapshot.grid);
       map.styles.resolveTerrainStyle("flood", snapshot.style);
       assertFiniteTerrainSnapshotNumber(snapshot.waterHeight, "Terrain waterHeight");
-      assertFiniteTerrainSnapshotNumber(snapshot.floodedArea, "Terrain floodedArea");
-      assertFiniteTerrainSnapshotNumber(snapshot.waterVolume, "Terrain waterVolume");
-      assertFiniteTerrainSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
-      assertOptionalFiniteTerrainSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertNonNegativeSnapshotNumber(snapshot.floodedArea, "Terrain floodedArea");
+      assertNonNegativeSnapshotNumber(snapshot.waterVolume, "Terrain waterVolume");
+      assertNonNegativeSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
+      assertOptionalNonNegativeSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertOptionalSnapshotEnum(
+        snapshot.calculationMode,
+        ["sample-cell", "triangulated"],
+        "Terrain calculationMode"
+      );
       assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
       assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      assertOrderedRange(snapshot.minHeight, snapshot.maxHeight, "Terrain height");
       return;
     case "excavation":
-      deserializePositions(snapshot.area);
-      deserializeGrid(snapshot.grid);
+      validateGridSnapshot(snapshot.grid);
       map.styles.resolveTerrainStyle("excavation", snapshot.style);
       assertFiniteTerrainSnapshotNumber(snapshot.bottomHeight, "Terrain bottomHeight");
-      assertOptionalFiniteTerrainSnapshotNumber(snapshot.depth, "Terrain depth");
-      assertFiniteTerrainSnapshotNumber(snapshot.cutVolume, "Terrain cutVolume");
-      assertFiniteTerrainSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
-      assertOptionalFiniteTerrainSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertOptionalNonNegativeSnapshotNumber(snapshot.depth, "Terrain depth");
+      assertNonNegativeSnapshotNumber(snapshot.cutVolume, "Terrain cutVolume");
+      assertNonNegativeSnapshotNumber(snapshot.sampleArea, "Terrain sampleArea");
+      assertOptionalNonNegativeSnapshotNumber(snapshot.surfaceArea, "Terrain surfaceArea");
+      assertOptionalSnapshotEnum(
+        snapshot.calculationMode,
+        ["sample-cell", "triangulated"],
+        "Terrain calculationMode"
+      );
       assertFiniteTerrainSnapshotNumber(snapshot.minHeight, "Terrain minHeight");
       assertFiniteTerrainSnapshotNumber(snapshot.maxHeight, "Terrain maxHeight");
+      assertOrderedRange(snapshot.minHeight, snapshot.maxHeight, "Terrain height");
       return;
+  }
+}
+
+function validateGridSnapshot(snapshot: TerrainSampleGridSnapshot): void {
+  assertSnapshotRecord(snapshot, "Terrain grid");
+  assertSerializablePositions(snapshot.area, "Terrain grid area", 3);
+  assertSnapshotInteger(snapshot.rows, "Terrain grid rows", 1);
+  assertSnapshotInteger(snapshot.columns, "Terrain grid columns", 1);
+  assertPositiveSnapshotNumber(snapshot.sampleStep, "Terrain grid sampleStep");
+  assertSnapshotBoolean(snapshot.sampled, "Terrain grid sampled");
+  assertSnapshotArray(snapshot.samples, "Terrain grid samples");
+  const expectedCount = snapshot.rows * snapshot.columns;
+  if (snapshot.samples.length !== expectedCount) {
+    throw new Error(`Terrain grid samples must contain exactly ${expectedCount} items.`);
+  }
+
+  const coordinates = new Set<string>();
+  snapshot.samples.forEach((sample, index) => {
+    assertSnapshotRecord(sample, `Terrain grid sample[${index}]`);
+    assertSnapshotInteger(sample.row, `Terrain grid sample[${index}] row`);
+    assertSnapshotInteger(sample.column, `Terrain grid sample[${index}] column`);
+    if (sample.row >= snapshot.rows || sample.column >= snapshot.columns) {
+      throw new Error(`Terrain grid sample[${index}] coordinates are outside the grid.`);
+    }
+    const key = `${sample.row}:${sample.column}`;
+    if (coordinates.has(key)) {
+      throw new Error(`Terrain grid sample coordinate "${key}" is duplicated.`);
+    }
+    coordinates.add(key);
+    assertSerializablePosition(sample.position, `Terrain grid sample[${index}] position`);
+    assertFiniteSnapshotNumber(sample.height, `Terrain grid sample[${index}] height`);
+    assertSnapshotBoolean(sample.sampled, `Terrain grid sample[${index}] sampled`);
+    assertOptionalFiniteSnapshotNumber(sample.slope, `Terrain grid sample[${index}] slope`);
+    assertOptionalFiniteSnapshotNumber(sample.aspect, `Terrain grid sample[${index}] aspect`);
+    if (sample.slope !== undefined && (sample.slope < 0 || sample.slope > 90)) {
+      throw new Error(`Terrain grid sample[${index}] slope must be between 0 and 90 degrees.`);
+    }
+    if (sample.aspect !== undefined && (sample.aspect < 0 || sample.aspect >= 360)) {
+      throw new Error(`Terrain grid sample[${index}] aspect must be between 0 and 360 degrees.`);
+    }
+  });
+}
+
+function validateContourLineSnapshot(snapshot: ContourLineSnapshot, index: number): void {
+  assertSnapshotRecord(snapshot, `Terrain contour line[${index}]`);
+  assertFiniteSnapshotNumber(snapshot.height, `Terrain contour line[${index}] height`);
+  assertSerializablePositions(
+    snapshot.positions,
+    `Terrain contour line[${index}] positions`,
+    2
+  );
+}
+
+function assertOrderedRange(minimum: number, maximum: number, label: string): void {
+  if (minimum > maximum) {
+    throw new Error(`${label} minimum cannot exceed maximum.`);
+  }
+}
+
+function assertOptionalNonNegativeSnapshotNumber(
+  value: unknown,
+  label: string
+): void {
+  if (value !== undefined) {
+    assertNonNegativeSnapshotNumber(value, label);
   }
 }
 
@@ -1023,19 +1260,21 @@ function reportOperationProgress(
   operation.throwIfAborted();
 }
 
-function rollbackTerrainResult(
-  manager: TerrainAnalysisManager,
-  map: KairosMap,
-  result: TerrainResult | undefined
-): void {
-  if (!result) {
-    return;
-  }
-  if (manager.get(result.id) === result) {
-    manager.remove(result.id);
-  } else {
-    removeEntities(map, result.entities);
-  }
+function terrainLeaseRequest(
+  kind: string,
+  options: unknown,
+  operation?: OperationContext
+) {
+  const asyncOptions = options as AsyncOperationOptions | undefined;
+  return {
+    kind,
+    mode: "write" as const,
+    resources: ["analysis"] as const,
+    conflictPolicy: "reject" as const,
+    operationId: operation?.id ?? asyncOptions?.operationId,
+    signal: operation?.signal ?? asyncOptions?.signal,
+    ownerToken: getRuntimeLeaseOwner(options)
+  };
 }
 
 function removeEntities(map: KairosMap, entities: Entity[]): void {

@@ -6,6 +6,11 @@ import {
   Material
 } from "cesium";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import {
+  acquireRuntimeLease,
+  withRuntimeLeaseOwner
+} from "../concurrency/lease";
 import type { KairosMap } from "../core/map";
 import { MaterialManager } from "../materials";
 import { OperationManager } from "../operations";
@@ -21,6 +26,33 @@ beforeAll(() => {
 });
 
 describe("EffectManager", () => {
+  it("rejects ordinary mutations while effects are leased", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    const lease = await acquireRuntimeLease(fixture.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"]
+    });
+
+    await expect(
+      manager.add({ id: "blocked-fog", type: "fog", intensity: 0.2 })
+    ).rejects.toThrow("Runtime resource");
+    await expect(manager.load([], { clear: true })).rejects.toThrow(
+      "Runtime resource"
+    );
+    expect(() => manager.preflightSceneLoad([], { clear: true })).not.toThrow();
+    expect(() => manager.clear()).toThrow("Runtime resource");
+    await expect(
+      manager.load([], withRuntimeLeaseOwner({}, lease.ownerToken))
+    ).resolves.toEqual([]);
+
+    lease.release();
+    await expect(
+      manager.add({ id: "allowed-fog", type: "fog", intensity: 0.2 })
+    ).resolves.toMatchObject({ id: "allowed-fog" });
+  });
+
   it("creates all nine effect runtimes and shares one ticker", async () => {
     const fixture = createMapFixture();
     const manager = new EffectManager(fixture.map);
@@ -89,7 +121,7 @@ describe("EffectManager", () => {
     const config = slowFlowConfig("pending-add", "slow-add");
     const firstAdd = firstManager.add(config);
 
-    await expect(firstManager.add(config)).rejects.toThrow("operation in progress");
+    await expect(firstManager.add(config)).rejects.toThrow("Runtime resource");
     firstDeferred.resolve(Material.fromType(Material.ColorType));
     await expect(firstAdd).resolves.toMatchObject({ id: "pending-add" });
     expect(firstFixture.primitives).toHaveLength(1);
@@ -103,7 +135,7 @@ describe("EffectManager", () => {
     secondManager.destroy();
     secondDeferred.resolve(Material.fromType(Material.ColorType));
 
-    await expect(pending).rejects.toThrow("superseded");
+    await expect(pending).rejects.toThrow("destroyed");
     expect(secondManager.list()).toHaveLength(0);
     expect(secondFixture.primitives).toHaveLength(0);
     expect(secondFixture.onTick.numberOfListeners).toBe(0);
@@ -177,14 +209,17 @@ describe("EffectManager", () => {
     );
 
     await deferred.started;
+    expect(fixture.concurrency.isBusy("effects")).toBe(true);
     controller.abort();
     await expect(pending).rejects.toMatchObject({
       name: "OperationCanceledError",
       operationId: "effects-add-canceled"
     });
-    await expect(manager.add(config)).rejects.toThrow("operation in progress");
+    expect(fixture.concurrency.isBusy("effects")).toBe(true);
+    await expect(manager.add(config)).rejects.toThrow("Runtime resource");
     deferred.resolve(material);
     await vi.waitFor(() => expect(destroy).toHaveBeenCalledOnce());
+    expect(fixture.concurrency.isBusy("effects")).toBe(false);
 
     expect(manager.get("canceled-add")).toBeUndefined();
     expect(fixture.primitives).toHaveLength(0);
@@ -215,7 +250,7 @@ describe("EffectManager", () => {
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: "OperationCanceledError" });
     await expect(manager.update("stable-pulse", { radius: 200 })).rejects.toThrow(
-      "operation in progress"
+      "Runtime resource"
     );
     deferred.resolve(material);
     await vi.waitFor(() => expect(destroy).toHaveBeenCalledOnce());
@@ -254,7 +289,7 @@ describe("EffectManager", () => {
     await expect(pending).rejects.toMatchObject({ name: "OperationCanceledError" });
     await expect(
       manager.add({ id: "blocked-during-load", type: "fog", intensity: 0.2 })
-    ).rejects.toThrow("load is in progress");
+    ).rejects.toThrow("Runtime resource");
     deferred.resolve(material);
     await vi.waitFor(() => expect(destroy).toHaveBeenCalledOnce());
     expect(manager.get("existing-fog")).toBeDefined();
@@ -664,6 +699,24 @@ describe("EffectManager", () => {
     expect(manager.setShow("original-rain", false)).toMatchObject({ show: false });
   });
 
+  it("consumes the exact effect preflight token without reparsing input", async () => {
+    const fixture = createMapFixture();
+    const manager = new EffectManager(fixture.map);
+    const snapshots = createSceneTransactionSnapshots("token");
+    const token = manager.preflightSceneLoad(snapshots, { clear: true });
+    (snapshots[0].config as { radius?: number }).radius = 0;
+
+    const stage = await manager.prepareSceneLoad(
+      snapshots,
+      { clear: true },
+      token
+    );
+    await stage.dispose();
+    await expect(
+      manager.prepareSceneLoad(snapshots, { clear: true }, token)
+    ).rejects.toThrow("invalid or stale");
+  });
+
   it("disposes detached runtimes when scene preparation fails", async () => {
     const fixture = createMapFixture();
     fixture.materials.register({
@@ -823,7 +876,8 @@ function createMapFixture() {
     currentTime: JulianDate.fromIso8601("2026-07-10T00:00:00Z"),
     onTick
   } as Clock;
-  const materials = new MaterialManager();
+  const concurrency = new RuntimeConcurrencyManager();
+  const materials = new MaterialManager(concurrency);
   const operations = new OperationManager();
   const primitiveCollection = {
     destroyPrimitives: true,
@@ -869,11 +923,13 @@ function createMapFixture() {
   };
   const map = {
     viewer: { scene, clock, isDestroyed: viewerIsDestroyed },
+    concurrency,
     materials,
     operations
   } as unknown as KairosMap;
   return {
     map,
+    concurrency,
     materials,
     operations,
     primitives,

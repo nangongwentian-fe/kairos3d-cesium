@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import { acquireRuntimeLease } from "../concurrency/lease";
 import { OperationCanceledError, OperationManager } from "../operations";
 import { LayerManager } from "./manager";
 import { LayerRegistry } from "./registry";
@@ -81,6 +83,7 @@ class TransactionalMemoryLayer implements LayerAdapter {
   destroyed = false;
 
   readonly transaction = {
+    preflight: vi.fn((_map: KairosMap) => undefined),
     prepare: vi.fn((_map: KairosMap) => undefined),
     attach: vi.fn((_map: KairosMap) => {
       if (this.config.metadata?.failAttach) {
@@ -160,6 +163,8 @@ function createTransactionalRegistry(created: TransactionalMemoryLayer[]): Layer
 
 function createMapMock() {
   return {
+    concurrency: new RuntimeConcurrencyManager(),
+    isDestroyed: vi.fn(() => false),
     operations: new OperationManager(),
     viewer: {
       flyTo: vi.fn(async () => true)
@@ -168,6 +173,61 @@ function createMapMock() {
 }
 
 describe("LayerManager", () => {
+  it("destroys a late layer runtime instead of committing after map destruction", async () => {
+    const created: MemoryLayer[] = [];
+    const map = createMapMock();
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const registry = new LayerRegistry();
+    registry.register<XyzLayerConfig>("xyz", (config) => {
+      const layer = new MemoryLayer(config);
+      layer.addTo.mockImplementationOnce(() => gate);
+      created.push(layer);
+      return layer;
+    });
+    const manager = new LayerManager(map, registry);
+    const addListener = vi.fn();
+    manager.on("add", addListener);
+
+    const lateLoading = manager.add({
+      id: "late",
+      type: "xyz",
+      url: "https://example.com/late/{z}/{x}/{y}.png"
+    });
+    await vi.waitFor(() => expect(created).toHaveLength(1));
+    vi.mocked(map.isDestroyed).mockReturnValue(true);
+    finish();
+
+    await expect(lateLoading).rejects.toThrow("map was destroyed");
+    expect(created[0].destroyed).toBe(true);
+    expect(manager.get("late")).toBeUndefined();
+    expect(addListener).not.toHaveBeenCalled();
+  });
+
+  it("rejects ordinary layer mutations while scene is exclusive", async () => {
+    const created: MemoryLayer[] = [];
+    const map = createMapMock();
+    const manager = new LayerManager(map, createRegistry(created));
+    await manager.add({
+      id: "base",
+      type: "xyz",
+      url: "https://example.com/base/{z}/{x}/{y}.png"
+    });
+    const scene = await acquireRuntimeLease(map.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"]
+    });
+
+    expect(() => manager.setShow("base", false)).toThrow("Runtime resource");
+    await expect(manager.add({
+      id: "blocked",
+      type: "xyz",
+      url: "https://example.com/blocked/{z}/{x}/{y}.png"
+    })).rejects.toMatchObject({ code: "RUNTIME_MUTATION_CONFLICT" });
+    scene.release();
+  });
+
   it("lists states by order and updates visibility", async () => {
     const created: MemoryLayer[] = [];
     const manager = new LayerManager(createMapMock(), createRegistry(created));
@@ -230,6 +290,57 @@ describe("LayerManager", () => {
       false
     ]);
     expect(moveListener).toHaveBeenCalledOnce();
+  });
+
+  it("keeps one layers lease across a group visibility update", async () => {
+    const created: MemoryLayer[] = [];
+    const map = createMapMock();
+    const manager = new LayerManager(map, createRegistry(created));
+    await manager.add({
+      id: "base",
+      type: "xyz",
+      url: "https://example.com/base/{z}/{x}/{y}.png",
+      group: "base"
+    });
+    await manager.add({
+      id: "labels",
+      type: "xyz",
+      url: "https://example.com/labels/{z}/{x}/{y}.png",
+      group: "base"
+    });
+    await manager.add({
+      id: "business",
+      type: "xyz",
+      url: "https://example.com/business/{z}/{x}/{y}.png",
+      group: "business"
+    });
+    let sceneReservation: ReturnType<typeof acquireRuntimeLease> | undefined;
+    let conflict: unknown;
+    manager.on("update", () => {
+      if (sceneReservation) {
+        return;
+      }
+      try {
+        manager.setShow("business", false);
+      } catch (error) {
+        conflict = error;
+      }
+      sceneReservation = acquireRuntimeLease(map.concurrency, {
+        kind: "scene.load",
+        mode: "exclusive",
+        resources: ["scene"]
+      });
+    });
+
+    const states = manager.setGroupShow("base", false);
+
+    expect(conflict).toMatchObject({ code: "RUNTIME_MUTATION_CONFLICT" });
+    expect(states.map((state) => state.show)).toEqual([false, false]);
+    expect(manager.get("base")?.show).toBe(false);
+    expect(manager.get("labels")?.show).toBe(false);
+    expect(manager.get("business")?.show).toBe(true);
+    const sceneLease = await sceneReservation!;
+    sceneLease.release();
   });
 
   it("exports configs and loads them back", async () => {
@@ -518,6 +629,33 @@ describe("LayerManager", () => {
     expect(oldLayer.destroyed).toBe(false);
     expect(nextLayer.attached).toBe(false);
     expect(nextLayer.destroyed).toBe(true);
+  });
+
+  it("preflights default transaction hooks before preparing the same adapter runtime", async () => {
+    const created: TransactionalMemoryLayer[] = [];
+    const map = createMapMock();
+    const manager = new LayerManager(map, createTransactionalRegistry(created));
+    const configs: LayerConfig[] = [{
+      id: "new",
+      type: "xyz",
+      url: "https://example.com/new/{z}/{x}/{y}.png"
+    }];
+
+    const preflight = await manager.preflightTransaction(configs, { clear: true });
+
+    expect(created).toHaveLength(1);
+    expect(created[0].transaction.preflight).toHaveBeenCalledWith(map);
+    expect(created[0].transaction.prepare).not.toHaveBeenCalled();
+
+    const stage = await manager.prepareTransaction(
+      configs,
+      { clear: true },
+      preflight
+    );
+
+    expect(created).toHaveLength(1);
+    expect(created[0].transaction.prepare).toHaveBeenCalledWith(map);
+    await stage.dispose();
   });
 
   it("finalizes a replacement before publishing buffered manager events", async () => {

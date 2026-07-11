@@ -55,6 +55,7 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `SceneLoadMode` | Scene recovery mode: default `transactional` or compatibility `progressive`. |
 | `SceneTransactionStatus` | Prepare, commit, rollback, and final transaction status values. |
 | `SceneRollbackStatus` | Rollback lifecycle and diagnostic status values. |
+| `SceneCleanupStatus` | Post-commit old-runtime cleanup lifecycle and diagnostic status values. |
 | `SceneTransactionState` | Observable prepare, commit, rollback, and completion state for scene recovery. |
 | `SceneTransactionError` | Scene load failure with phase, stage, and rollback diagnostics. |
 | `parseSceneSnapshot` | Validates and deep-clones a `SceneSnapshot` v1 without creating Cesium runtime. |
@@ -80,6 +81,12 @@ Framework-agnostic Cesium SDK package for Kairos3D projects.
 | `EffectSnapshot` | Data-only effect configuration used by effect and scene recovery. |
 | `OperationState` | Runtime status, progress, phase, and structured error for one async operation. |
 | `AsyncOperationOptions` | Optional abort signal and stable operation id accepted by tracked APIs. |
+| `RuntimeResource` | SDK-managed resource keys used by mutation lease observation and queries. |
+| `RuntimeLeaseMode` | Lease mode: ordinary resource `write` or scene-wide `exclusive`. |
+| `RuntimeLeaseStatus` | Observable lease status: `waiting` or `active`. |
+| `RuntimeLeaseState` | Immutable waiting or active mutation lease snapshot. |
+| `RuntimeConcurrencyQuery` | Filters for `map.concurrency.list()` and `whenIdle()`. |
+| `RuntimeMutationConflictError` | Immediate ordinary-mutation conflict with resource and optional holder state. |
 | `ViewerContainer` | Container type accepted by `createViewer`. |
 | `ViewerOptions` | Options type accepted by `createViewer`. |
 
@@ -127,6 +134,12 @@ import type { PickResult, SelectionState } from "@kairos3d/cesium/picking";
 import type { MaterialDefinition, MaterialDescriptor } from "@kairos3d/cesium/materials";
 import type { EffectConfig, EffectInstance, EffectSnapshot } from "@kairos3d/cesium/effects";
 import type { AsyncOperationOptions, OperationState } from "@kairos3d/cesium/operations";
+import {
+  RuntimeMutationConflictError,
+  type RuntimeConcurrencyQuery,
+  type RuntimeLeaseState,
+  type RuntimeResource
+} from "@kairos3d/cesium/concurrency";
 import type { ResultSymbolStyle, SDKStyleDefaults } from "@kairos3d/cesium/style";
 import type { HeightMode, HeightOptions, HeightSample } from "@kairos3d/cesium/height";
 ```
@@ -385,6 +398,24 @@ try {
 
 `map.operations` supports `get/list/cancel/cancelAll/clearFinished` and retains at most 100 finished records. Cancellation is cooperative: late Cesium results are discarded and temporary runtime objects are cleaned. Transactional scene recovery additionally rolls back in the background; call `map.sceneState.whenIdle()` before reading the restored scene after cancellation.
 
+## Runtime Concurrency
+
+```ts
+const unsubscribe = map.concurrency.on("change", (event) => {
+  console.log(event.data.leases);
+});
+
+const sceneLoad = map.sceneState.load(snapshot, {
+  conflictPolicy: "wait"
+});
+
+await map.concurrency.whenIdle({ resource: "effects" });
+await sceneLoad;
+unsubscribe();
+```
+
+Ordinary manager mutations reject immediately when their resource conflicts with an active or reserved Scene lease. Scene recovery waits by default and can use `conflictPolicy: "reject"` for immediate failure. Lease acquisition is intentionally internal: application code observes state and waits for idle, but continues to mutate runtime through its owning manager.
+
 ## Scene State
 
 ```ts
@@ -509,7 +540,7 @@ const candidates = map.performance.recommendPrimitiveCandidates({
 });
 ```
 
-`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, result Primitive runtime counts, layer runtime object counts, `effectCount`, `effectRuntimeObjectCount`, `animatedEffectCount`, `activeOperationCount`, `failedOperationCount`, and budget warnings. Primitive candidates are hints for renderer-specific work; results already using `renderMode: "primitive"` are skipped by candidate recommendations.
+`map.performance` is a diagnostics layer. It tracks current Entity counts, SDK-managed result counts, result Primitive runtime counts, layer runtime object counts, effects, operations, `activeMutationLeaseCount`, `waitingMutationLeaseCount`, and budget warnings. Primitive candidates are hints for renderer-specific work; results already using `renderMode: "primitive"` are skipped by candidate recommendations.
 
 ## Primitive Overlays
 
@@ -546,6 +577,7 @@ Draw polyline/polygon and distance/area measurement results can opt into Primiti
 | `materials` | Built-in and custom Entity/Primitive material definitions using public Cesium APIs. |
 | `effects` | Geometry, particle, and weather effects with transactional update, lifecycle cleanup, grouping, and data-only snapshots. |
 | `operations` | Runtime status, progress, cancellation, bounded history, and failure information for tracked async work. |
+| `concurrency` | Observable resource write/exclusive leases, conflict errors, fairness, and idle waits. |
 | `style` | Shared color parsing, style defaults, presets, and SDK result symbol styles. |
 | `height` | Height mode normalization, terrain sampling, clamp helpers, and surface distance helpers. |
 | `results` | Aggregated SDK-managed result listing, lookup, cleanup, and events for business panels. |

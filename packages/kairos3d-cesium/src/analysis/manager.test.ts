@@ -1,6 +1,8 @@
 import { Cartesian3, Entity } from "cesium";
 import { beforeAll, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import { acquireRuntimeLease } from "../concurrency/lease";
 import {
   OperationCanceledError,
   OperationManager,
@@ -24,6 +26,7 @@ beforeAll(() => {
 
 function createMapMock() {
   return {
+    concurrency: new RuntimeConcurrencyManager(),
     viewer: {
       terrainProvider: {
         availability: undefined
@@ -73,6 +76,19 @@ function createResult(id: string): MeasureResult {
 }
 
 describe("MeasureManager", () => {
+  it("rejects ordinary analysis mutations while scene is exclusive", async () => {
+    const map = createMapMock();
+    const manager = new MeasureManager(map);
+    const scene = await acquireRuntimeLease(map.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"]
+    });
+
+    expect(() => manager.clear()).toThrow("Runtime resource");
+    scene.release();
+  });
+
   it("starts measure tools through the shared tool manager", async () => {
     const map = createMapMock();
     const manager = new MeasureManager(map);
@@ -371,7 +387,7 @@ describe("VisibilityManager", () => {
       },
       { signal: controller.signal, operationId: "visibility-canceled" }
     );
-    await Promise.resolve();
+    await vi.waitFor(() => expect(resolveHeight).toBeTypeOf("function"));
     controller.abort();
 
     await expect(promise).rejects.toBeInstanceOf(OperationCanceledError);

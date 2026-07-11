@@ -69,6 +69,8 @@ export interface PerformanceStats {
   animatedEffectCount: number;
   activeOperationCount: number;
   failedOperationCount: number;
+  activeMutationLeaseCount: number;
+  waitingMutationLeaseCount: number;
   results: ResultPerformanceRecord[];
   resultBySource: Partial<Record<ResultSource, ResultPerformanceSummary>>;
   resultByType: Partial<Record<SDKManagedResult["type"], ResultPerformanceSummary>>;

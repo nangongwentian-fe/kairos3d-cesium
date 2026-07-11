@@ -1,5 +1,7 @@
 import { Cartesian2, Cartesian3, Color, Entity } from "cesium";
 import { describe, expect, it, vi } from "vitest";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import { acquireRuntimeLease } from "../concurrency/lease";
 import type { KairosMap } from "../core";
 import { StyleManager } from "../style";
 import { SelectionManager } from "./selection";
@@ -10,6 +12,7 @@ function createMapMock() {
   return {
     marker,
     map: {
+      concurrency: new RuntimeConcurrencyManager(),
       viewer: {
         entities: {
           add: vi.fn(() => marker),
@@ -22,6 +25,23 @@ function createMapMock() {
 }
 
 describe("SelectionManager", () => {
+  it("rejects external mutations during an exclusive lease and accepts its owner", async () => {
+    const { map } = createMapMock();
+    const manager = new SelectionManager(map);
+    const lease = await acquireRuntimeLease(map.concurrency, {
+      kind: "scene.load",
+      mode: "exclusive",
+      resources: ["scene"]
+    });
+
+    expect(() => manager.clear()).toThrow("Runtime resource");
+    expect(manager.clearWithRuntimeLease(lease.ownerToken)).toEqual({
+      result: undefined,
+      highlighted: false
+    });
+    lease.release();
+  });
+
   it("emits one change event for each public selection mutation", () => {
     const { map } = createMapMock();
     const manager = new SelectionManager(map);

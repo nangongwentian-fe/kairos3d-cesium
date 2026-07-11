@@ -4,6 +4,13 @@ import {
 } from "cesium";
 import type { KairosMap } from "../core/map";
 import {
+  assertRuntimeMutationAllowed,
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
+import {
   removeEntityIfOwned,
   removeEntityIfOwnedTracked
 } from "../core/entity-collection";
@@ -111,6 +118,10 @@ let drawResultIdSeed = 0;
 
 export class DrawManager extends Evented<DrawManagerEvents> {
   private readonly results = new Map<string, DrawResult>();
+  private readonly scenePreflights = new WeakMap<object, {
+    clear: boolean;
+    prepared: PreparedDrawSnapshot[];
+  }>();
   private activeEditResultId?: string;
   private readonly offToolStop: () => void;
 
@@ -389,12 +400,23 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   addResult(result: DrawResult): DrawResult {
+    return this.runMutation(
+      "draw.addResult",
+      (ownerToken) => this.addResultInternal(result, ownerToken),
+      this.mutationResourcesForReplacement([result.id])
+    );
+  }
+
+  private addResultInternal(
+    result: DrawResult,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): DrawResult {
     const existing = this.results.get(result.id);
     if (existing === result) {
       return result;
     }
     if (existing) {
-      this.remove(result.id);
+      this.removeInternal(result.id, ownerToken);
     }
     ensureDrawResultState(result);
     applyDrawResultShow(result, result.show);
@@ -419,11 +441,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     id: string,
     properties: Record<string, unknown> | undefined
   ): DrawResult {
+    return this.runMutation("draw.setProperties", () => {
     const result = this.getRequired(id);
     result.properties = cloneRecord(properties);
     result.updatedAt = new Date();
     this.emitProgrammaticChange(result);
     return result;
+    });
   }
 
   mergeProperties(id: string, patch: Record<string, unknown>): DrawResult {
@@ -439,11 +463,13 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   setMetadata(id: string, metadata: Record<string, unknown> | undefined): DrawResult {
+    return this.runMutation("draw.setMetadata", () => {
     const result = this.getRequired(id);
     result.metadata = cloneRecord(metadata);
     result.updatedAt = new Date();
     this.emitProgrammaticChange(result);
     return result;
+    });
   }
 
   mergeMetadata(id: string, patch: Record<string, unknown>): DrawResult {
@@ -478,22 +504,41 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     snapshots: DrawResultSnapshot[],
     options: DrawResultLoadOptions = {}
   ): Promise<DrawResult[]> {
-    const prepared = this.prepareSnapshots(snapshots);
-    if (options.clear) {
-      this.clear();
-    }
-
-    return prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      {
+        kind: "draw.load",
+        mode: "write",
+        resources: this.mutationResourcesForReplacement(
+          snapshots.map((snapshot) => snapshot.id),
+          options.clear
+        ),
+        conflictPolicy: "reject",
+        ownerToken: getRuntimeLeaseOwner(options)
+      },
+      (lease) => {
+        const prepared = this.prepareSnapshots(snapshots);
+        if (options.clear) {
+          this.clearInternal(lease.ownerToken);
+        }
+        return prepared.map((snapshot) =>
+          this.restoreSnapshot(snapshot, lease.ownerToken)
+        );
+      }
+    );
   }
 
   /** @internal */
-  async prepareSceneLoad(
+  preflightSceneLoad(
     snapshots: DrawResultSnapshot[],
     options: DrawResultLoadOptions = {}
-  ): Promise<PreparedSceneStage> {
+  ): object {
+    this.assertMutationAllowed(
+      "scene.draw.preflight",
+      getRuntimeLeaseOwner(options)
+    );
     const prepared = this.prepareSnapshots(snapshots);
-    const clear = options.clear ?? false;
-    if (!clear) {
+    if (!options.clear) {
       for (const item of prepared) {
         if (this.results.has(item.snapshot.id)) {
           throw new Error(
@@ -502,6 +547,32 @@ export class DrawManager extends Evented<DrawManagerEvents> {
         }
       }
     }
+    const token = Object.freeze({ phase: "draw" });
+    this.scenePreflights.set(token, {
+      clear: options.clear ?? false,
+      prepared
+    });
+    return token;
+  }
+
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: DrawResultSnapshot[],
+    options: DrawResultLoadOptions = {},
+    preflightToken?: object
+  ): Promise<PreparedSceneStage> {
+    this.assertMutationAllowed(
+      "scene.draw.prepare",
+      getRuntimeLeaseOwner(options)
+    );
+    const clear = options.clear ?? false;
+    const token = preflightToken ?? this.preflightSceneLoad(snapshots, options);
+    const preflight = this.scenePreflights.get(token);
+    if (!preflight || preflight.clear !== clear) {
+      throw new Error("Draw scene preflight token is invalid or stale.");
+    }
+    this.scenePreflights.delete(token);
+    const prepared = preflight.prepared;
 
     const staged: DrawResult[] = [];
     try {
@@ -666,6 +737,10 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   setStyle(id: string, style: ResultSymbolStyle): DrawResult {
+    return this.runMutation("draw.setStyle", () => this.setStyleInternal(id, style));
+  }
+
+  private setStyleInternal(id: string, style: ResultSymbolStyle): DrawResult {
     const result = this.results.get(id);
     if (!result) {
       throw new Error(`Draw result "${id}" does not exist.`);
@@ -695,12 +770,16 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   setStyleMany(ids: string[], style: ResultSymbolStyle): DrawResult[] {
-    const results = ids.map((id) => this.getRequired(id));
-    return results.map((result) => this.setStyle(result.id, style));
+    return this.runMutation("draw.setStyleMany", () => {
+      const results = ids.map((id) => this.getRequired(id));
+      return results.map((result) => this.setStyleInternal(result.id, style));
+    });
   }
 
   setStyleWhere(options: DrawQueryOptions, style: ResultSymbolStyle): DrawResult[] {
-    return this.list(options).map((result) => this.setStyle(result.id, style));
+    return this.runMutation("draw.setStyleWhere", () =>
+      this.list(options).map((result) => this.setStyleInternal(result.id, style))
+    );
   }
 
   update(
@@ -708,6 +787,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     positionsOrOptions: Cartesian3[] | DrawResultUpdateOptions,
     reason: DrawEditReason = "programmatic"
   ): DrawResult {
+    return this.runMutation("draw.update", () => {
     const result = this.results.get(id);
     if (!result) {
       throw new Error(`Draw result "${id}" does not exist.`);
@@ -750,9 +830,11 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     this.emit("update", result);
     this.emit("edit-change", event);
     return result;
+    });
   }
 
   setShow(id: string, show: boolean): DrawResult {
+    return this.runMutation("draw.setShow", () => {
     const result = this.getRequired(id);
     result.show = show;
     applyDrawResultShow(result, show);
@@ -765,38 +847,47 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       reason: "programmatic"
     });
     return result;
+    });
   }
 
   setLocked(id: string, locked: boolean): DrawResult {
+    return this.runMutation("draw.setLocked", () => {
     const result = this.getRequired(id);
     result.locked = locked;
     result.updatedAt = new Date();
     this.emit("update", result);
     return result;
+    });
   }
 
   setEditable(id: string, editable: boolean): DrawResult {
+    return this.runMutation("draw.setEditable", () => {
     const result = this.getRequired(id);
     result.editable = editable;
     result.updatedAt = new Date();
     this.emit("update", result);
     return result;
+    });
   }
 
   setGroup(id: string, group: string | undefined): DrawResult {
+    return this.runMutation("draw.setGroup", () => {
     const result = this.getRequired(id);
     result.group = group;
     result.updatedAt = new Date();
     this.emit("update", result);
     return result;
+    });
   }
 
   removeGroup(group: string): number {
     const results = this.list({ group });
-    for (const result of results) {
-      this.remove(result.id);
-    }
-    return results.length;
+    return this.runMutation("draw.removeGroup", (ownerToken) => {
+      for (const result of results) {
+        this.removeInternal(result.id, ownerToken);
+      }
+      return results.length;
+    }, this.mutationResourcesForReplacement(results.map((result) => result.id)));
   }
 
   clearGroup(group: string): number {
@@ -804,13 +895,25 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   remove(id: string): boolean {
+    return this.runMutation(
+      "draw.remove",
+      (ownerToken) => this.removeInternal(id, ownerToken),
+      this.mutationResourcesForReplacement([id])
+    );
+  }
+
+  private removeInternal(id: string, ownerToken?: RuntimeLeaseOwnerToken): boolean {
     const result = this.results.get(id);
     if (!result) {
       return false;
     }
 
     if (this.activeEditResultId === id) {
-      this.cancelEdit();
+      if (ownerToken) {
+        this.map.tools.stopWithRuntimeLease(ownerToken);
+      } else {
+        this.map.tools.stop();
+      }
     }
 
     removeEntityIfOwned(this.map.viewer.entities, result.entity);
@@ -822,8 +925,20 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   clear(): void {
+    this.runMutation(
+      "draw.clear",
+      (ownerToken) => this.clearInternal(ownerToken),
+      this.mutationResourcesForReplacement([], true)
+    );
+  }
+
+  private clearInternal(ownerToken?: RuntimeLeaseOwnerToken): void {
     if (this.activeEditResultId) {
-      this.cancelEdit();
+      if (ownerToken) {
+        this.map.tools.stopWithRuntimeLease(ownerToken);
+      } else {
+        this.map.tools.stop();
+      }
     }
 
     const removed = [...this.results.values()];
@@ -839,12 +954,23 @@ export class DrawManager extends Evented<DrawManagerEvents> {
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.offToolStop();
     this.off();
   }
 
   private addProgrammaticResult(config: DrawProgrammaticConfig): DrawResult {
+    return this.runMutation(
+      "draw.addProgrammaticResult",
+      (ownerToken) => this.addProgrammaticResultInternal(config, ownerToken),
+      this.mutationResourcesForReplacement(config.id ? [config.id] : [])
+    );
+  }
+
+  private addProgrammaticResultInternal(
+    config: DrawProgrammaticConfig,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): DrawResult {
     const id = config.id ?? createDrawResultId(config.type);
     const positions = clonePositions(config.positions);
     const data = cloneOverlayData(config.data);
@@ -862,7 +988,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
         ? renderDrawPrimitives(this.map, config.type, id, positions, style)
         : undefined;
 
-    return this.addResult({
+    return this.addResultInternal({
       id,
       type: config.type,
       entity,
@@ -879,7 +1005,7 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       locked: config.locked ?? false,
       editable: config.editable ?? true,
       primitives
-    });
+    }, ownerToken);
   }
 
   private resolveDrawUpdate(
@@ -959,13 +1085,16 @@ export class DrawManager extends Evented<DrawManagerEvents> {
     });
   }
 
-  private restoreSnapshot(prepared: PreparedDrawSnapshot): DrawResult {
+  private restoreSnapshot(
+    prepared: PreparedDrawSnapshot,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): DrawResult {
     const result = this.createPreparedResult(prepared);
     if (this.results.has(result.id)) {
-      this.remove(result.id);
+      this.removeInternal(result.id, ownerToken);
     }
     attachDrawRuntime(this.map, result);
-    return this.addResult(result);
+    return this.addResultInternal(result, ownerToken);
   }
 
   private createPreparedResult(prepared: PreparedDrawSnapshot): DrawResult {
@@ -1015,6 +1144,35 @@ export class DrawManager extends Evented<DrawManagerEvents> {
       positions: clonePositions(result.positions),
       reason: "programmatic"
     });
+  }
+
+  private assertMutationAllowed(
+    kind: string,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): void {
+    assertRuntimeMutationAllowed(this.map.concurrency, "draw", kind, ownerToken);
+  }
+
+  private runMutation<T>(
+    kind: string,
+    task: (ownerToken: RuntimeLeaseOwnerToken) => T,
+    resources: Array<"draw" | "tools"> = ["draw"]
+  ): T {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind, resources },
+      (lease) => task(lease.ownerToken)
+    );
+  }
+
+  private mutationResourcesForReplacement(
+    ids: string[],
+    clear = false
+  ): Array<"draw" | "tools"> {
+    const activeId = this.activeEditResultId;
+    return activeId && (clear || ids.includes(activeId))
+      ? ["draw", "tools"]
+      : ["draw"];
   }
 }
 

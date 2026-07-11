@@ -9,6 +9,13 @@ import {
 } from "cesium";
 import type { KairosMap } from "../core";
 import {
+  assertRuntimeMutationAllowed,
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
+import {
   removeEntityIfOwned,
   removeEntityIfOwnedTracked
 } from "../core/entity-collection";
@@ -45,6 +52,22 @@ import type {
   ClippingTarget,
   ClippingType
 } from "./types";
+import {
+  assertFiniteSnapshotNumber,
+  assertNonEmptySnapshotId,
+  assertOptionalSnapshotBoolean,
+  assertOptionalSnapshotString,
+  assertPositiveSnapshotNumber,
+  assertSerializablePositions,
+  assertSerializableVector3,
+  assertSnapshotArray,
+  assertSnapshotBoolean,
+  assertSnapshotDate,
+  assertSnapshotEnum,
+  assertSnapshotRecord,
+  cloneAndFreezeSnapshot,
+  freezePreparedArray
+} from "./snapshot-validation";
 
 type ClippingProperty = "clippingPlanes" | "clippingPolygons";
 
@@ -63,6 +86,36 @@ interface ClippingRuntime {
 interface PreparedClippingRuntime {
   result: ClippingResult;
 }
+
+type PreparedClippingSnapshot =
+  | {
+      readonly type: "plane";
+      readonly snapshot: ClippingResultSnapshot & { type: "plane" };
+      readonly target: ClippingTarget;
+      readonly createdAt: Date;
+      readonly style: ResultSymbolStyle;
+      readonly normal: Cartesian3;
+    }
+  | {
+      readonly type: "polygon";
+      readonly snapshot: ClippingResultSnapshot & { type: "polygon" };
+      readonly target: ClippingTarget;
+      readonly createdAt: Date;
+      readonly style: ResultSymbolStyle;
+      readonly positions: Cartesian3[];
+    };
+
+export interface ClippingScenePreflightContext {
+  readonly availableLayerIds?: ReadonlySet<string>;
+}
+
+/** @internal Parsed clipping snapshots without Cesium runtime collections. */
+export interface ClippingScenePreflightToken {
+  readonly owner: ClippingManager;
+  readonly prepared: readonly PreparedClippingSnapshot[];
+}
+
+const consumedClippingPreflightTokens = new WeakSet<ClippingScenePreflightToken>();
 
 interface DetachedClippingRuntime {
   runtime: ClippingRuntime;
@@ -119,11 +172,15 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   }
 
   addPlane(options: ClippingPlaneOptions): ClippingResult {
-    return this.createPlaneResult(options);
+    return this.runMutation("analysis.clipping.addPlane", () =>
+      this.createPlaneResult(options)
+    );
   }
 
   addPolygon(options: ClippingPolygonOptions): ClippingResult {
-    return this.createPolygonResult(options);
+    return this.runMutation("analysis.clipping.addPolygon", () =>
+      this.createPolygonResult(options)
+    );
   }
 
   private createPlaneResult(
@@ -187,6 +244,7 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   }
 
   edit(id: string): ClippingResult {
+    return this.runMutation("analysis.clipping.edit", () => {
     const runtime = this.requireRuntime(id);
     this.map.tools.stop();
     this.clearEditHandles();
@@ -196,15 +254,19 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
       handles: renderEditHandles(this.map, runtime.result)
     };
     return runtime.result;
+    });
   }
 
   stopEdit(): ClippingResult | undefined {
+    return this.runMutation("analysis.clipping.stopEdit", () => {
     const state = this.editState;
     this.clearEditHandles();
     return state ? this.get(state.id) : undefined;
+    });
   }
 
   cancelEdit(): ClippingResult | undefined {
+    return this.runMutation("analysis.clipping.cancelEdit", () => {
     const state = this.editState;
     if (!state) {
       return undefined;
@@ -212,13 +274,23 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
 
     const result =
       state.snapshot.type === "plane"
-        ? this.updatePlane(state.id, state.snapshot)
-        : this.updatePolygon(state.id, state.snapshot.positions, state.snapshot);
+        ? this.updatePlaneInternal(state.id, state.snapshot)
+        : this.updatePolygonInternal(state.id, state.snapshot.positions, state.snapshot);
     this.clearEditHandles();
     return result;
+    });
   }
 
   updatePlane(id: string, options: ClippingPlaneUpdateOptions): ClippingResult {
+    return this.runMutation("analysis.clipping.updatePlane", () =>
+      this.updatePlaneInternal(id, options)
+    );
+  }
+
+  private updatePlaneInternal(
+    id: string,
+    options: ClippingPlaneUpdateOptions
+  ): ClippingResult {
     const runtime = this.requireRuntime(id);
     if (runtime.result.type !== "plane") {
       throw new Error(`Clipping result "${id}" is not a plane clipping result.`);
@@ -253,6 +325,16 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     positions: Cartesian3[],
     options: ClippingPolygonUpdateOptions = {}
   ): ClippingResult {
+    return this.runMutation("analysis.clipping.updatePolygon", () =>
+      this.updatePolygonInternal(id, positions, options)
+    );
+  }
+
+  private updatePolygonInternal(
+    id: string,
+    positions: Cartesian3[],
+    options: ClippingPolygonUpdateOptions
+  ): ClippingResult {
     const runtime = this.requireRuntime(id);
     if (runtime.result.type !== "polygon") {
       throw new Error(`Clipping result "${id}" is not a polygon clipping result.`);
@@ -285,14 +367,17 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   }
 
   setEnabled(id: string, enabled: boolean): ClippingResult {
+    return this.runMutation("analysis.clipping.setEnabled", () => {
     const runtime = this.requireRuntime(id);
     runtime.result.collection.enabled = enabled;
     runtime.result.enabled = enabled;
     this.emit("update", runtime.result);
     return runtime.result;
+    });
   }
 
   setStyle(id: string, style: ResultSymbolStyle): ClippingResult {
+    return this.runMutation("analysis.clipping.setStyle", () => {
     const runtime = this.requireRuntime(id);
     const resolved = this.map.styles.resolveClippingStyle(style);
     runtime.result.style = resolved;
@@ -300,6 +385,7 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     applySymbolStyleToEntities(runtime.result.entities, resolved);
     this.emit("update", runtime.result);
     return runtime.result;
+    });
   }
 
   get(id: string): ClippingResult | undefined {
@@ -320,22 +406,31 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     snapshots: ClippingResultSnapshot[],
     options: RuntimeResultLoadOptions = {}
   ): Promise<ClippingResult[]> {
-    this.prepareSnapshots(snapshots);
-    if (options.clear) {
-      this.clear();
-    }
-
-    return snapshots.map((snapshot) => this.restoreSnapshot(snapshot));
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      {
+        kind: "analysis.clipping.load",
+        mode: "write",
+        resources: ["analysis"],
+        conflictPolicy: "reject",
+        ownerToken: getRuntimeLeaseOwner(options)
+      },
+      () => {
+        const prepared = this.prepareSnapshots(snapshots);
+        if (options.clear) this.clearInternal();
+        return prepared.map((snapshot) => this.restorePreparedSnapshot(snapshot));
+      }
+    );
   }
 
   /** @internal */
-  async prepareSceneLoad(
+  preflightSceneLoad(
     snapshots: ClippingResultSnapshot[],
-    options: RuntimeResultLoadOptions = {}
-  ): Promise<PreparedSceneStage> {
-    this.prepareSnapshots(snapshots, false);
-    const clear = options.clear ?? false;
-    if (!clear) {
+    options: RuntimeResultLoadOptions = {},
+    context: ClippingScenePreflightContext = {}
+  ): ClippingScenePreflightToken {
+    const prepared = this.prepareSnapshots(snapshots, false, context);
+    if (!options.clear) {
       for (const snapshot of snapshots) {
         if (this.results.has(snapshot.id)) {
           throw new Error(
@@ -344,9 +439,27 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
         }
       }
     }
+    return Object.freeze({ owner: this, prepared });
+  }
+
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: ClippingResultSnapshot[],
+    options: RuntimeResultLoadOptions = {},
+    preflight?: ClippingScenePreflightToken
+  ): Promise<PreparedSceneStage> {
+    const token = preflight ?? this.preflightSceneLoad(snapshots, options);
+    if (token.owner !== this) {
+      throw new Error("Clipping Scene preflight token belongs to another manager.");
+    }
+    if (consumedClippingPreflightTokens.has(token)) {
+      throw new Error("Clipping Scene preflight token has already been consumed.");
+    }
+    consumedClippingPreflightTokens.add(token);
+    const clear = options.clear ?? false;
     const staged: PreparedClippingRuntime[] = [];
     try {
-      for (const snapshot of snapshots) {
+      for (const snapshot of token.prepared) {
         staged.push(this.createPreparedRuntime(snapshot));
       }
     } catch (error) {
@@ -502,6 +615,10 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   }
 
   remove(id: string): boolean {
+    return this.runMutation("analysis.clipping.remove", () => this.removeInternal(id));
+  }
+
+  private removeInternal(id: string): boolean {
     const runtime = this.results.get(id);
     if (!runtime) {
       return false;
@@ -519,6 +636,10 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   }
 
   clear(): void {
+    this.runMutation("analysis.clipping.clear", () => this.clearInternal());
+  }
+
+  private clearInternal(): void {
     this.clearEditHandles();
     const removed = [...this.results.values()];
     for (const runtime of removed) {
@@ -536,7 +657,7 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 
@@ -551,7 +672,7 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     const resolved = this.resolveTarget(target, type);
     const existingId = this.targetResultIds.get(resolved.key);
     if (existingId) {
-      this.remove(existingId);
+      this.removeInternal(existingId);
     }
 
     const result: ClippingResult = {
@@ -578,46 +699,48 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
     return result;
   }
 
-  private restoreSnapshot(snapshot: ClippingResultSnapshot): ClippingResult {
-    const meta = {
-      id: snapshot.id,
-      createdAt: parseSnapshotDate(snapshot.createdAt, "Clipping result createdAt"),
-      enabled: snapshot.enabled,
-      style: snapshot.style
-    };
-    const target = snapshotTargetToTarget(snapshot.target);
-
-    if (snapshot.type === "plane") {
+  private restorePreparedSnapshot(prepared: PreparedClippingSnapshot): ClippingResult {
+    if (prepared.type === "plane") {
+      const { snapshot, target, createdAt, style } = prepared;
       return this.createPlaneResult(
         {
           target,
-          normal: deserializeVector3(snapshot.normal),
+          normal: prepared.normal,
           distance: snapshot.distance,
-          style: snapshot.style
+          style
         },
-        meta
+        {
+          id: snapshot.id,
+          createdAt,
+          enabled: snapshot.enabled,
+          style
+        }
       );
     }
 
+    const { snapshot, target, createdAt, style } = prepared;
     return this.createPolygonResult(
       {
         target,
-        positions: deserializePositions(snapshot.positions),
+        positions: prepared.positions,
         inverse: snapshot.inverse,
         quality: snapshot.quality,
-        style: snapshot.style
+        style
       },
-      meta
+      {
+        id: snapshot.id,
+        createdAt,
+        enabled: snapshot.enabled,
+        style
+      }
     );
   }
 
-  private createPreparedRuntime(snapshot: ClippingResultSnapshot): PreparedClippingRuntime {
-    const target = snapshotTargetToTarget(snapshot.target);
-    const createdAt = parseSnapshotDate(snapshot.createdAt, "Clipping result createdAt");
-    const style = this.map.styles.resolveClippingStyle(snapshot.style);
-    if (snapshot.type === "plane") {
+  private createPreparedRuntime(prepared: PreparedClippingSnapshot): PreparedClippingRuntime {
+    if (prepared.type === "plane") {
+      const { snapshot, target, createdAt, style } = prepared;
       const collection = new ClippingPlaneCollection({
-        planes: [new ClippingPlane(normalizeNormal(deserializeVector3(snapshot.normal)), snapshot.distance)],
+        planes: [new ClippingPlane(prepared.normal, snapshot.distance)],
         enabled: snapshot.enabled,
         edgeColor: style.line?.color
           ? parseColorLike(style.line.color, "clipping.line.color")
@@ -638,7 +761,8 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
       };
     }
 
-    const positions = deserializePositions(snapshot.positions);
+    const { snapshot, target, createdAt, style } = prepared;
+    const positions = prepared.positions;
     const collection = new ClippingPolygonCollection({
       polygons: [new ClippingPolygon({ positions })],
       enabled: snapshot.enabled,
@@ -688,40 +812,81 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
 
   private prepareSnapshots(
     snapshots: ClippingResultSnapshot[],
-    resolveTargets = true
-  ): void {
+    resolveTargets = true,
+    context: ClippingScenePreflightContext = {}
+  ): readonly PreparedClippingSnapshot[] {
+    assertSnapshotArray(snapshots, "Clipping result snapshots");
     const ids = new Set<string>();
+    const prepared: PreparedClippingSnapshot[] = [];
     for (const snapshot of snapshots) {
+      assertSnapshotRecord(snapshot, "Clipping result snapshot");
+      assertNonEmptySnapshotId(snapshot.id, "Clipping result snapshot id");
       if (ids.has(snapshot.id)) {
         throw new Error(`Clipping result snapshot id "${snapshot.id}" is duplicated.`);
       }
       ids.add(snapshot.id);
-      parseSnapshotDate(snapshot.createdAt, "Clipping result createdAt");
+      assertSnapshotEnum(snapshot.type, ["plane", "polygon"], "Clipping result type");
+      assertSnapshotBoolean(snapshot.enabled, "Clipping result enabled");
+      assertSnapshotDate(snapshot.createdAt, "Clipping result createdAt");
+      assertSnapshotRecord(snapshot.target, "Clipping target");
+      assertSnapshotEnum(snapshot.target.type, ["globe", "layer"], "Clipping target type");
+      if (snapshot.target.type === "layer") {
+        assertNonEmptySnapshotId(snapshot.target.layerId, "Clipping target layerId");
+        if (
+          context.availableLayerIds &&
+          !context.availableLayerIds.has(snapshot.target.layerId)
+        ) {
+          throw new Error(
+            `Clipping target layer "${snapshot.target.layerId}" is not available in the incoming Scene.`
+          );
+        }
+      } else {
+        assertOptionalSnapshotString(
+          (snapshot.target as Record<string, unknown>).layerId,
+          "Globe clipping target layerId"
+        );
+        if ((snapshot.target as Record<string, unknown>).layerId !== undefined) {
+          throw new Error("Globe clipping targets cannot define layerId.");
+        }
+      }
+      const createdAt = parseSnapshotDate(snapshot.createdAt, "Clipping result createdAt");
       const target = snapshotTargetToTarget(snapshot.target);
       if (resolveTargets) {
         this.resolveTarget(target, snapshot.type);
       }
 
       if (snapshot.type === "plane") {
-        normalizeNormal(deserializeVector3(snapshot.normal));
-        if (!Number.isFinite(snapshot.distance)) {
-          throw new Error("Plane clipping distance must be a finite number.");
-        }
-        this.map.styles.resolveClippingStyle(snapshot.style);
+        assertSerializableVector3(snapshot.normal, "Plane clipping normal");
+        assertFiniteSnapshotNumber(snapshot.distance, "Plane clipping distance");
+        const normal = normalizeNormal(deserializeVector3(snapshot.normal));
+        prepared.push(Object.freeze({
+          type: "plane" as const,
+          snapshot: cloneAndFreezeSnapshot(snapshot),
+          target,
+          createdAt,
+          style: this.map.styles.resolveClippingStyle(snapshot.style),
+          normal
+        }));
       } else {
-        const positions = deserializePositions(snapshot.positions);
-        if (positions.length < 3) {
-          throw new Error("Polygon clipping requires at least three positions.");
-        }
-        if (typeof snapshot.quality === "number" && snapshot.quality <= 0) {
-          throw new Error("Polygon clipping quality must be greater than 0.");
+        assertSerializablePositions(snapshot.positions, "Polygon clipping positions", 3);
+        assertOptionalSnapshotBoolean(snapshot.inverse, "Polygon clipping inverse");
+        if (snapshot.quality !== undefined) {
+          assertPositiveSnapshotNumber(snapshot.quality, "Polygon clipping quality");
         }
         if (!ClippingPolygonCollection.isSupported(this.map.viewer.scene)) {
           throw new Error("Polygon clipping is not supported by the current Cesium scene.");
         }
-        this.map.styles.resolveClippingStyle(snapshot.style);
+        prepared.push(Object.freeze({
+          type: "polygon" as const,
+          snapshot: cloneAndFreezeSnapshot(snapshot),
+          target,
+          createdAt,
+          style: this.map.styles.resolveClippingStyle(snapshot.style),
+          positions: deserializePositions(snapshot.positions)
+        }));
       }
     }
+    return freezePreparedArray(prepared);
   }
 
   private requireRuntime(id: string): ClippingRuntime {
@@ -769,6 +934,21 @@ export class ClippingManager extends Evented<ClippingManagerEvents> {
       ...this.editState,
       handles: renderEditHandles(this.map, result)
     };
+  }
+
+  private assertMutationAllowed(
+    kind: string,
+    ownerToken?: RuntimeLeaseOwnerToken
+  ): void {
+    assertRuntimeMutationAllowed(this.map.concurrency, "analysis", kind, ownerToken);
+  }
+
+  private runMutation<T>(kind: string, task: () => T): T {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind, resources: ["analysis"] },
+      () => task()
+    );
   }
 
   private clearEditHandles(): void {

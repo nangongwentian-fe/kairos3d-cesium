@@ -1,4 +1,8 @@
 import { Color, type Entity } from "cesium";
+import {
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
 import type { KairosMap } from "../core";
 import { Evented } from "../core";
 import type { SelectionSymbolStyle } from "../style";
@@ -16,6 +20,14 @@ export class SelectionManager extends Evented<SelectionManagerEvents> {
   }
 
   select(result?: PickResult): SelectionState {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "selection.select", resources: ["selection"] },
+      () => this.selectInternal(result)
+    );
+  }
+
+  private selectInternal(result?: PickResult): SelectionState {
     this.resetSelection();
 
     if (!result) {
@@ -33,11 +45,36 @@ export class SelectionManager extends Evented<SelectionManagerEvents> {
   }
 
   clear(): SelectionState {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "selection.clear", resources: ["selection"] },
+      () => this.clearInternal()
+    );
+  }
+
+  /** @internal */
+  clearWithRuntimeLease(ownerToken: RuntimeLeaseOwnerToken): SelectionState {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "selection.clear", resources: ["selection"], ownerToken },
+      () => this.clearInternal()
+    );
+  }
+
+  private clearInternal(): SelectionState {
     this.resetSelection();
     return this.emitChange();
   }
 
   setStyle(style: SelectionSymbolStyle): SelectionState {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "selection.set-style", resources: ["selection"] },
+      () => this.setStyleInternal(style)
+    );
+  }
+
+  private setStyleInternal(style: SelectionSymbolStyle): SelectionState {
     this.style = style;
     const current = this.current;
     if (!current) {
@@ -72,7 +109,7 @@ export class SelectionManager extends Evented<SelectionManagerEvents> {
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 

@@ -1,5 +1,6 @@
 import type { Entity } from "cesium";
 import type { KairosMap } from "../core";
+import { getRuntimeConcurrencyCounts } from "../concurrency/lease";
 import { countResultPrimitiveRuntimes } from "../primitives";
 import type {
   ResultPerformanceRecord,
@@ -58,6 +59,7 @@ export class PerformanceManager {
       0
     );
     const entityCount = countViewerEntities(this.map);
+    const concurrency = getRuntimeConcurrencyCounts(this.map.concurrency);
     const statsWithoutWarnings = {
       createdAt: new Date(),
       entityCount,
@@ -77,6 +79,8 @@ export class PerformanceManager {
       animatedEffectCount: this.map.effects.getAnimatedCount(),
       activeOperationCount: this.map.operations.list({ status: "running" }).length,
       failedOperationCount: this.map.operations.list({ status: "failed" }).length,
+      activeMutationLeaseCount: concurrency.active,
+      waitingMutationLeaseCount: concurrency.waiting,
       results,
       resultBySource: summarizeResultsBySource(results),
       resultByType: summarizeResultsByType(results),

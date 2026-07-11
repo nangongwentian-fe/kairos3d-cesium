@@ -1,4 +1,10 @@
 import { Cartesian3 } from "cesium";
+import {
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
 import type { KairosMap } from "../core/map";
 import { removeEntityIfOwned } from "../core/entity-collection";
 import {
@@ -61,7 +67,8 @@ export interface OverlayManagerEvents {
 }
 
 interface PreparedOverlaySnapshot {
-  snapshot: OverlaySnapshot;
+  id: string;
+  type: OverlayType;
   positions: Cartesian3[];
   createdAt: Date;
   updatedAt?: Date;
@@ -80,16 +87,28 @@ let overlayIdSeed = 0;
 
 export class OverlayManager extends Evented<OverlayManagerEvents> {
   private readonly overlays = new Map<string, Overlay>();
+  private readonly scenePreflights = new WeakMap<
+    object,
+    { clear: boolean; prepared: PreparedOverlaySnapshot[] }
+  >();
 
   constructor(private readonly map: KairosMap) {
     super();
   }
 
   add(config: OverlayConfig): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.add", resources: ["overlays"] },
+      () => this.addInternal(config)
+    );
+  }
+
+  private addInternal(config: OverlayConfig): Overlay {
     const overlay = this.createOverlayFromConfig(config);
     const existing = this.overlays.get(overlay.id);
     if (existing) {
-      this.remove(overlay.id);
+      this.removeInternal(overlay.id);
     }
 
     this.overlays.set(overlay.id, overlay);
@@ -230,6 +249,14 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   update(id: string, options: OverlayUpdateOptions): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.update", resources: ["overlays"] },
+      () => this.updateInternal(id, options)
+    );
+  }
+
+  private updateInternal(id: string, options: OverlayUpdateOptions): Overlay {
     const overlay = this.overlays.get(id);
     if (!overlay) {
       throw new Error(`Overlay "${id}" does not exist.`);
@@ -278,6 +305,14 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   setStyle(id: string, style: ResultSymbolStyle): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-style", resources: ["overlays"] },
+      () => this.setStyleInternal(id, style)
+    );
+  }
+
+  private setStyleInternal(id: string, style: ResultSymbolStyle): Overlay {
     const overlay = this.overlays.get(id);
     if (!overlay) {
       throw new Error(`Overlay "${id}" does not exist.`);
@@ -304,6 +339,14 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   setShow(id: string, show: boolean): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-show", resources: ["overlays"] },
+      () => this.setShowInternal(id, show)
+    );
+  }
+
+  private setShowInternal(id: string, show: boolean): Overlay {
     const overlay = this.overlays.get(id);
     if (!overlay) {
       throw new Error(`Overlay "${id}" does not exist.`);
@@ -317,6 +360,14 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   setLocked(id: string, locked: boolean): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-locked", resources: ["overlays"] },
+      () => this.setLockedInternal(id, locked)
+    );
+  }
+
+  private setLockedInternal(id: string, locked: boolean): Overlay {
     const overlay = this.getRequired(id);
     overlay.locked = locked;
     overlay.updatedAt = new Date();
@@ -325,6 +376,14 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   setEditable(id: string, editable: boolean): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-editable", resources: ["overlays"] },
+      () => this.setEditableInternal(id, editable)
+    );
+  }
+
+  private setEditableInternal(id: string, editable: boolean): Overlay {
     const overlay = this.getRequired(id);
     overlay.editable = editable;
     overlay.updatedAt = new Date();
@@ -333,6 +392,14 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   setGroup(id: string, group: string | undefined): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-group", resources: ["overlays"] },
+      () => this.setGroupInternal(id, group)
+    );
+  }
+
+  private setGroupInternal(id: string, group: string | undefined): Overlay {
     const overlay = this.getRequired(id);
     overlay.group = group;
     overlay.updatedAt = new Date();
@@ -356,6 +423,17 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     id: string,
     properties: Record<string, unknown> | undefined
   ): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-properties", resources: ["overlays"] },
+      () => this.setPropertiesInternal(id, properties)
+    );
+  }
+
+  private setPropertiesInternal(
+    id: string,
+    properties: Record<string, unknown> | undefined
+  ): Overlay {
     const overlay = this.getRequired(id);
     overlay.properties = cloneRecord(properties);
     overlay.updatedAt = new Date();
@@ -364,11 +442,17 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   mergeProperties(id: string, patch: Record<string, unknown>): Overlay {
-    const overlay = this.getRequired(id);
-    return this.setProperties(id, {
-      ...(overlay.properties ?? {}),
-      ...patch
-    });
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.merge-properties", resources: ["overlays"] },
+      () => {
+        const overlay = this.getRequired(id);
+        return this.setPropertiesInternal(id, {
+          ...(overlay.properties ?? {}),
+          ...patch
+        });
+      }
+    );
   }
 
   getMetadata(id: string): Record<string, unknown> | undefined {
@@ -376,6 +460,17 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   setMetadata(id: string, metadata: Record<string, unknown> | undefined): Overlay {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-metadata", resources: ["overlays"] },
+      () => this.setMetadataInternal(id, metadata)
+    );
+  }
+
+  private setMetadataInternal(
+    id: string,
+    metadata: Record<string, unknown> | undefined
+  ): Overlay {
     const overlay = this.getRequired(id);
     overlay.metadata = cloneMetadata(metadata);
     overlay.updatedAt = new Date();
@@ -384,11 +479,17 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   mergeMetadata(id: string, patch: Record<string, unknown>): Overlay {
-    const overlay = this.getRequired(id);
-    return this.setMetadata(id, {
-      ...(overlay.metadata ?? {}),
-      ...patch
-    });
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.merge-metadata", resources: ["overlays"] },
+      () => {
+        const overlay = this.getRequired(id);
+        return this.setMetadataInternal(id, {
+          ...(overlay.metadata ?? {}),
+          ...patch
+        });
+      }
+    );
   }
 
   findByEntity(entity: unknown): Overlay | undefined {
@@ -440,23 +541,45 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     snapshots: OverlaySnapshot[],
     options: OverlayLoadOptions = {}
   ): Promise<Overlay[]> {
-    const prepared = this.prepareSnapshots(snapshots);
-    if (options.clear) {
-      this.clear();
-    }
+    return runWithRuntimeLease(
+      this.map.concurrency,
+      {
+        kind: "overlays.load",
+        mode: "write",
+        resources: ["overlays"],
+        conflictPolicy: "reject",
+        ownerToken: getRuntimeLeaseOwner(options)
+      },
+      () => {
+        const prepared = this.prepareSnapshots(snapshots);
+        if (options.clear) {
+          this.clearInternal();
+        }
 
-    const restored = prepared.map((snapshot) => this.restoreSnapshot(snapshot));
-    this.emit("load", restored);
-    return restored;
+        const restored = prepared.map((snapshot) => this.restoreSnapshot(snapshot));
+        this.emit("load", restored);
+        return restored;
+      }
+    );
   }
 
   setStyleMany(ids: string[], style: ResultSymbolStyle): Overlay[] {
-    const overlays = ids.map((id) => this.getRequired(id));
-    return overlays.map((overlay) => this.setStyle(overlay.id, style));
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-style-many", resources: ["overlays"] },
+      () => {
+        const overlays = ids.map((id) => this.getRequired(id));
+        return overlays.map((overlay) => this.setStyleInternal(overlay.id, style));
+      }
+    );
   }
 
   setStyleWhere(options: OverlayQueryOptions, style: ResultSymbolStyle): Overlay[] {
-    return this.list(options).map((overlay) => this.setStyle(overlay.id, style));
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.set-style-where", resources: ["overlays"] },
+      () => this.list(options).map((overlay) => this.setStyleInternal(overlay.id, style))
+    );
   }
 
   validateSnapshots(snapshots: OverlaySnapshot[]): void {
@@ -464,13 +587,34 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   /** @internal */
-  async prepareSceneLoad(
+  preflightSceneLoad(
     snapshots: OverlaySnapshot[],
     options: OverlayLoadOptions = {}
+  ): object {
+    const token = Object.freeze({ phase: "overlays" });
+    this.scenePreflights.set(token, {
+      clear: options.clear ?? false,
+      prepared: this.prepareSnapshots(snapshots)
+    });
+    return token;
+  }
+
+  /** @internal */
+  async prepareSceneLoad(
+    snapshots: OverlaySnapshot[],
+    options: OverlayLoadOptions = {},
+    preflightToken?: object
   ): Promise<PreparedSceneStage> {
-    const prepared = this.prepareSnapshots(snapshots);
+    const clear = options.clear ?? false;
+    const token = preflightToken ?? this.preflightSceneLoad(snapshots, options);
+    const preflight = this.scenePreflights.get(token);
+    if (!preflight || preflight.clear !== clear) {
+      throw new Error("Overlay scene preflight token is invalid or stale.");
+    }
+    this.scenePreflights.delete(token);
+    const prepared = preflight.prepared;
     const staged = prepared.map((item) => this.createPreparedOverlay(item, false));
-    const previous = options.clear
+    const previous = clear
       ? this.list()
       : staged
           .map((overlay) => this.overlays.get(overlay.id))
@@ -533,7 +677,7 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
           for (const overlay of previous) {
             this.emit("remove", overlay);
           }
-          if (options.clear) {
+          if (clear) {
             this.emit("clear", previous);
           }
         }
@@ -546,6 +690,14 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   remove(id: string): boolean {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.remove", resources: ["overlays"] },
+      () => this.removeInternal(id)
+    );
+  }
+
+  private removeInternal(id: string): boolean {
     const overlay = this.overlays.get(id);
     if (!overlay) {
       return false;
@@ -558,11 +710,17 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   removeGroup(group: string): number {
-    const overlays = this.list({ group });
-    for (const overlay of overlays) {
-      this.remove(overlay.id);
-    }
-    return overlays.length;
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.remove-group", resources: ["overlays"] },
+      () => {
+        const overlays = this.list({ group });
+        for (const overlay of overlays) {
+          this.removeInternal(overlay.id);
+        }
+        return overlays.length;
+      }
+    );
   }
 
   clearGroup(group: string): number {
@@ -570,18 +728,37 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   }
 
   clear(): void {
+    runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.clear", resources: ["overlays"] },
+      () => this.clearInternal()
+    );
+  }
+
+  /** @internal */
+  clearWithRuntimeLease(ownerToken: RuntimeLeaseOwnerToken): void {
+    runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "overlays.clear", resources: ["overlays"], ownerToken },
+      () => this.clearInternal()
+    );
+  }
+
+  private clearInternal(): void {
     const removed = this.list();
     for (const overlay of removed) {
       removeEntityIfOwned(this.map.viewer.entities, overlay.entity);
-      this.emit("remove", overlay);
     }
 
     this.overlays.clear();
+    for (const overlay of removed) {
+      this.emit("remove", overlay);
+    }
     this.emit("clear", removed);
   }
 
   destroy(): void {
-    this.clear();
+    this.clearInternal();
     this.off();
   }
 
@@ -638,7 +815,8 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       validateOverlayShape(snapshot.id, snapshot.type, positions, data);
 
       return {
-        snapshot,
+        id: snapshot.id,
+        type: snapshot.type,
         positions,
         data,
         createdAt: parseSnapshotDate(snapshot.createdAt, "Overlay createdAt"),
@@ -660,7 +838,7 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
   private restoreSnapshot(prepared: PreparedOverlaySnapshot): Overlay {
     const overlay = this.createPreparedOverlay(prepared, true);
     if (this.overlays.has(overlay.id)) {
-      this.remove(overlay.id);
+      this.removeInternal(overlay.id);
     }
     this.overlays.set(overlay.id, overlay);
     this.emit("add", overlay);
@@ -672,7 +850,8 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
     attach: boolean
   ): Overlay {
     const {
-      snapshot,
+      id,
+      type,
       positions,
       data,
       style,
@@ -685,12 +864,12 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
       editable
     } = prepared;
     const overlay: Overlay = {
-      id: snapshot.id,
-      type: snapshot.type,
+      id,
+      type,
       entity: attach
         ? renderOverlayEntity(this.map, {
-            id: snapshot.id,
-            type: snapshot.type,
+            id,
+            type,
             positions,
             data,
             style,
@@ -698,8 +877,8 @@ export class OverlayManager extends Evented<OverlayManagerEvents> {
             show
           })
         : createOverlayEntity({
-            id: snapshot.id,
-            type: snapshot.type,
+            id,
+            type,
             positions,
             data,
             style,

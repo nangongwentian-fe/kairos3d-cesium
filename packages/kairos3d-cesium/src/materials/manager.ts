@@ -1,4 +1,6 @@
 import type { Material, MaterialProperty } from "cesium";
+import { runWithRuntimeWriteLease } from "../concurrency/lease";
+import { RuntimeConcurrencyManager } from "../concurrency/manager";
 import { builtInMaterialDefinitions } from "./builtins";
 import type {
   EntityMaterialDescriptor,
@@ -14,7 +16,9 @@ export class MaterialManager {
   private readonly builtInTypes = new Set<string>();
   private destroyed = false;
 
-  constructor() {
+  constructor(
+    private readonly concurrency: RuntimeConcurrencyManager = new RuntimeConcurrencyManager()
+  ) {
     for (const definition of builtInMaterialDefinitions) {
       this.definitions.set(definition.type, definition);
       this.builtInTypes.add(definition.type);
@@ -25,23 +29,35 @@ export class MaterialManager {
     definition: MaterialDefinition<TDescriptor>
   ): void {
     this.assertAlive();
-    validateDefinition(definition as unknown as MaterialDefinition);
-    if (this.definitions.has(definition.type)) {
-      throw new Error(`Material definition \"${definition.type}\" is already registered.`);
-    }
-    this.definitions.set(
-      definition.type,
-      cloneDefinition(definition as unknown as MaterialDefinition)
+    runWithRuntimeWriteLease(
+      this.concurrency,
+      { kind: "materials.register", resources: ["materials"] },
+      () => {
+        validateDefinition(definition as unknown as MaterialDefinition);
+        if (this.definitions.has(definition.type)) {
+          throw new Error(`Material definition \"${definition.type}\" is already registered.`);
+        }
+        this.definitions.set(
+          definition.type,
+          cloneDefinition(definition as unknown as MaterialDefinition)
+        );
+      }
     );
   }
 
   unregister(type: string): boolean {
     this.assertAlive();
-    assertType(type);
-    if (this.builtInTypes.has(type)) {
-      throw new Error(`Built-in material definition \"${type}\" cannot be unregistered.`);
-    }
-    return this.definitions.delete(type);
+    return runWithRuntimeWriteLease(
+      this.concurrency,
+      { kind: "materials.unregister", resources: ["materials"] },
+      () => {
+        assertType(type);
+        if (this.builtInTypes.has(type)) {
+          throw new Error(`Built-in material definition \"${type}\" cannot be unregistered.`);
+        }
+        return this.definitions.delete(type);
+      }
+    );
   }
 
   has(type: string): boolean {

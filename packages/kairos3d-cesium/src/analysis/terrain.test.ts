@@ -1,6 +1,7 @@
 import { Cartesian3, Entity } from "cesium";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { RuntimeConcurrencyManager } from "../concurrency";
 import {
   OperationCanceledError,
   OperationManager,
@@ -19,6 +20,7 @@ import type {
 
 function createMapMock() {
   return {
+    concurrency: new RuntimeConcurrencyManager(),
     viewer: {
       terrainProvider: {
         availability: undefined

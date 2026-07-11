@@ -1,4 +1,10 @@
 import { Cartesian3 } from "cesium";
+import {
+  getRuntimeLeaseOwner,
+  runWithRuntimeLease,
+  runWithRuntimeWriteLease,
+  type RuntimeLeaseOwnerToken
+} from "../concurrency/lease";
 import type { KairosMap } from "../core/map";
 import {
   deserializePosition,
@@ -45,6 +51,12 @@ interface PreparedEffect {
   updatedAt?: Date;
 }
 
+interface PreparedEffectSnapshot {
+  config: EffectConfig;
+  createdAt: Date;
+  updatedAt?: Date;
+}
+
 interface PreparedLoadResult {
   loaded: EffectInstance[];
   removed: EffectInstance[];
@@ -69,6 +81,10 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   private clearEpoch = 0;
   private stateRevision = 0;
   private destroyed = false;
+  private readonly scenePreflights = new WeakMap<
+    object,
+    { clear: boolean; prepared: PreparedEffectSnapshot[] }
+  >();
 
   constructor(private readonly map: KairosMap) {
     super();
@@ -84,26 +100,34 @@ export class EffectManager extends Evented<EffectManagerEvents> {
     }
     const normalized = this.normalizeConfig(config);
     this.validateConfig(normalized);
-    const operation = this.beginIdOperation(normalized.id);
-    let taskStarted = false;
     const promise = runOrReuseOperation(
       this.map.operations,
       { kind: "effects.add", label: `Add effect ${config.id}` },
       operationOptions,
       async (context) => {
-        taskStarted = true;
-        try {
-          return await this.addWithOperation(normalized, operation, context);
-        } finally {
-          this.pendingIds.delete(normalized.id);
-        }
+        return await runWithRuntimeLease(
+          this.map.concurrency,
+          {
+            kind: "effects.add",
+            mode: "write",
+            resources: ["effects"],
+            operationId: context.id,
+            signal: context.signal,
+            conflictPolicy: "reject",
+            ownerToken: getRuntimeLeaseOwner(operationOptions)
+          },
+          async () => {
+            this.assertActive();
+            const operation = this.beginIdOperation(normalized.id);
+            try {
+              return await this.addWithOperation(normalized, operation, context);
+            } finally {
+              this.pendingIds.delete(normalized.id);
+            }
+          }
+        );
       }
     );
-    void promise.catch(() => {
-      if (!taskStarted) {
-        this.pendingIds.delete(normalized.id);
-      }
-    });
     const result = await promise;
     this.emit("add", result);
     return result;
@@ -157,26 +181,39 @@ export class EffectManager extends Evented<EffectManagerEvents> {
       type: current.instance.type
     } as EffectConfig);
     this.validateConfig(config);
-    const operation = this.beginIdOperation(id);
-    let taskStarted = false;
     const promise = runOrReuseOperation(
       this.map.operations,
       { kind: "effects.update", label: `Update effect ${id}` },
       operationOptions,
       async (context) => {
-        taskStarted = true;
-        try {
-          return await this.updateWithOperation(current, config, operation, context);
-        } finally {
-          this.pendingIds.delete(id);
-        }
+        return await runWithRuntimeLease(
+          this.map.concurrency,
+          {
+            kind: "effects.update",
+            mode: "write",
+            resources: ["effects"],
+            operationId: context.id,
+            signal: context.signal,
+            conflictPolicy: "reject",
+            ownerToken: getRuntimeLeaseOwner(operationOptions)
+          },
+          async () => {
+            this.assertActive();
+            const operation = this.beginIdOperation(id);
+            try {
+              return await this.updateWithOperation(
+                current,
+                config,
+                operation,
+                context
+              );
+            } finally {
+              this.pendingIds.delete(id);
+            }
+          }
+        );
       }
     );
-    void promise.catch(() => {
-      if (!taskStarted) {
-        this.pendingIds.delete(id);
-      }
-    });
     const result = await promise;
     this.emit("update", result);
     return result;
@@ -253,6 +290,14 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   setShow(id: string, show: boolean): EffectInstance {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "effects.set-show", resources: ["effects"] },
+      () => this.setShowInternal(id, show)
+    );
+  }
+
+  private setShowInternal(id: string, show: boolean): EffectInstance {
     this.assertNoSceneLoad("change effect visibility");
     const managed = this.requireEffect(id);
     managed.runtime.setShow(show);
@@ -267,17 +312,33 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   setGroupShow(group: string, show: boolean): EffectInstance[] {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "effects.set-group-show", resources: ["effects"] },
+      () => this.setGroupShowInternal(group, show)
+    );
+  }
+
+  private setGroupShowInternal(group: string, show: boolean): EffectInstance[] {
     this.assertNoSceneLoad("change effect group visibility");
     const updated: EffectInstance[] = [];
     for (const managed of this.effects.values()) {
       if (managed.instance.group === group) {
-        updated.push(this.setShow(managed.instance.id, show));
+        updated.push(this.setShowInternal(managed.instance.id, show));
       }
     }
     return updated;
   }
 
   remove(id: string): boolean {
+    return runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "effects.remove", resources: ["effects"] },
+      () => this.removeInternal(id)
+    );
+  }
+
+  private removeInternal(id: string): boolean {
     this.assertNoSceneLoad(`remove effect "${id}"`);
     this.invalidateId(id);
     this.stateRevision += 1;
@@ -294,6 +355,23 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   clear(): void {
+    runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "effects.clear", resources: ["effects"] },
+      () => this.clearInternal()
+    );
+  }
+
+  /** @internal */
+  clearWithRuntimeLease(ownerToken: RuntimeLeaseOwnerToken): void {
+    runWithRuntimeWriteLease(
+      this.map.concurrency,
+      { kind: "effects.clear", resources: ["effects"], ownerToken },
+      () => this.clearInternal()
+    );
+  }
+
+  private clearInternal(): void {
     this.assertNoSceneLoad("clear effects");
     const removed = this.clearManagedEffects();
     this.emit("clear", removed);
@@ -330,40 +408,69 @@ export class EffectManager extends Evented<EffectManagerEvents> {
   }
 
   validateSnapshots(snapshots: EffectSnapshot[]): void {
+    this.prepareSnapshots(snapshots);
+  }
+
+  private prepareSnapshots(snapshots: EffectSnapshot[]): PreparedEffectSnapshot[] {
     if (!Array.isArray(snapshots)) {
       throw new Error("Effect snapshots must be an array.");
     }
     const ids = new Set<string>();
-    for (const snapshot of snapshots) {
+    return snapshots.map((snapshot) => {
       if (ids.has(snapshot.id)) {
         throw new Error(`Effect snapshot id "${snapshot.id}" is duplicated.`);
       }
       ids.add(snapshot.id);
-      parseSnapshotDate(snapshot.createdAt, "Effect createdAt");
-      if (snapshot.updatedAt) {
-        parseSnapshotDate(snapshot.updatedAt, "Effect updatedAt");
-      }
+      const createdAt = parseSnapshotDate(snapshot.createdAt, "Effect createdAt");
+      const updatedAt = snapshot.updatedAt
+        ? parseSnapshotDate(snapshot.updatedAt, "Effect updatedAt")
+        : undefined;
       assertJSONSafe(snapshot, `Effect snapshot "${snapshot.id}"`);
-      this.validateConfig(deserializeSnapshotConfig(snapshot));
+      const config = this.normalizeConfig(deserializeSnapshotConfig(snapshot));
+      this.validateConfig(config);
+      return { config, createdAt, updatedAt };
+    });
+  }
+
+  /** @internal */
+  preflightSceneLoad(
+    snapshots: EffectSnapshot[],
+    options: { clear?: boolean } = {}
+  ): object {
+    this.assertActive();
+    this.assertSceneLoadAvailable();
+    const prepared = this.prepareSnapshots(snapshots);
+    if (!options.clear) {
+      for (const item of prepared) {
+        if (this.effects.has(item.config.id)) {
+          throw new Error(`Effect "${item.config.id}" already exists.`);
+        }
+      }
     }
+    const token = Object.freeze({ phase: "effects" });
+    this.scenePreflights.set(token, {
+      clear: options.clear ?? false,
+      prepared
+    });
+    return token;
   }
 
   /** @internal */
   async prepareSceneLoad(
     snapshots: EffectSnapshot[],
-    options: { clear?: boolean } = {}
+    options: { clear?: boolean } = {},
+    preflightToken?: object
   ): Promise<PreparedSceneStage> {
-    this.assertActive();
-    this.assertSceneLoadAvailable();
-    this.validateSnapshots(snapshots);
     const clear = options.clear ?? false;
-    if (!clear) {
-      for (const snapshot of snapshots) {
-        if (this.effects.has(snapshot.id)) {
-          throw new Error(`Effect "${snapshot.id}" already exists.`);
-        }
-      }
+    const preflightTokenValue = preflightToken ?? this.preflightSceneLoad(
+      snapshots,
+      options
+    );
+    const preflight = this.scenePreflights.get(preflightTokenValue);
+    if (!preflight || preflight.clear !== clear) {
+      throw new Error("Effect scene preflight token is invalid or stale.");
     }
+    this.scenePreflights.delete(preflightTokenValue);
 
     const revision = this.stateRevision;
     const epoch = this.clearEpoch;
@@ -377,15 +484,12 @@ export class EffectManager extends Evented<EffectManagerEvents> {
 
     const prepared: PreparedEffect[] = [];
     try {
-      for (const snapshot of snapshots) {
-        const config = this.normalizeConfig(deserializeSnapshotConfig(snapshot));
+      for (const item of preflight.prepared) {
         prepared.push({
-          config,
-          runtime: await this.prepareRuntime(config),
-          createdAt: parseSnapshotDate(snapshot.createdAt, "Effect createdAt"),
-          updatedAt: snapshot.updatedAt
-            ? parseSnapshotDate(snapshot.updatedAt, "Effect updatedAt")
-            : undefined
+          config: item.config,
+          runtime: await this.prepareRuntime(item.config),
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt
         });
         this.assertSceneLoadCurrent(revision, epoch, token);
       }
@@ -584,32 +688,40 @@ export class EffectManager extends Evented<EffectManagerEvents> {
 
     const revision = this.stateRevision;
     const epoch = this.clearEpoch;
-    this.loadPending = true;
-    let taskStarted = false;
     const promise = runOrReuseOperation(
       this.map.operations,
       { kind: "effects.load", label: "Load effects" },
       options,
       async (context) => {
-        taskStarted = true;
-        try {
-          return await this.loadWithOperation(
-            snapshots,
-            options,
-            revision,
-            epoch,
-            context
-          );
-        } finally {
-          this.loadPending = false;
-        }
+        return await runWithRuntimeLease(
+          this.map.concurrency,
+          {
+            kind: "effects.load",
+            mode: "write",
+            resources: ["effects"],
+            operationId: context.id,
+            signal: context.signal,
+            conflictPolicy: "reject",
+            ownerToken: getRuntimeLeaseOwner(options)
+          },
+          async () => {
+            this.assertActive();
+            this.loadPending = true;
+            try {
+              return await this.loadWithOperation(
+                snapshots,
+                options,
+                revision,
+                epoch,
+                context
+              );
+            } finally {
+              this.loadPending = false;
+            }
+          }
+        );
       }
     );
-    void promise.catch(() => {
-      if (!taskStarted) {
-        this.loadPending = false;
-      }
-    });
     const result = await promise;
     if (options.clear) {
       this.emit("clear", result.removed);

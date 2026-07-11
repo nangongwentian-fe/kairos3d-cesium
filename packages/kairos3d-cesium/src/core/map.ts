@@ -1,5 +1,7 @@
 import type { Viewer } from "cesium";
 import { AnalysisManager } from "../analysis/manager";
+import { RuntimeConcurrencyManager } from "../concurrency";
+import { destroyRuntimeConcurrency } from "../concurrency/lease";
 import { DrawManager } from "../draw/manager";
 import { EffectManager } from "../effects";
 import { HeightManager } from "../height";
@@ -45,6 +47,7 @@ export class KairosMap extends Evented<KairosMapEvents> {
   readonly primitives: PrimitiveOverlayManager;
   readonly overlays: OverlayManager;
   readonly operations: OperationManager;
+  readonly concurrency: RuntimeConcurrencyManager;
 
   private destroyed = false;
   private destroyCompleted = false;
@@ -52,9 +55,10 @@ export class KairosMap extends Evented<KairosMapEvents> {
   constructor(viewer: Viewer) {
     super();
     this.viewer = viewer;
+    this.concurrency = new RuntimeConcurrencyManager();
     this.operations = new OperationManager();
     this.styles = new StyleManager();
-    this.materials = new MaterialManager();
+    this.materials = new MaterialManager(this.concurrency);
     this.effects = new EffectManager(this);
     this.height = new HeightManager(this);
     this.layers = new LayerManager(this);
@@ -81,12 +85,17 @@ export class KairosMap extends Evented<KairosMapEvents> {
 
     this.destroyed = true;
     this.operations.destroy();
+    destroyRuntimeConcurrency(this.concurrency);
     const sceneCleanup = this.sceneState.destroyAndWait();
+    const pendingCleanup: Promise<unknown>[] = [];
     if (sceneCleanup) {
-      void sceneCleanup.then(
-        () => this.finishDestroy(),
-        () => this.finishDestroy()
-      );
+      pendingCleanup.push(sceneCleanup);
+    }
+    if (this.concurrency.isBusy()) {
+      pendingCleanup.push(this.concurrency.whenIdle());
+    }
+    if (pendingCleanup.length > 0) {
+      void Promise.allSettled(pendingCleanup).then(() => this.finishDestroy());
       return;
     }
     this.finishDestroy();

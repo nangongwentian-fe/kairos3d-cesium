@@ -161,6 +161,7 @@ export type LayerConfig =
   | GltfLayerConfig;
 
 export interface LayerTransactionHooks {
+  preflight?(map: KairosMap): void | Promise<void>;
   prepare(map: KairosMap): void | Promise<void>;
   attach(map: KairosMap): void | Promise<void>;
   detach(map: KairosMap): void | Promise<void>;

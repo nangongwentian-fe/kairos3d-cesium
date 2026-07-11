@@ -102,6 +102,11 @@
       "types": "./dist/operations/index.d.ts",
       "import": "./dist/operations/index.js",
       "require": "./dist/operations/index.cjs"
+    },
+    "./concurrency": {
+      "types": "./dist/concurrency/index.d.ts",
+      "import": "./dist/concurrency/index.js",
+      "require": "./dist/concurrency/index.cjs"
     }
   },
   "files": ["dist", "README.md"],

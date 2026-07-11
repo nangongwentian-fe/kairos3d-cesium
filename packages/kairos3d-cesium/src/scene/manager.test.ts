@@ -1,6 +1,7 @@
 import { Cartographic } from "cesium";
 import { describe, expect, it, vi } from "vitest";
 import type { KairosMap } from "../core";
+import { RuntimeConcurrencyManager } from "../concurrency";
 import type { EffectLoadOptions, EffectSnapshot } from "../effects";
 import type { LayerConfig, LayerLoadOptions } from "../layers";
 import { OperationCanceledError, OperationManager } from "../operations";
@@ -46,6 +47,7 @@ function createMapMock() {
   };
 
   return {
+    concurrency: new RuntimeConcurrencyManager(),
     operations,
     viewer: {
       camera
@@ -110,7 +112,9 @@ function createMapMock() {
       ),
       clear: vi.fn(),
       validateSnapshots: vi.fn()
-    }
+    },
+    tools: { stopWithRuntimeLease: vi.fn() },
+    selection: { clearWithRuntimeLease: vi.fn() }
   } as unknown as KairosMap;
 }
 
@@ -327,9 +331,15 @@ describe("SceneStateManager", () => {
       flyToCamera: false
     });
 
-    expect(map.draw.clear).toHaveBeenCalledOnce();
-    expect(map.analysis.measure.clear).toHaveBeenCalledOnce();
-    expect(map.draw.load).toHaveBeenCalledWith([], { clear: false });
+    expect(map.tools.stopWithRuntimeLease).toHaveBeenCalledOnce();
+    expect(map.selection.clearWithRuntimeLease).toHaveBeenCalledOnce();
+
+    expect(map.draw.clear).not.toHaveBeenCalled();
+    expect(map.analysis.measure.clear).not.toHaveBeenCalled();
+    expect(map.draw.load).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ clear: true })
+    );
     expect(map.analysis.load).toHaveBeenCalledWith(
       {
         measure: [],
@@ -338,7 +348,7 @@ describe("SceneStateManager", () => {
         clipping: [],
         terrain: []
       },
-      { clear: false }
+      expect.objectContaining({ clear: true })
     );
   });
 
@@ -359,8 +369,11 @@ describe("SceneStateManager", () => {
       flyToCamera: false
     });
 
-    expect(map.primitives.clear).toHaveBeenCalledOnce();
-    expect(map.primitives.load).toHaveBeenCalledWith([], { clear: false });
+    expect(map.primitives.clear).not.toHaveBeenCalled();
+    expect(map.primitives.load).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ clear: true })
+    );
   });
 
   it("restores entity overlays when requested", async () => {
@@ -381,8 +394,11 @@ describe("SceneStateManager", () => {
     });
 
     expect(map.overlays.validateSnapshots).toHaveBeenCalledWith([]);
-    expect(map.overlays.clear).toHaveBeenCalledOnce();
-    expect(map.overlays.load).toHaveBeenCalledWith([], { clear: false });
+    expect(map.overlays.clear).not.toHaveBeenCalled();
+    expect(map.overlays.load).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ clear: true })
+    );
   });
 
   it("validates entity overlays before clearing existing overlays", async () => {
@@ -479,9 +495,12 @@ describe("SceneStateManager", () => {
       flyToCamera: false
     });
 
-    expect(map.effects.clear).toHaveBeenCalledOnce();
+    expect(map.effects.clear).not.toHaveBeenCalled();
     expect(map.effects.validateSnapshots).not.toHaveBeenCalled();
-    expect(map.effects.load).not.toHaveBeenCalled();
+    expect(map.effects.load).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ clear: true })
+    );
   });
 
   it("tracks scene loading as one operation with scoped stage progress", async () => {
