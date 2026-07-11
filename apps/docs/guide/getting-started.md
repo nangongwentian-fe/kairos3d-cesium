@@ -1,32 +1,24 @@
 # Getting Started
 
-This page covers the shortest path for installing dependencies, running the example app, and building the workspace.
+This page covers the shortest path for installing the SDK and creating a Cesium map.
 
 ## Common Path
 
 ```powershell
-pnpm install
-pnpm dev:examples
+pnpm add @kairos3d/cesium cesium
 ```
 
-Start the docs site in a separate terminal when needed:
-
-```powershell
-pnpm dev:docs
-```
-
-## Verification
-
-| Command | Expected result |
-| --- | --- |
-| `pnpm build` | SDK, examples, and docs build successfully. |
-| `pnpm typecheck` | All workspace TypeScript checks pass. |
-| `pnpm test` | SDK unit tests pass. |
-
-## Package Usage
+Import Cesium widget CSS in the application entrypoint:
 
 ```ts
-import { Cartesian3 } from "cesium";
+import "cesium/Build/Cesium/Widgets/widgets.css";
+```
+
+The consuming application must also serve Cesium `Workers`, `Assets`, `Widgets`, and `ThirdParty` files and define `CESIUM_BASE_URL` for its bundler.
+
+## Minimal Map
+
+```ts
 import { createMap } from "@kairos3d/cesium/core";
 
 const map = await createMap({
@@ -46,6 +38,14 @@ const map = await createMap({
 map.tools.on("complete", (event) => {
   console.log(event.data);
 });
+```
+
+The following sections show the main manager APIs. Each manager owns the Cesium runtime objects it creates and cleans them when the result, layer, or map is destroyed.
+
+## Package Usage
+
+```ts
+import { Cartesian3 } from "cesium";
 
 map.styles.setDefaults({
   draw: {

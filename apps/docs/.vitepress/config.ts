@@ -7,9 +7,7 @@ export default defineConfig({
     nav: [
       { text: "Guide", link: "/guide/getting-started" },
       { text: "Architecture", link: "/guide/architecture" },
-      { text: "Status", link: "/guide/first-version-status" },
-      { text: "Roadmap", link: "/guide/roadmap" },
-      { text: "Release", link: "/guide/release-prep" }
+      { text: "Operations", link: "/guide/operations" }
     ],
     sidebar: [
       {
@@ -17,11 +15,9 @@ export default defineConfig({
         items: [
           { text: "Getting Started", link: "/guide/getting-started" },
           { text: "Operations And Loading", link: "/guide/operations" },
+          { text: "Runtime Concurrency", link: "/guide/runtime-concurrency" },
           { text: "Scene Transactions", link: "/guide/scene-transactions" },
-          { text: "Architecture", link: "/guide/architecture" },
-          { text: "First Version Status", link: "/guide/first-version-status" },
-          { text: "Roadmap", link: "/guide/roadmap" },
-          { text: "Release Preparation", link: "/guide/release-prep" }
+          { text: "Architecture", link: "/guide/architecture" }
         ]
       }
     ]

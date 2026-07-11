@@ -80,6 +80,16 @@ Existing return values are unchanged. APIs with an existing options object accep
 - Interactive visibility, profile, and terrain tools abort their in-flight compute work when the tool stops or is canceled.
 - `map.destroy()` cancels operations before destroying the remaining managers and suppresses late operation events.
 
+An Operation and a mutation lease describe different facts:
+
+| Operation | Mutation lease |
+| --- | --- |
+| The public task status and progress. | Whether an SDK runtime resource is still reserved. |
+| Cancellation marks the record immediately. | Release waits for late Cesium work and temporary-runtime cleanup. |
+| Finished records are retained for diagnostics. | Released leases disappear from `map.concurrency`. |
+
+Use `await map.concurrency.whenIdle({ resource })` when cleanup completion matters. See [Runtime Concurrency](./runtime-concurrency.md).
+
 ## Scene Loading Modes
 
 | Mode | Behavior |
@@ -97,16 +107,8 @@ Transactional rollback state is not written back into the already-finished `Oper
 - Operations are not serialized into `SceneSnapshot`, `map.results`, picking, selection, or layer ownership.
 - Worker scheduling and Operations/Transaction Widgets are outside Core.
 
-## Verification
-
-```powershell
-pnpm --filter @kairos3d/cesium typecheck
-pnpm --filter @kairos3d/cesium test
-pnpm --filter @kairos3d/cesium build
-```
-
 ## Related Docs
 
 - [Architecture](./architecture.md)
 - [Transactional Scene Recovery](./scene-transactions.md)
-- [Roadmap](./roadmap.md)
+- [Runtime Concurrency](./runtime-concurrency.md)

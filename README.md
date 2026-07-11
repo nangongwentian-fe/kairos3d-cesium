@@ -31,11 +31,8 @@ pnpm dev:docs
 | `pnpm typecheck` | Runs TypeScript checks across all workspaces. |
 | `pnpm test` | Runs SDK unit tests. |
 | `pnpm lint` | Runs the current lightweight lint check, backed by TypeScript. |
-| `pnpm verify` | Runs typecheck, tests, lint, and build in order. |
-| `pnpm verify:runtime` | Starts a short-lived examples dev server and runs the browser runtime smoke check. |
-| `pnpm release:check` | Runs the full non-publishing release verification and SDK pack dry run. |
 
-`pnpm verify:runtime` requires a local Chromium-based browser. Set `CHROME_PATH` if Chrome is not in a standard location. Pass `-- --require-token` when the check must fail unless `apps/examples/.env` provides `VITE_CESIUM_ION_TOKEN`.
+See [Development Workflow](.agents/docs/development-workflow.md) for package-level checks, runtime verification, release checks, and temporary server cleanup.
 
 ## Project Layout
 
@@ -50,6 +47,17 @@ Kairos3DCesium/
 |-- pnpm-workspace.yaml
 `-- tsconfig.base.json
 ```
+
+## Project Direction
+
+| Document | Purpose |
+| --- | --- |
+| [Internal Documentation](.agents/docs/README.md) | Project status, architecture decisions, workflows, milestones, and archived goals. |
+| [Project Status](.agents/docs/project-status.md) | Current capabilities, engineering maturity assessment, and known gaps. |
+| [Roadmap](.agents/docs/roadmap.md) | Current milestone order from M12 through later product work. |
+| [Primitive Renderer V2](.agents/docs/milestones/m12-primitive-renderer-v2.md) | Detailed M12 scope, architecture, exclusions, and acceptance criteria. |
+
+M12 is the next planned milestone. An execution Goal contract should be created when implementation starts so the durable design document does not duplicate task-specific progress state.
 
 ## Cesium Asset Rule
 
@@ -73,6 +81,7 @@ The SDK is organized as small TypeScript modules instead of a global platform ob
 | `@kairos3d/cesium/materials` | Public-API material registry and factories for Entity properties and Primitive fabric materials. |
 | `@kairos3d/cesium/effects` | SDK-managed geometry, particle, and weather effects with lifecycle and snapshot support. |
 | `@kairos3d/cesium/operations` | Runtime operation status, progress, cancellation, and structured failure diagnostics. |
+| `@kairos3d/cesium/concurrency` | Observable mutation leases, resource conflicts, and runtime idle waits. |
 | `@kairos3d/cesium/style` | Shared symbol styles, style defaults, presets, and JSON-safe color serialization. |
 | `@kairos3d/cesium/height` | Height modes, terrain sampling, clamp-to-ground helpers, and surface distance helpers. |
 | `@kairos3d/cesium/results` | Aggregated SDK-managed result listing, lookup, removal, clearing, and result events. |
@@ -309,6 +318,26 @@ try {
 
 Cancellation prevents late scene commits where the underlying Cesium promise cannot be aborted. A canceled transactional scene load rejects immediately, while `map.sceneState.whenIdle()` waits for background rollback to finish. See [Operations And Loading](apps/docs/guide/operations.md) and [Transactional Scene Recovery](apps/docs/guide/scene-transactions.md).
 
+## Runtime Concurrency
+
+Ordinary manager mutations use resource write leases. Scene recovery uses one scene-wide exclusive lease in both transactional and progressive modes.
+
+```ts
+import { RuntimeMutationConflictError } from "@kairos3d/cesium/concurrency";
+
+map.concurrency.on("change", (event) => {
+  console.log(event.data.leases);
+});
+
+await map.sceneState.load(snapshot, {
+  conflictPolicy: "wait"
+});
+
+await map.concurrency.whenIdle({ resource: "effects" });
+```
+
+`conflictPolicy: "wait"` is the Scene default. A waiting Scene reservation blocks later ordinary mutations; those mutations throw `RuntimeMutationConflictError`. Operations can report cancellation before uninterruptible Cesium work finishes, so the associated lease remains active until temporary runtime cleanup completes. See [Runtime Concurrency](apps/docs/guide/runtime-concurrency.md).
+
 ## Scene State
 
 Scene state stores `camera + layers + bookmarks` by default. It can also include SDK-managed results, primitive overlays, and effects when a business app needs to save a complete working scene.
@@ -375,7 +404,7 @@ map.results.clear({ source: ["measure", "visibility"] });
 
 ## Performance And Primitive Planning
 
-`map.performance` provides runtime stats for SDK-managed results, viewer entities, result Primitive runtimes, layer runtime objects, effects, effect runtime objects, animated effects, active operations, failed operations, and simple budget warnings. The operation fields are exposed as `activeOperationCount` and `failedOperationCount`. It does not replace renderers by itself; it identifies where a Primitive renderer is likely to matter.
+`map.performance` provides runtime stats for SDK-managed results, viewer entities, result Primitive runtimes, layer runtime objects, effects, operations, mutation leases, and simple budget warnings. Concurrency is exposed as `activeMutationLeaseCount` and `waitingMutationLeaseCount`. It does not replace renderers by itself; it identifies where a Primitive renderer is likely to matter.
 
 ```ts
 map.performance.setBudget({
@@ -412,7 +441,3 @@ map.primitives.load(primitiveState, { clear: true });
 ```
 
 Primitive overlays are runtime graphics, not draw results. Draw polyline/polygon and distance/area measurement can also opt into Primitive-backed result rendering with `renderMode: "primitive"`; those result primitives are owned by their result manager rather than `map.primitives`. Primitive overlays have their own data-only snapshot API and can participate in scene snapshots with `includePrimitives: true`.
-
-`references/SRC` and `references/mars3d-sdk-2.2` are migration references. Port algorithms feature by feature, but keep the new SDK free of global mutation, hardcoded tokens, legacy Cesium APIs, and DOM widget assumptions.
-
-When choosing between adding more feature types and strengthening shared foundations, prefer the foundation first. Stable layer, tool, draw, and result contracts make later complex examples easier to build and verify.

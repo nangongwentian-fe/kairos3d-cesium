@@ -11,6 +11,7 @@ Use this page when loading a complete `SceneSnapshot`, handling cancellation, or
 | Compatibility mode | `progressive` retains phase-by-phase M9 behavior. |
 | Cancellation | The load promise rejects immediately; rollback may continue in the background. |
 | Stable-state wait | `await map.sceneState.whenIdle()`. |
+| Runtime exclusivity | One scene-wide lease covers waiting, preflight, prepare, commit, rollback, finalize, and cleanup. |
 | Transaction scope | SDK-managed runtime with transaction staging support. |
 
 ## Common Path
@@ -35,6 +36,7 @@ const off = map.sceneState.on("transaction-change", (event) => {
 try {
   await map.sceneState.load(snapshot, {
     mode: "transactional",
+    conflictPolicy: "wait",
     clearLayers: true,
     restoreResults: true,
     clearResults: true,
@@ -63,6 +65,8 @@ try {
 
 `mode: "transactional"` is shown explicitly for readability; omitting `mode` has the same behavior.
 
+`conflictPolicy: "wait"` is also the default. Use `"reject"` when the caller must fail immediately if another mutation holds a conflicting lease. A waiting Scene reservation rejects new ordinary mutations so existing work can drain without starving the Scene load.
+
 ## Snapshot Validation
 
 `parseSceneSnapshot(input)` performs data-only validation before scene mutation:
@@ -82,8 +86,9 @@ There is no v1→v2 migration. The version should change only when an actual inc
 
 ```mermaid
 flowchart LR
-    Input["SceneSnapshot v1"] --> Validate["Validate all sections"]
-    Validate --> Prepare["Prepare detached runtime"]
+    Input["SceneSnapshot v1"] --> Validate["Validate envelope"]
+    Validate --> Preflight["Preflight all sections"]
+    Preflight --> Prepare["Prepare detached runtime"]
     Prepare --> Commit["Detach old and attach new"]
     Commit -->|"Success"| Finalize["Destroy old runtime"]
     Prepare -->|"Failure or cancel"| Dispose["Destroy staged runtime"]
@@ -93,13 +98,16 @@ flowchart LR
 
 | Phase | What changes in the Viewer |
 | --- | --- |
-| Validate | Nothing. The complete input is checked first. |
+| Validate | Nothing. The v1 envelope is parsed and deep-cloned. |
+| Preflight | Nothing. All built-in sections are parsed and validated before any Cesium runtime is created. |
 | Prepare | New SDK runtime is created but remains detached; manager indexes stay unchanged. |
 | Commit | Old runtime is detached, new runtime is attached, and manager indexes switch. |
 | Finalize | Old runtime is destroyed only after every commit stage succeeds. |
 | Rollback | New runtime is detached, original runtime objects are reattached, then staged runtime is destroyed. |
 
 The camera commits last. Commit start stops the active Tool and clears Selection; these transient interaction states are not part of rollback.
+
+Finalize destroys original runtime after commit. Finalize is best-effort: one cleanup failure does not roll back an already committed scene, and later cleanup steps continue. Observe `cleanupStatus` and `cleanupErrors` on `SceneTransactionState` for diagnostics. `whenIdle()` waits for finalize, disposal, rollback, and lease release.
 
 ## Cancellation And Idle State
 
@@ -146,6 +154,7 @@ Transactional scene recovery requires detached lifecycle hooks:
 
 ```ts
 interface LayerTransactionHooks {
+  preflight?(map: KairosMap): void | Promise<void>;
   prepare(map: KairosMap): void | Promise<void>;
   attach(map: KairosMap): void | Promise<void>;
   detach(map: KairosMap): void | Promise<void>;
@@ -156,7 +165,7 @@ interface LayerAdapter {
 }
 ```
 
-Default `xyz`, `wms`, `wmts`, `terrain`, `3dtiles`, `geojson`, and `gltf` adapters support this contract. A custom adapter without hooks fails transactional validation before scene mutation; its existing `addTo()` behavior remains usable through progressive mode.
+Default `xyz`, `wms`, `wmts`, `terrain`, `3dtiles`, `geojson`, and `gltf` adapters support this contract. A custom adapter without hooks fails transactional validation before scene mutation; its existing `addTo()` behavior remains usable through progressive mode. Custom hooks may omit `preflight()`, but then Core can only clean a failed prepare; it cannot guarantee that the custom adapter created no temporary runtime during its own validation.
 
 `detach()` must remove runtime from Cesium collections without destroying it. `destroy()` must safely clean prepared, attached, or detached state.
 
@@ -173,5 +182,5 @@ Default `xyz`, `wms`, `wmts`, `terrain`, `3dtiles`, `geojson`, and `gltf` adapte
 ## Related Docs
 
 - [Operations And Loading](./operations.md)
+- [Runtime Concurrency](./runtime-concurrency.md)
 - [Architecture](./architecture.md)
-- [Roadmap](./roadmap.md)
